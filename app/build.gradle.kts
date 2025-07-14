@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
 android {
@@ -39,10 +40,6 @@ android {
     buildFeatures {
         compose = true
     }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.3"
-    }
 }
 
 dependencies {
@@ -53,6 +50,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.2.1")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.6")
     debugImplementation("androidx.compose.ui:ui-tooling:1.6.6")
+    implementation("androidx.compose.compiler:compiler:1.5.12")
 
     // Lifecycle & ViewModel
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.1")
