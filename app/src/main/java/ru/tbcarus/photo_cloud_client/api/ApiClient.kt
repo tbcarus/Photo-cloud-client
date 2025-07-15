@@ -1,14 +1,24 @@
-package ru.tbcarus.photo_cloud_client.api;
+package ru.tbcarus.photo_cloud_client.api
 
-import retrofit2.Retrofit;
-import retrofit2.converter.gson.GsonConverterFactory;
+import okhttp3.OkHttpClient
+import okhttp3.logging.HttpLoggingInterceptor
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
 
-public class ApiClient {
-    public static Retrofit getClient(String baseUrl) {
-        return new Retrofit.Builder()
-                .baseUrl(baseUrl)
-                .addConverterFactory(GsonConverterFactory.create())
-                .build();
+object ApiClient {
+    fun getClient(baseUrl: String): Retrofit {
+        val logging = HttpLoggingInterceptor().apply {
+            level = HttpLoggingInterceptor.Level.BODY
+        }
+
+        val client = OkHttpClient.Builder()
+            .addInterceptor(logging)
+            .build()
+
+        return Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .addConverterFactory(GsonConverterFactory.create())
+            .client(client)
+            .build()
     }
 }
-
