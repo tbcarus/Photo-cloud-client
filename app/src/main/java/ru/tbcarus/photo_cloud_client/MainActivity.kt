@@ -38,7 +38,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-//fun testConnection(baseUrl: String, context: android.content.Context) {
 fun testConnection(ip: String, port: String, context: Context) {
     if (!isValidIp(ip)) {
         Toast.makeText(context, "Введите корректный IP-адрес", Toast.LENGTH_SHORT).show()
@@ -84,7 +83,13 @@ private fun isValidPort(port: String): Boolean {
     return port.toIntOrNull()?.let { it in 1..65535 } == true
 }
 
-fun register(baseUrl: String, email: String, password: String, context: android.content.Context) {
+fun register(baseUrl: String,
+             email: String,
+             password: String,
+             context: Context,
+             onError: (String) -> Unit,
+             onSuccess: (String) -> Unit) {
+
     val api = ApiClient.getClient(baseUrl).create(AuthService::class.java)
     val request = AuthRequest(email, password)
 
@@ -95,16 +100,10 @@ fun register(baseUrl: String, email: String, password: String, context: android.
         ) {
             if (response.isSuccessful) {
                 val message = response.body()?.get("message") ?: "Успешно зарегистрирован"
-                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                onSuccess(message)
             } else {
-                val errorBody = response.errorBody()?.string()
-                val error = try {
-                    Gson().fromJson(errorBody, ErrorResponse::class.java)
-                } catch (e: Exception) {
-                    null
-                }
-                val msg = error?.message ?: "Ошибка регистрации: ${response.code()}"
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                val errorJson = response.errorBody()?.string()
+                onError("Ошибка регистрации: $errorJson")
             }
         }
 
@@ -123,6 +122,8 @@ fun LoginScreen() {
     var port by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val baseUrl = remember(ip, port) {
         "http://${ip}:${port}/"
@@ -147,7 +148,11 @@ fun LoginScreen() {
 
         Row {
             Button(onClick = {
-                register(baseUrl, email, password, context)
+                register(baseUrl, email, password, context,
+                    onError = { errorMessage = it },
+                    onSuccess = {
+                        Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                    })
             }) {
                 Text("Register")
             }
@@ -162,4 +167,24 @@ fun LoginScreen() {
         Spacer(modifier = Modifier.height(32.dp))
         Text("v0.0.1")
     }
+
+    errorMessage?.let {
+        showErrorDialog(message = it) {
+            errorMessage = null
+        }
+    }
+}
+
+@Composable
+fun showErrorDialog(message: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ОК")
+            }
+        },
+        title = { Text("Ошибка") },
+        text = { Text(message) }
+    )
 }
