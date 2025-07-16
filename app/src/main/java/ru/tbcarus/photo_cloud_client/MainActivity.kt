@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client
 
+import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -37,7 +38,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-fun testConnection(baseUrl: String, context: android.content.Context) {
+//fun testConnection(baseUrl: String, context: android.content.Context) {
+fun testConnection(ip: String, port: String, context: Context) {
+    if (!isValidIp(ip)) {
+        Toast.makeText(context, "Введите корректный IP-адрес", Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (!isValidPort(port)) {
+        Toast.makeText(context, "Введите корректный порт (1–65535)", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    val baseUrl = "http://$ip:$port/"
     val api = ApiClient.getClient(baseUrl).create(AuthService::class.java)
     api.testServer().enqueue(object : Callback<TestResponse> {
         override fun onResponse(
@@ -48,7 +60,11 @@ fun testConnection(baseUrl: String, context: android.content.Context) {
                 val message = response.body()?.message ?: "Success"
                 Toast.makeText(context, "Успешно: $message", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(context, "Ошибка подключения: ${response.code()}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    context,
+                    "Ошибка подключения: ${response.code()}",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
 
@@ -56,6 +72,16 @@ fun testConnection(baseUrl: String, context: android.content.Context) {
             Toast.makeText(context, "Ошибка подключения: ${t.message}", Toast.LENGTH_LONG).show()
         }
     })
+}
+
+private fun isValidIp(ip: String): Boolean {
+    val ipRegex =
+        Regex("^((25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)(\\.|$)){4}\$")
+    return ipRegex.matches(ip)
+}
+
+private fun isValidPort(port: String): Boolean {
+    return port.toIntOrNull()?.let { it in 1..65535 } == true
 }
 
 fun register(baseUrl: String, email: String, password: String, context: android.content.Context) {
@@ -106,7 +132,7 @@ fun LoginScreen() {
         Text("Server Config", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(value = ip, onValueChange = { ip = it }, label = { Text("IP Address") })
         OutlinedTextField(value = port, onValueChange = { port = it }, label = { Text("Port") })
-        Button(onClick = { testConnection(baseUrl, context) }) {
+        Button(onClick = { testConnection(ip, port, context) }) {
             Text("Test")
         }
 
@@ -114,7 +140,10 @@ fun LoginScreen() {
         Text("Auth", style = MaterialTheme.typography.titleMedium)
 
         OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email") })
-        OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Password") })
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Password") })
 
         Row {
             Button(onClick = {
