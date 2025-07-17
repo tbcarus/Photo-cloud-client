@@ -2,7 +2,6 @@ package ru.tbcarus.photo_cloud_client.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.Circle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -12,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.*
 import ru.tbcarus.photo_cloud_client.ui.screens.*
+import ru.tbcarus.photo_cloud_client.ui.screens.NetworkScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
