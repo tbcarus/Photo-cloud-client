@@ -5,5 +5,5 @@ import androidx.compose.runtime.Composable
 
 @Composable
 fun ProfileScreen() {
-    Text("Profile Screen")
+    CenteredText("Profile")
 }

@@ -5,5 +5,5 @@ import androidx.compose.runtime.Composable
 
 @Composable
 fun FilesScreen() {
-    Text("Files Screen")
+    CenteredText("Files")
 }
