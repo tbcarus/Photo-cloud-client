@@ -23,10 +23,11 @@ import androidx.navigation.compose.rememberNavController
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavItem
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
+import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen() {
+fun MainScreen(networkViewModel: NetworkViewModel) {
     val navController = rememberNavController()
     val navItems = listOf(
         BottomNavItem("Network", Icons.Default.Wifi, "network"),
@@ -55,7 +56,7 @@ fun MainScreen() {
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { innerPadding  ->
         Box(modifier = Modifier.padding(innerPadding)) {
-            NavigationGraph(navController = navController)
+            NavigationGraph(navController = navController, networkViewModel = networkViewModel)
         }
     }
 }

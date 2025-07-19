@@ -19,11 +19,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
-import ru.tbcarus.photo_cloud_client.ui.components.showErrorDialog
+import ru.tbcarus.photo_cloud_client.ui.components.showDialog
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
+import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModelFactory
 
 @Composable
-fun NetworkScreen(viewModel: NetworkViewModel = viewModel()) {
+fun NetworkScreen(viewModel: NetworkViewModel = viewModel(factory = NetworkViewModelFactory())) {
     val uiState by viewModel.uiState.collectAsState()
 
     val animatedColor by animateColorAsState(
@@ -58,7 +59,7 @@ fun NetworkScreen(viewModel: NetworkViewModel = viewModel()) {
         }
 
         uiState.message?.let {
-            showErrorDialog(message = it) {
+            showDialog(message = it, status = uiState.connectionStatus) {
                 viewModel.clearMessage()
             }
         }

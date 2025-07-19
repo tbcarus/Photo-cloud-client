@@ -6,24 +6,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 
 @Composable
-fun showErrorDialog(message: String, onDismiss: () -> Unit) {
+fun showDialog(message: String, status: ConnectionStatus, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Ошибка") },
-        text = { Text(message) },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("ОК")
-            }
-        }
-    )
-}
-
-@Composable
-fun showSuccessDialog(message: String, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Успешно") },
+        title = { Text(status.title) },
         text = { Text(message) },
         confirmButton = {
             TextButton(onClick = onDismiss) {

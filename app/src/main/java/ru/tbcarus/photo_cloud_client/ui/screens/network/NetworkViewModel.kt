@@ -1,18 +1,21 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.network
 
+import android.app.Application
 import android.util.Log
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import ru.tbcarus.photo_cloud_client.api.ApiClient
 import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
+import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.utils.isValidIpAddress
 import java.io.IOException
 
@@ -24,10 +27,24 @@ data class NetworkUiState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.NONE
 )
 
-class NetworkViewModel : ViewModel() {
+class NetworkViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val context = application.applicationContext
+    private val preferences = AppPreferences
 
     private val _uiState = MutableStateFlow(NetworkUiState())
     val uiState: StateFlow<NetworkUiState> = _uiState
+
+    init {
+        viewModelScope.launch {
+            val ip = preferences.getIp(context).first()
+            val port = preferences.getPort(context).first()
+            if (!ip.isNullOrEmpty() && !port.isNullOrEmpty()) {
+                _uiState.update { it.copy(ip = ip, port = port) }
+                testConnection()
+            }
+        }
+    }
 
     fun onIpChange(newIp: String) {
         _uiState.update { it.copy(ip = newIp) }
@@ -64,6 +81,7 @@ class NetworkViewModel : ViewModel() {
 
                 if (response.isSuccessful) {
                     val message = response.body()?.message ?: "Успешное подключение"
+                    preferences.saveConnection(context, ip, port)
                     _uiState.update {
                         it.copy(
                             isLoading = false,

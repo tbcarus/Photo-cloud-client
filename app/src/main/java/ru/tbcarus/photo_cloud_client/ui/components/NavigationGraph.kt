@@ -9,11 +9,12 @@ import ru.tbcarus.photo_cloud_client.ui.screens.LoginScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.NetworkScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.ProfileScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.SettingsScreen
+import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 
 @Composable
-fun NavigationGraph(navController: NavHostController) {
+fun NavigationGraph(navController: NavHostController, networkViewModel: NetworkViewModel) {
     NavHost(navController, startDestination = "network") {
-        composable("network") { NetworkScreen() }
+        composable("network") { NetworkScreen(viewModel = networkViewModel) }
         composable("login") { LoginScreen() }
         composable("settings") { SettingsScreen() }
         composable("profile") { ProfileScreen() }
