@@ -4,6 +4,7 @@ import java.util.Map;
 
 import retrofit2.Call;
 
+import retrofit2.Response;
 import retrofit2.http.Body;
 import retrofit2.http.GET;
 import retrofit2.http.Header;
@@ -18,15 +19,15 @@ public interface AuthService {
     Call<TestResponse> testServer();
 
     @POST("api/auth/register")
-    Call<Map<String, String>> register(@Body AuthRequest request);
+    Response<Map<String, String>> register(@Body AuthRequest request);
 
     @POST("api/auth/login")
-    Call<AuthResponse> login(@Body AuthRequest request);
+    Response<AuthResponse> login(@Body AuthRequest request);
 
     @POST("api/user/refresh-token")
-    Call<AuthResponse> refreshToken(@Body RefreshTokenRequest token);
+    Response<AuthResponse> refreshToken(@Body RefreshTokenRequest token);
 
     @GET("api/test/auth")
-    Call<String> testAuth(@Header("Authorization") String token);
+    Response<TestResponse> testAuth(@Header("Authorization") String token);
 }
 
