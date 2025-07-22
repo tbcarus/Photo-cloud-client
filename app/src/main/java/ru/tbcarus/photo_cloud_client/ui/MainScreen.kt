@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.compose.currentBackStackEntryAsState
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavItem
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
@@ -29,9 +30,11 @@ import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 @Composable
 fun MainScreen(networkViewModel: NetworkViewModel) {
     val navController = rememberNavController()
+//    val navBackStackEntry by navController.currentBackStackEntryAsState()
+//    val currentRoute = navBackStackEntry?.destination?.route
     val navItems = listOf(
         BottomNavItem("Network", Icons.Default.Wifi, "network"),
-        BottomNavItem("Login", Icons.Default.Lock, "login"),
+        BottomNavItem("Login", Icons.Default.Lock, "auth"),
         BottomNavItem("Settings", Icons.Default.Settings, "settings"),
         BottomNavItem("Profile", Icons.Default.Person, "profile"),
         BottomNavItem("Files", Icons.Default.Folder, "files")

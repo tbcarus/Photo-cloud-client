@@ -4,5 +4,5 @@ import androidx.compose.runtime.Composable
 
 @Composable
 fun LoginScreen() {
-    CenteredText("Login Screen")
+    CenteredText("-=Login Screen=-")
 }
