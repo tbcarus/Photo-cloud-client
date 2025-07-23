@@ -25,19 +25,18 @@ import ru.tbcarus.photo_cloud_client.ui.components.BottomNavItem
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
+import ru.tbcarus.photo_cloud_client.utils.Routes
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(networkViewModel: NetworkViewModel) {
     val navController = rememberNavController()
-//    val navBackStackEntry by navController.currentBackStackEntryAsState()
-//    val currentRoute = navBackStackEntry?.destination?.route
     val navItems = listOf(
-        BottomNavItem("Network", Icons.Default.Wifi, "network"),
-        BottomNavItem("Login", Icons.Default.Lock, "auth"),
-        BottomNavItem("Settings", Icons.Default.Settings, "settings"),
-        BottomNavItem("Profile", Icons.Default.Person, "profile"),
-        BottomNavItem("Files", Icons.Default.Folder, "files")
+        BottomNavItem("Network", Icons.Default.Wifi, Routes.Network),
+        BottomNavItem("Login", Icons.Default.Lock, Routes.Login),
+        BottomNavItem("Settings", Icons.Default.Settings, Routes.Settings),
+        BottomNavItem("Profile", Icons.Default.Person, Routes.Profile),
+        BottomNavItem("Files", Icons.Default.Folder, Routes.Files)
     )
 
     val snackbarHostState = remember { SnackbarHostState() }

@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.auth
 
+import android.annotation.SuppressLint
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,13 +17,19 @@ import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
 import ru.tbcarus.photo_cloud_client.api.models.TestResponse
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
+import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkUiState
 import java.io.IOException
 
 
 class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     private val preferences = AppPreferences
+    @SuppressLint("StaticFieldLeak")
     private val context = application.applicationContext
+
+    val ip = AppPreferences.getIp(context)
+    val port = AppPreferences.getPort(context)
+    val baseUrl = "http://$ip:$port/"
 
     var email = MutableStateFlow("")
     var password = MutableStateFlow("")
@@ -38,7 +45,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun onEmailChange(value: String) { email.value = value }
     fun onPasswordChange(value: String) { password.value = value }
 
-    fun register(baseUrl: String) {
+    fun register() {
         _status.value = ConnectionStatus.LOADING
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
         val request = AuthRequest(email.value, password.value)
@@ -61,7 +68,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun login(baseUrl: String) {
+    fun login() {
         _status.value = ConnectionStatus.LOADING
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
         val request = AuthRequest(email.value, password.value)
@@ -87,7 +94,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun testAuth(baseUrl: String) {
+    fun testAuth() {
         _status.value = ConnectionStatus.LOADING
         val token = accessToken ?: return
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
@@ -100,7 +107,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     _status.value = ConnectionStatus.SUCCESS
                     _message.value = message
                 } else if (response.code() == 401 && refreshToken != null) {
-                    refreshToken(baseUrl)
+                    refreshToken()
                 } else {
                     _status.value = ConnectionStatus.ERROR
                     _message.value = response.errorBody()?.string() ?: "Unauthorized"
@@ -112,7 +119,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshToken(baseUrl: String) {
+    private fun refreshToken() {
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
         val refresh = refreshToken ?: return
 
@@ -122,7 +129,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 if (response.isSuccessful) {
                     accessToken = response.body()?.accessToken
                     refreshToken = response.body()?.refreshToken
-                    testAuth(baseUrl)
+                    testAuth()
                 } else {
                     _status.value = ConnectionStatus.ERROR
                     _message.value = "Session expired"

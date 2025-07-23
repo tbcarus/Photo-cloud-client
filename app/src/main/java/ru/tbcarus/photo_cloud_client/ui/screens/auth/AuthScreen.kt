@@ -6,6 +6,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -15,9 +16,9 @@ import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 
 @Composable
 fun AuthScreen(
-    viewModel: AuthViewModel = viewModel(),
-    baseUrl: String
+    viewModel: AuthViewModel = viewModel()
 ) {
+
     val email = viewModel.email.collectAsState().value
     val password = viewModel.password.collectAsState().value
     val message = viewModel.message.collectAsState().value
@@ -46,13 +47,13 @@ fun AuthScreen(
                 .padding(top = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Button(onClick = { viewModel.register(baseUrl) }) {
+            Button(onClick = { viewModel.register() }) {
                 Text("Register")
             }
-            Button(onClick = { viewModel.login(baseUrl) }) {
+            Button(onClick = { viewModel.login() }) {
                 Text("Login")
             }
-            Button(onClick = { viewModel.testAuth(baseUrl) }) {
+            Button(onClick = { viewModel.testAuth() }) {
                 Text("Test Auth")
             }
         }
