@@ -4,32 +4,38 @@ import android.annotation.SuppressLint
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import retrofit2.HttpException
+import kotlinx.coroutines.withContext
 import ru.tbcarus.photo_cloud_client.api.ApiClient
 import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
-import ru.tbcarus.photo_cloud_client.api.models.AuthResponse
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
-import ru.tbcarus.photo_cloud_client.api.models.TestResponse
-import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
-import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkUiState
-import java.io.IOException
+import ru.tbcarus.photo_cloud_client.utils.AppPreferences
+import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
 
 
 class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     private val preferences = AppPreferences
+
     @SuppressLint("StaticFieldLeak")
     private val context = application.applicationContext
 
-    val ip = AppPreferences.getIp(context)
-    val port = AppPreferences.getPort(context)
-    val baseUrl = "http://$ip:$port/"
+    private var baseUrl: String = ""
+    private var isBaseUrlReady = false
+    init {
+        viewModelScope.launch {
+            val ip = preferences.getIp(context).first()
+            val port = preferences.getPort(context).first()
+            baseUrl = "http://$ip:$port/"
+            isBaseUrlReady = true
+        }
+    }
 
     var email = MutableStateFlow("")
     var password = MutableStateFlow("")
@@ -42,10 +48,25 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
-    fun onEmailChange(value: String) { email.value = value }
-    fun onPasswordChange(value: String) { password.value = value }
+    fun onEmailChange(value: String) {
+        email.value = value
+    }
+
+    fun onPasswordChange(value: String) {
+        password.value = value
+    }
+
+    private fun checkBaseUrlReady(): Boolean {
+        if (!isBaseUrlReady) {
+            _status.value = ConnectionStatus.ERROR
+            _message.value = "Адрес подключения ещё не готов"
+            return false
+        }
+        return true
+    }
 
     fun register() {
+        if (!checkBaseUrlReady()) return
         _status.value = ConnectionStatus.LOADING
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
         val request = AuthRequest(email.value, password.value)
@@ -69,6 +90,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun login() {
+        if (!checkBaseUrlReady()) return
         _status.value = ConnectionStatus.LOADING
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
         val request = AuthRequest(email.value, password.value)
@@ -95,22 +117,26 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testAuth() {
+        if (!checkBaseUrlReady()) return
+        val token = accessToken ?: ""
         _status.value = ConnectionStatus.LOADING
-        val token = accessToken ?: return
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
 
         viewModelScope.launch {
             try {
-                val response = service.testAuth("Bearer $token")
+                val response = withContext(Dispatchers.IO) {
+                    service.testAuth("Bearer $token").execute()
+                }
                 if (response.isSuccessful) {
-                    val message = response.body()?.message ?: "OK"
+                    val body = response.body()
+                    val message = body?.message ?: "OK"
                     _status.value = ConnectionStatus.SUCCESS
                     _message.value = message
                 } else if (response.code() == 401 && refreshToken != null) {
                     refreshToken()
                 } else {
                     _status.value = ConnectionStatus.ERROR
-                    _message.value = response.errorBody()?.string() ?: "Unauthorized"
+                    _message.value = getHttpStatusDescription(response.code())
                 }
             } catch (e: Exception) {
                 _status.value = ConnectionStatus.ERROR

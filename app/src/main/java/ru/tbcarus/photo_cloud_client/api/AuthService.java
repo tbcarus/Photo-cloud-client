@@ -28,6 +28,6 @@ public interface AuthService {
     Response<AuthResponse> refreshToken(@Body RefreshTokenRequest token);
 
     @GET("api/test/auth")
-    Response<TestResponse> testAuth(@Header("Authorization") String token);
+    Call<TestResponse> testAuth(@Header("Authorization") String token);
 }
 

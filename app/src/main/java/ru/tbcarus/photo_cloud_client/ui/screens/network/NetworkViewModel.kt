@@ -14,18 +14,11 @@ import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import ru.tbcarus.photo_cloud_client.api.ApiClient
 import ru.tbcarus.photo_cloud_client.api.AuthService
+import ru.tbcarus.photo_cloud_client.api.models.NetworkUiState
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.utils.isValidIpAddress
 import java.io.IOException
-
-data class NetworkUiState(
-    val ip: String = "",
-    val port: String = "",
-    val isLoading: Boolean = false,
-    val message: String? = null,
-    val connectionStatus: ConnectionStatus = ConnectionStatus.NONE
-)
 
 class NetworkViewModel(application: Application) : AndroidViewModel(application) {
 
