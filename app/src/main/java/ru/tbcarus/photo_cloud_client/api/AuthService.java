@@ -19,10 +19,10 @@ public interface AuthService {
     Call<TestResponse> testServer();
 
     @POST("api/auth/register")
-    Response<Map<String, String>> register(@Body AuthRequest request);
+    Call<Map<String, String>> register(@Body AuthRequest request);
 
     @POST("api/auth/login")
-    Response<AuthResponse> login(@Body AuthRequest request);
+    Call<AuthResponse> login(@Body AuthRequest request);
 
     @POST("api/user/refresh-token")
     Response<AuthResponse> refreshToken(@Body RefreshTokenRequest token);

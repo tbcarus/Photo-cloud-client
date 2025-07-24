@@ -73,7 +73,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val response = service.register(request)
+                val response = withContext(Dispatchers.IO) {
+                    service.register(request).execute()
+                }
                 if (response.isSuccessful) {
                     _status.value = ConnectionStatus.SUCCESS
                     _message.value = response.body()?.get("message") ?: "Registered"
@@ -97,7 +99,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             try {
-                val response = service.login(request)
+                val response = withContext(Dispatchers.IO) {
+                    service.login(request).execute()
+                }
                 if (response.isSuccessful) {
                     val auth = response.body()
                     accessToken = auth?.accessToken
