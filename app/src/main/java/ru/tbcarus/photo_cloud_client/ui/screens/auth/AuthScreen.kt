@@ -18,24 +18,20 @@ import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 fun AuthScreen(
     viewModel: AuthViewModel = viewModel()
 ) {
-
-    val email = viewModel.email.collectAsState().value
-    val password = viewModel.password.collectAsState().value
-    val message = viewModel.message.collectAsState().value
-    val status = viewModel.status.collectAsState().value
+    val state = viewModel.uiState.collectAsState().value
 
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Authentication")
 
         OutlinedTextField(
-            value = email,
+            value = state.email,
             onValueChange = viewModel::onEmailChange,
             label = { Text("Email") },
             modifier = Modifier.fillMaxWidth()
         )
 
         OutlinedTextField(
-            value = password,
+            value = state.password,
             onValueChange = viewModel::onPasswordChange,
             label = { Text("Password") },
             modifier = Modifier.fillMaxWidth()
@@ -59,12 +55,12 @@ fun AuthScreen(
         }
     }
 
-    if (status == ConnectionStatus.LOADING) {
+    if (state.status == ConnectionStatus.LOADING) {
         LoadingDialog()
     }
 
-    message?.let {
-        showDialog(message = it, status = status) {
+    state.message?.let {
+        showDialog(message = it, status = state.status) {
             viewModel.clearMessage()
         }
     }
