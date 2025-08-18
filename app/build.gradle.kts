@@ -70,6 +70,7 @@ dependencies {
 
     // Preferences DataStore (для токенов, опционально)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Testing (опционально)
     testImplementation("junit:junit:4.13.2")

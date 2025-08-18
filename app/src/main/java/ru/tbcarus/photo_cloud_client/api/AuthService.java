@@ -11,6 +11,7 @@ import retrofit2.http.Header;
 import retrofit2.http.POST;
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest;
 import ru.tbcarus.photo_cloud_client.api.models.AuthResponse;
+import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest;
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest;
 import ru.tbcarus.photo_cloud_client.api.models.TestResponse;
 
@@ -25,9 +26,12 @@ public interface AuthService {
     Call<AuthResponse> login(@Body AuthRequest request);
 
     @POST("api/user/refresh-token")
-    Response<AuthResponse> refreshToken(@Body RefreshTokenRequest token);
+    Call<AuthResponse> refreshToken(@Body RefreshTokenRequest token);
 
     @GET("api/test/auth")
     Call<TestResponse> testAuth(@Header("Authorization") String token);
+
+    @POST("api/auth/logout")
+    Call<Map<String, String>> logout(@Body LogoutRequest logoutRequest);
 }
 
