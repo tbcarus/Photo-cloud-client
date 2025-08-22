@@ -137,7 +137,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     val message = body?.message ?: "OK"
                     updateStatus(ConnectionStatus.SUCCESS, message)
                 } else if (response.code() == 401 && refreshToken != null) {
-                    refreshToken()
+                    refreshAccessToken()
                 } else {
                     updateStatus(ConnectionStatus.ERROR, getHttpStatusDescription(response.code()))
                 }
@@ -147,13 +147,15 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshToken() {
+    private fun refreshAccessToken() {
         val refresh = refreshToken ?: return
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
 
         viewModelScope.launch {
             try {
-                val response = service.refreshToken(RefreshTokenRequest(refresh))
+                val response = withContext(Dispatchers.IO) {
+                    service.refreshToken(RefreshTokenRequest(refresh)).execute()
+                }
                 if (response.isSuccessful) {
                     accessToken = response.body()?.accessToken
                     refreshToken = response.body()?.refreshToken

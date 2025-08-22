@@ -21,10 +21,10 @@ class TokenAuthenticator(
         if (responseCount(response) >= 2) return null
 
         synchronized(lock) {
-            val current = storage.get() ?: return null
+            val current = storage.getTokens() ?: return null
 
             // Если другой поток уже обновил — не рефрешим
-            val latest = storage.get() ?: return null
+            val latest = storage.getTokens() ?: return null
             if (latest.accessToken != current.accessToken) {
                 return response.request.newBuilder()
                     .header("Authorization", "Bearer ${latest.accessToken}")
@@ -39,7 +39,7 @@ class TokenAuthenticator(
             }
             val body = refreshResp.body() ?: return null
             val newTokens = Tokens(body.accessToken, body.refreshToken)
-            storage.save(newTokens)
+            storage.saveTokens(newTokens)
 
             return response.request.newBuilder()
                 .header("Authorization", "Bearer ${newTokens.accessToken}")

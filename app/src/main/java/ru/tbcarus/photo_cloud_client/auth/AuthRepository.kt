@@ -1,6 +1,7 @@
 package ru.tbcarus.photo_cloud_client.auth
 
 import ru.tbcarus.photo_cloud_client.api.AuthService
+import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
 
 class AuthRepository(
@@ -8,19 +9,19 @@ class AuthRepository(
     private val storage: TokenStorage
 ) {
     fun saveTokens(access: String, refresh: String) {
-        storage.save(Tokens(access, refresh))
+        storage.saveTokens(Tokens(access, refresh))
     }
 
-    fun getTokens(): Tokens? = storage.get()
+    fun getTokens(): Tokens? = storage.getTokens()
 
     fun clearTokens() = storage.clear()
 
     fun refreshToken(): Boolean {
-        val refresh = storage.get()?.refreshToken ?: return false
+        val refresh = storage.getTokens()?.refreshToken ?: return false
         val resp = service.refreshToken(RefreshTokenRequest(refresh)).execute()
         return if (resp.isSuccessful) {
             val body = resp.body() ?: return false
-            storage.save(Tokens(body.accessToken, body.refreshToken))
+            storage.saveTokens(Tokens(body.accessToken, body.refreshToken))
             true
         } else {
             storage.clear()
@@ -29,8 +30,8 @@ class AuthRepository(
     }
 
     fun logout(): Boolean {
-        val refresh = storage.get()?.refreshToken ?: return false
-        val resp = service.logout(mapOf("refreshToken" to refresh)).execute()
+        val refresh = storage.getTokens()?.refreshToken ?: return false
+        val resp = service.logout(LogoutRequest(refresh)).execute()
         return if (resp.isSuccessful) {
             storage.clear()
             true
