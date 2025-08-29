@@ -18,10 +18,12 @@ import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
 import ru.tbcarus.photo_cloud_client.auth.EncryptedPrefsTokenStorage
 import ru.tbcarus.photo_cloud_client.auth.TokenStorage
+import ru.tbcarus.photo_cloud_client.auth.Tokens
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
 import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
+import kotlin.text.clear
 
 
 class AuthViewModel(application: Application) : AndroidViewModel(application) {
@@ -37,9 +39,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState
 
-    private var accessToken: String? = null
-    private var refreshToken: String? = null
-
     private val tokenStorage: TokenStorage = EncryptedPrefsTokenStorage(context)
 
     init {
@@ -48,6 +47,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             val port = preferences.getPort(context).first()
             baseUrl = "http://$ip:$port/"
             isBaseUrlReady = true
+            refreshTokensOverview()
         }
     }
 
@@ -113,10 +113,10 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (response.isSuccessful) {
                     val auth = response.body()
-                    accessToken = auth?.accessToken
-                    refreshToken = auth?.refreshToken
-                    auth?.let { tokenStorage.saveTokens(ru.tbcarus.photo_cloud_client.auth.Tokens(it.accessToken, it.refreshToken)) }
-                    refreshTokensOverview()
+                    if (auth != null) {
+                        tokenStorage.saveTokens(Tokens(auth.accessToken, auth.refreshToken))
+                        refreshTokensOverview()
+                    }
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
                 } else {
                     val error = response.errorBody()?.string() ?: "Unknown error"
@@ -130,21 +130,18 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     fun testAuth() {
         if (!checkBaseUrlReady()) return
-        val token = accessToken ?: ""
         updateStatus(ConnectionStatus.LOADING)
-        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
+        val service = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
 
         viewModelScope.launch {
             try {
                 val response = withContext(Dispatchers.IO) {
-                    service.testAuth("Bearer $token").execute()
+                    service.testAuth("").execute()
                 }
                 if (response.isSuccessful) {
                     val body = response.body()
                     val message = body?.message ?: "OK"
                     updateStatus(ConnectionStatus.SUCCESS, message)
-                } else if (response.code() == 401 && refreshToken != null) {
-                    refreshAccessToken()
                 } else {
                     updateStatus(ConnectionStatus.ERROR, getHttpStatusDescription(response.code()))
                 }
@@ -154,28 +151,28 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun refreshAccessToken() {
-        val refresh = refreshToken ?: return
-        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
+    fun logout() {
+        if (!checkBaseUrlReady()) return
+        updateStatus(ConnectionStatus.LOADING)
+
+        val authedService = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
 
         viewModelScope.launch {
             try {
-                val response = withContext(Dispatchers.IO) {
-                    service.refreshToken(RefreshTokenRequest(refresh)).execute()
+                val ok = withContext(Dispatchers.IO) {
+                    // серверная ручка принимает refreshToken — формируем тело
+                    val refresh = tokenStorage.getTokens()?.refreshToken ?: ""
+                    authedService.logout(ru.tbcarus.photo_cloud_client.api.models.LogoutRequest(refresh)).execute().isSuccessful
                 }
-                if (response.isSuccessful) {
-                    accessToken = response.body()?.accessToken
-                    refreshToken = response.body()?.refreshToken
-                    response.body()?.let {
-                        tokenStorage.saveTokens(ru.tbcarus.photo_cloud_client.auth.Tokens(it.accessToken, it.refreshToken))
-                        refreshTokensOverview()
-                    }
-                    testAuth()
+                if (ok) {
+                    tokenStorage.clear()
+                    refreshTokensOverview()
+                    updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully")
                 } else {
-                    updateStatus(ConnectionStatus.ERROR, "Сессия устарела")
+                    updateStatus(ConnectionStatus.ERROR, "Logout failed")
                 }
             } catch (e: Exception) {
-                updateStatus(ConnectionStatus.ERROR, "Ошибка обновления токена")
+                updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Logout error")
             }
         }
     }
@@ -191,6 +188,34 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 isAccessValid = !JwtUtils.isExpired(access.toString()),
                 isRefreshValid = !JwtUtils.isExpired(refresh.toString())
             )
+        }
+    }
+
+    private fun manualRefreshToken() {
+        if (!checkBaseUrlReady()) return
+        val refresh = tokenStorage.getTokens()?.refreshToken ?: return
+        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
+
+        viewModelScope.launch {
+            try {
+                val response = withContext(Dispatchers.IO) { service.refreshToken(RefreshTokenRequest(refresh)).execute() }
+                if (response.isSuccessful) {
+                    val body = response.body()
+                    if (body != null) {
+                        tokenStorage.saveTokens(Tokens(body.accessToken, body.refreshToken))
+                        refreshTokensOverview()
+                        updateStatus(ConnectionStatus.SUCCESS, "Token refreshed")
+                    } else {
+                        updateStatus(ConnectionStatus.ERROR, "Empty refresh response")
+                    }
+                } else {
+                    tokenStorage.clear()
+                    refreshTokensOverview()
+                    updateStatus(ConnectionStatus.ERROR, "Сессия устарела")
+                }
+            } catch (_: Exception) {
+                updateStatus(ConnectionStatus.ERROR, "Ошибка обновления токена")
+            }
         }
     }
 }
