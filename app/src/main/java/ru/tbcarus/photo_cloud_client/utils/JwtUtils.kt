@@ -1,10 +1,11 @@
-package ru.tbcarus.photo_cloud_client.auth
+package ru.tbcarus.photo_cloud_client.utils
 
 import android.util.Base64
 import org.json.JSONObject
 
 object JwtUtils {
     fun isExpired(jwt: String): Boolean {
+        if (jwt.isBlank()) return true
         return try {
             val payload = jwt.split(".").getOrNull(1) ?: return true
             val json = String(Base64.decode(payload, Base64.URL_SAFE or Base64.NO_WRAP))

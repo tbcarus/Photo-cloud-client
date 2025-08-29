@@ -16,8 +16,11 @@ import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
 import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
+import ru.tbcarus.photo_cloud_client.auth.EncryptedPrefsTokenStorage
+import ru.tbcarus.photo_cloud_client.auth.TokenStorage
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences
+import ru.tbcarus.photo_cloud_client.utils.JwtUtils
 import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
 
 
@@ -36,6 +39,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     private var accessToken: String? = null
     private var refreshToken: String? = null
+
+    private val tokenStorage: TokenStorage = EncryptedPrefsTokenStorage(context)
 
     init {
         viewModelScope.launch {
@@ -110,6 +115,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     val auth = response.body()
                     accessToken = auth?.accessToken
                     refreshToken = auth?.refreshToken
+                    auth?.let { tokenStorage.saveTokens(ru.tbcarus.photo_cloud_client.auth.Tokens(it.accessToken, it.refreshToken)) }
+                    refreshTokensOverview()
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
                 } else {
                     val error = response.errorBody()?.string() ?: "Unknown error"
@@ -159,6 +166,10 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 if (response.isSuccessful) {
                     accessToken = response.body()?.accessToken
                     refreshToken = response.body()?.refreshToken
+                    response.body()?.let {
+                        tokenStorage.saveTokens(ru.tbcarus.photo_cloud_client.auth.Tokens(it.accessToken, it.refreshToken))
+                        refreshTokensOverview()
+                    }
                     testAuth()
                 } else {
                     updateStatus(ConnectionStatus.ERROR, "Сессия устарела")
@@ -166,6 +177,20 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 updateStatus(ConnectionStatus.ERROR, "Ошибка обновления токена")
             }
+        }
+    }
+
+    fun refreshTokensOverview() {
+        val tokens = tokenStorage.getTokens()
+        val access = tokens?.accessToken
+        val refresh = tokens?.refreshToken
+        _uiState.update {
+            it.copy(
+                savedAccessToken = access,
+                savedRefreshToken = refresh,
+                isAccessValid = !JwtUtils.isExpired(access.toString()),
+                isRefreshValid = !JwtUtils.isExpired(refresh.toString())
+            )
         }
     }
 }

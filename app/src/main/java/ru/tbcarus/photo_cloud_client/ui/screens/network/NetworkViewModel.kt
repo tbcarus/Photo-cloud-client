@@ -62,6 +62,7 @@ class NetworkViewModel(application: Application) : AndroidViewModel(application)
         }
 
         val baseUrl = "http://$ip:$port/"
+        Log.d("BASE_URL", baseUrl)
         val api = ApiClient.getClient(baseUrl).create(AuthService::class.java)
 
         _uiState.update { it.copy(isLoading = true, message = null) }
