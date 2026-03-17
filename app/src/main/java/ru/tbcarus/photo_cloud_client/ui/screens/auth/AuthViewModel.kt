@@ -15,7 +15,7 @@ import ru.tbcarus.photo_cloud_client.api.ApiClient
 import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
 import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
-import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
+import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
 import ru.tbcarus.photo_cloud_client.auth.EncryptedPrefsTokenStorage
 import ru.tbcarus.photo_cloud_client.auth.TokenStorage
 import ru.tbcarus.photo_cloud_client.auth.Tokens
@@ -23,7 +23,6 @@ import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
 import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
-import kotlin.text.clear
 
 
 class AuthViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,6 +47,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             baseUrl = "http://$ip:$port/"
             isBaseUrlReady = true
             refreshTokensOverview()
+            verifySession()
         }
     }
 
@@ -80,7 +80,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         val request = AuthRequest(uiState.value.email, uiState.value.password)
         updateStatus(ConnectionStatus.LOADING)
         val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
-
 
         viewModelScope.launch {
             try {
@@ -138,10 +137,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 val response = withContext(Dispatchers.IO) {
                     service.testAuth("").execute()
                 }
-
                 if (response.isSuccessful) {
-                    val body = response.body()
-                    val message = body?.message ?: "OK"
+                    val message = response.body()?.message ?: "OK"
                     refreshTokensOverview()
                     updateStatus(ConnectionStatus.SUCCESS, message)
                 } else {
@@ -149,6 +146,33 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Ошибка подключения")
+            } finally {
+                refreshTokensOverview()
+            }
+        }
+    }
+
+    // Проверяет сессию на сервере: если refresh token отозван — TokenAuthenticator очистит storage,
+    // после чего refreshTokensOverview() выставит isLoggedIn = false.
+    fun verifySession() {
+        if (!isBaseUrlReady) {
+            refreshTokensOverview()
+            return
+        }
+        if (tokenStorage.getTokens() == null) {
+            _uiState.update { it.copy(isLoggedIn = false) }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val service = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
+                withContext(Dispatchers.IO) {
+                    service.testAuth("").execute()
+                }
+            } catch (_: Exception) {
+                // Сетевая ошибка — не меняем состояние входа
+            } finally {
+                refreshTokensOverview()
             }
         }
     }
@@ -156,15 +180,13 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun logout() {
         if (!checkBaseUrlReady()) return
         updateStatus(ConnectionStatus.LOADING)
-
         val authedService = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
 
         viewModelScope.launch {
             try {
                 val ok = withContext(Dispatchers.IO) {
-                    // серверная ручка принимает refreshToken — формируем тело
                     val refresh = tokenStorage.getTokens()?.refreshToken ?: ""
-                    authedService.logout(ru.tbcarus.photo_cloud_client.api.models.LogoutRequest(refresh)).execute().isSuccessful
+                    authedService.logout(LogoutRequest(refresh)).execute().isSuccessful
                 }
                 if (ok) {
                     tokenStorage.clear()
@@ -188,36 +210,10 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 savedAccessToken = access,
                 savedRefreshToken = refresh,
                 isAccessValid = !JwtUtils.isExpired(access.toString()),
-                isRefreshValid = !JwtUtils.isExpired(refresh.toString())
+                isRefreshValid = !JwtUtils.isExpired(refresh.toString()),
+                isLoggedIn = tokens != null,
+                userEmail = access?.let { JwtUtils.getSubject(it) }
             )
-        }
-    }
-
-    private fun manualRefreshToken() {
-        if (!checkBaseUrlReady()) return
-        val refresh = tokenStorage.getTokens()?.refreshToken ?: return
-        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
-
-        viewModelScope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) { service.refreshToken(RefreshTokenRequest(refresh)).execute() }
-                if (response.isSuccessful) {
-                    val body = response.body()
-                    if (body != null) {
-                        tokenStorage.saveTokens(Tokens(body.accessToken, body.refreshToken))
-                        refreshTokensOverview()
-                        updateStatus(ConnectionStatus.SUCCESS, "Token refreshed")
-                    } else {
-                        updateStatus(ConnectionStatus.ERROR, "Empty refresh response")
-                    }
-                } else {
-                    tokenStorage.clear()
-                    refreshTokensOverview()
-                    updateStatus(ConnectionStatus.ERROR, "Сессия устарела")
-                }
-            } catch (_: Exception) {
-                updateStatus(ConnectionStatus.ERROR, "Ошибка обновления токена")
-            }
         }
     }
 }

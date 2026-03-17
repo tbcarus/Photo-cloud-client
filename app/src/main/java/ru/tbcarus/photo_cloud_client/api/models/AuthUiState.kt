@@ -11,5 +11,8 @@ data class AuthUiState(
     val savedAccessToken: String? = null,
     val savedRefreshToken: String? = null,
     val isAccessValid: Boolean = false,
-    val isRefreshValid: Boolean = false
+    val isRefreshValid: Boolean = false,
+
+    val isLoggedIn: Boolean = false,
+    val userEmail: String? = null
 )

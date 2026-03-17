@@ -7,16 +7,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
+import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.components.showDialog
-import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.ui.graphics.Color
 
 @Composable
 fun AuthScreen(
@@ -25,60 +25,26 @@ fun AuthScreen(
     val state = viewModel.uiState.collectAsState().value
 
     LaunchedEffect(Unit) {
-        viewModel.refreshTokensOverview()
+        viewModel.verifySession()
     }
 
     Column(modifier = Modifier.padding(16.dp)) {
-        Text("Authentication")
-
-        OutlinedTextField(
-            value = state.email,
-            onValueChange = viewModel::onEmailChange,
-            label = { Text("Email") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        OutlinedTextField(
-            value = state.password,
-            onValueChange = viewModel::onPasswordChange,
-            label = { Text("Password") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Button(onClick = { viewModel.register() }) {
-                Text("Register")
-            }
-            Button(onClick = { viewModel.login() }) {
-                Text("Login")
-            }
-            Button(onClick = { viewModel.testAuth() }) {
-                Text("Test Auth")
-            }
+        if (state.isLoggedIn) {
+            ProfileContent(
+                state = state,
+                onLogout = viewModel::logout,
+                onTestAuth = viewModel::testAuth
+            )
+        } else {
+            LoginContent(
+                state = state,
+                onEmailChange = viewModel::onEmailChange,
+                onPasswordChange = viewModel::onPasswordChange,
+                onRegister = viewModel::register,
+                onLogin = viewModel::login,
+                onTestAuth = viewModel::testAuth
+            )
         }
-
-        Spacer(Modifier.height(24.dp))
-        Divider()
-        Spacer(Modifier.height(12.dp))
-
-        Text("Saved tokens", style = MaterialTheme.typography.titleMedium)
-
-        TokenRow(
-            label = "Access token",
-            token = state.savedAccessToken,
-            valid = state.isAccessValid
-        )
-        Spacer(Modifier.height(8.dp))
-        TokenRow(
-            label = "Refresh token",
-            token = state.savedRefreshToken,
-            valid = state.isRefreshValid
-        )
     }
 
     if (state.status == ConnectionStatus.LOADING) {
@@ -89,6 +55,83 @@ fun AuthScreen(
         showDialog(message = it, status = state.status) {
             viewModel.clearMessage()
         }
+    }
+}
+
+@Composable
+private fun LoginContent(
+    state: AuthUiState,
+    onEmailChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+    onRegister: () -> Unit,
+    onLogin: () -> Unit,
+    onTestAuth: () -> Unit
+) {
+    Text("Вход / Регистрация", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(16.dp))
+
+    OutlinedTextField(
+        value = state.email,
+        onValueChange = onEmailChange,
+        label = { Text("Email") },
+        modifier = Modifier.fillMaxWidth()
+    )
+
+    OutlinedTextField(
+        value = state.password,
+        onValueChange = onPasswordChange,
+        label = { Text("Password") },
+        modifier = Modifier.fillMaxWidth()
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Button(onClick = onRegister) { Text("Register") }
+        Button(onClick = onLogin) { Text("Login") }
+        Button(onClick = onTestAuth) { Text("Test Auth") }
+    }
+}
+
+@Composable
+private fun ProfileContent(
+    state: AuthUiState,
+    onLogout: () -> Unit,
+    onTestAuth: () -> Unit
+) {
+    Text("Профиль", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+    Text(
+        text = state.userEmail ?: "—",
+        style = MaterialTheme.typography.bodyLarge
+    )
+
+    Spacer(Modifier.height(24.dp))
+    Divider()
+    Spacer(Modifier.height(12.dp))
+
+    Text("Токены", style = MaterialTheme.typography.titleMedium)
+    Spacer(Modifier.height(8.dp))
+
+    TokenRow(
+        label = "Access token",
+        token = state.savedAccessToken,
+        valid = state.isAccessValid
+    )
+    Spacer(Modifier.height(8.dp))
+    TokenRow(
+        label = "Refresh token",
+        token = state.savedRefreshToken,
+        valid = state.isRefreshValid
+    )
+
+    Spacer(Modifier.height(24.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = onTestAuth) { Text("Test Auth") }
+        Button(onClick = onLogout) { Text("Logout") }
     }
 }
 

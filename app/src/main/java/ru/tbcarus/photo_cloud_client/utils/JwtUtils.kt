@@ -13,4 +13,13 @@ object JwtUtils {
             if (exp == 0L) true else System.currentTimeMillis() / 1000 >= exp
         } catch (_: Exception) { true }
     }
+
+    fun getSubject(jwt: String): String? {
+        if (jwt.isBlank()) return null
+        return try {
+            val payload = jwt.split(".").getOrNull(1) ?: return null
+            val json = String(Base64.decode(payload, Base64.URL_SAFE or Base64.NO_WRAP))
+            JSONObject(json).optString("sub").takeIf { it.isNotBlank() }
+        } catch (_: Exception) { null }
+    }
 }
