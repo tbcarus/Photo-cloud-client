@@ -21,7 +21,9 @@ class AuthRepository(
         val resp = service.refreshToken(RefreshTokenRequest(refresh)).execute()
         return if (resp.isSuccessful) {
             val body = resp.body() ?: return false
-            storage.saveTokens(Tokens(body.accessToken, body.refreshToken))
+            val newAccess = body.accessToken ?: return false
+            val newRefresh = body.refreshToken ?: refresh
+            storage.saveTokens(Tokens(newAccess, newRefresh))
             true
         } else {
             storage.clear()

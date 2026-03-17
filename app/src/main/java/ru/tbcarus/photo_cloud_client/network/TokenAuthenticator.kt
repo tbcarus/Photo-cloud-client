@@ -38,7 +38,9 @@ class TokenAuthenticator(
                 return null
             }
             val body = refreshResp.body() ?: return null
-            val newTokens = Tokens(body.accessToken, body.refreshToken)
+            val newAccess = body.accessToken ?: return null
+            val newRefresh = body.refreshToken ?: current.refreshToken
+            val newTokens = Tokens(newAccess, newRefresh)
             storage.saveTokens(newTokens)
 
             return response.request.newBuilder()

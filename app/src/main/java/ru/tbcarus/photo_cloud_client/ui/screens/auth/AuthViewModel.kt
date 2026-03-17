@@ -138,9 +138,11 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 val response = withContext(Dispatchers.IO) {
                     service.testAuth("").execute()
                 }
+
                 if (response.isSuccessful) {
                     val body = response.body()
                     val message = body?.message ?: "OK"
+                    refreshTokensOverview()
                     updateStatus(ConnectionStatus.SUCCESS, message)
                 } else {
                     updateStatus(ConnectionStatus.ERROR, getHttpStatusDescription(response.code()))
