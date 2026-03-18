@@ -5,8 +5,7 @@ import androidx.room.PrimaryKey
 
 @Entity(tableName = "media_files")
 data class MediaFile(
-    @PrimaryKey(autoGenerate = true)
-    val id: Long = 0,
+    @PrimaryKey
     val mediaStoreId: Long,
     val uri: String,
     val name: String,
