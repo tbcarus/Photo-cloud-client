@@ -13,7 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
+import ru.tbcarus.photo_cloud_client.auth.AuthUiState
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.components.showDialog

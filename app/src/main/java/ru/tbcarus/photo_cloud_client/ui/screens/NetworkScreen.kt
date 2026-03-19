@@ -16,15 +16,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.hilt.navigation.compose.hiltViewModel
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.components.showDialog
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
-import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModelFactory
 
 @Composable
-fun NetworkScreen(viewModel: NetworkViewModel = viewModel(factory = NetworkViewModelFactory())) {
+fun NetworkScreen(viewModel: NetworkViewModel = hiltViewModel()) {
     val uiState by viewModel.uiState.collectAsState()
 
     val animatedColor by animateColorAsState(

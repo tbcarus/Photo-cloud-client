@@ -1,208 +1,104 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.auth
 
-import android.annotation.SuppressLint
-import android.app.Application
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
+import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import ru.tbcarus.photo_cloud_client.api.ApiClient
-import ru.tbcarus.photo_cloud_client.api.AuthService
-import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
-import ru.tbcarus.photo_cloud_client.api.models.AuthUiState
-import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
-import ru.tbcarus.photo_cloud_client.auth.EncryptedPrefsTokenStorage
-import ru.tbcarus.photo_cloud_client.auth.TokenStorage
+import ru.tbcarus.photo_cloud_client.auth.AuthRepository
+import ru.tbcarus.photo_cloud_client.auth.AuthUiState
 import ru.tbcarus.photo_cloud_client.auth.Tokens
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
-import ru.tbcarus.photo_cloud_client.utils.AppPreferences
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
-import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
+import javax.inject.Inject
 
-
-class AuthViewModel(application: Application) : AndroidViewModel(application) {
-
-    private val preferences = AppPreferences
-
-    @SuppressLint("StaticFieldLeak")
-    private val context = application.applicationContext
-
-    private var baseUrl: String = ""
-    private var isBaseUrlReady = false
+@HiltViewModel
+class AuthViewModel @Inject constructor(
+    private val repo: AuthRepository
+) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState
 
-    private val tokenStorage: TokenStorage = EncryptedPrefsTokenStorage(context)
-
     init {
         viewModelScope.launch {
-            val ip = preferences.getIp(context).first()
-            val port = preferences.getPort(context).first()
-            baseUrl = "http://$ip:$port/"
-            isBaseUrlReady = true
             refreshTokensOverview()
             verifySession()
         }
     }
 
-    fun onEmailChange(value: String) {
-        _uiState.update { it.copy(email = value) }
-    }
+    fun onEmailChange(value: String) = _uiState.update { it.copy(email = value) }
+    fun onPasswordChange(value: String) = _uiState.update { it.copy(password = value) }
+    fun clearMessage() = _uiState.update { it.copy(message = null) }
 
-    fun onPasswordChange(value: String) {
-        _uiState.update { it.copy(password = value) }
-    }
-
-    fun clearMessage() {
-        _uiState.update { it.copy(message = null) }
-    }
-
-    private fun updateStatus(status: ConnectionStatus, message: String? = null) {
+    private fun updateStatus(status: ConnectionStatus, message: String? = null) =
         _uiState.update { it.copy(status = status, message = message) }
-    }
 
-    private fun checkBaseUrlReady(): Boolean {
-        if (!isBaseUrlReady) {
-            updateStatus(ConnectionStatus.ERROR, "Адрес подключения ещё не готов")
-            return false
-        }
-        return true
+    private fun notReady(): Boolean {
+        return if (!repo.isReady()) {
+            updateStatus(ConnectionStatus.ERROR, "Адрес подключения не настроен")
+            true
+        } else false
     }
 
     fun register() {
-        if (!checkBaseUrlReady()) return
-        val request = AuthRequest(uiState.value.email, uiState.value.password)
+        if (notReady()) return
         updateStatus(ConnectionStatus.LOADING)
-        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
-
         viewModelScope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    service.register(request).execute()
-                }
-                if (response.isSuccessful) {
-                    val message = response.body()?.get("message") ?: "Registered"
-                    updateStatus(ConnectionStatus.SUCCESS, message)
-                } else {
-                    val error = response.errorBody()?.string() ?: "Unknown error"
-                    updateStatus(ConnectionStatus.ERROR, error)
-                }
-            } catch (e: Exception) {
-                updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Ошибка")
-            }
+            repo.register(uiState.value.email, uiState.value.password)
+                .onSuccess { updateStatus(ConnectionStatus.SUCCESS, it) }
+                .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка") }
         }
     }
 
     fun login() {
-        if (!checkBaseUrlReady()) return
-        val request = AuthRequest(uiState.value.email, uiState.value.password)
+        if (notReady()) return
         updateStatus(ConnectionStatus.LOADING)
-        val service = ApiClient.getClient(baseUrl).create(AuthService::class.java)
-
         viewModelScope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    service.login(request).execute()
-                }
-                if (response.isSuccessful) {
-                    val auth = response.body()
-                    if (auth != null) {
-                        tokenStorage.saveTokens(Tokens(auth.accessToken, auth.refreshToken))
-                        refreshTokensOverview()
-                    }
+            repo.login(uiState.value.email, uiState.value.password)
+                .onSuccess { tokens ->
+                    repo.saveTokens(tokens)
+                    refreshTokensOverview()
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
-                } else {
-                    val error = response.errorBody()?.string() ?: "Unknown error"
-                    updateStatus(ConnectionStatus.ERROR, error)
                 }
-            } catch (e: Exception) {
-                updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Ошибка входа")
-            }
+                .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка входа") }
         }
     }
 
     fun testAuth() {
-        if (!checkBaseUrlReady()) return
+        if (notReady()) return
         updateStatus(ConnectionStatus.LOADING)
-        val service = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
-
         viewModelScope.launch {
-            try {
-                val response = withContext(Dispatchers.IO) {
-                    service.testAuth("").execute()
-                }
-                if (response.isSuccessful) {
-                    val message = response.body()?.message ?: "OK"
-                    refreshTokensOverview()
-                    updateStatus(ConnectionStatus.SUCCESS, message)
-                } else {
-                    updateStatus(ConnectionStatus.ERROR, getHttpStatusDescription(response.code()))
-                }
-            } catch (e: Exception) {
-                updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Ошибка подключения")
-            } finally {
-                refreshTokensOverview()
-            }
+            repo.testAuth()
+                .onSuccess { refreshTokensOverview(); updateStatus(ConnectionStatus.SUCCESS, it) }
+                .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка подключения") }
+            refreshTokensOverview()
         }
     }
 
-    // Проверяет сессию на сервере: если refresh token отозван — TokenAuthenticator очистит storage,
-    // после чего refreshTokensOverview() выставит isLoggedIn = false.
     fun verifySession() {
-        if (!isBaseUrlReady) {
-            refreshTokensOverview()
-            return
-        }
-        if (tokenStorage.getTokens() == null) {
-            _uiState.update { it.copy(isLoggedIn = false) }
-            return
-        }
+        if (!repo.isReady()) { refreshTokensOverview(); return }
+        if (repo.getTokens() == null) { _uiState.update { it.copy(isLoggedIn = false) }; return }
         viewModelScope.launch {
-            try {
-                val service = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
-                withContext(Dispatchers.IO) {
-                    service.testAuth("").execute()
-                }
-            } catch (_: Exception) {
-                // Сетевая ошибка — не меняем состояние входа
-            } finally {
-                refreshTokensOverview()
-            }
+            runCatching { repo.testAuth() }
+            refreshTokensOverview()
         }
     }
 
     fun logout() {
-        if (!checkBaseUrlReady()) return
+        if (notReady()) return
         updateStatus(ConnectionStatus.LOADING)
-        val authedService = ApiClient.getClientWithAuth(baseUrl, tokenStorage).create(AuthService::class.java)
-
         viewModelScope.launch {
-            try {
-                val ok = withContext(Dispatchers.IO) {
-                    val refresh = tokenStorage.getTokens()?.refreshToken ?: ""
-                    authedService.logout(LogoutRequest(refresh)).execute().isSuccessful
-                }
-                if (ok) {
-                    tokenStorage.clear()
-                    refreshTokensOverview()
-                    updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully")
-                } else {
-                    updateStatus(ConnectionStatus.ERROR, "Logout failed")
-                }
-            } catch (e: Exception) {
-                updateStatus(ConnectionStatus.ERROR, e.localizedMessage ?: "Logout error")
-            }
+            repo.logout()
+                .onSuccess { refreshTokensOverview(); updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully") }
+                .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Logout error") }
         }
     }
 
     fun refreshTokensOverview() {
-        val tokens = tokenStorage.getTokens()
+        val tokens = repo.getTokens()
         val access = tokens?.accessToken
         val refresh = tokens?.refreshToken
         _uiState.update {
