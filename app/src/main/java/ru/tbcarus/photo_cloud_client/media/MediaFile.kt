@@ -6,13 +6,13 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "media_files")
 data class MediaFile(
     @PrimaryKey
+    val id: Long,
     val mediaStoreId: Long,
+    val remoteId: Long? = null, // ID файла на сервере, null до загрузки
     val uri: String,
-    val name: String,
     val mimeType: String,
     val size: Long,
     val createdAt: Long,       // DATE_TAKEN из MediaStore (ms)
     val checksum: String?,          // SHA-256, null пока не посчитан
-    val serverFileId: Long? = null, // ID файла на сервере, null до загрузки
     val status: MediaFileStatus = MediaFileStatus.PENDING
 )
