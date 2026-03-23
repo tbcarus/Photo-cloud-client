@@ -1,7 +1,7 @@
 package ru.tbcarus.photo_cloud_client.media
 
 enum class MediaFileStatus {
-    PENDING_HASH,   //файл найден, хэш ещё не посчитан
+    PENDING,   // файл найден, хэш ещё не посчитан
     PENDING_UPLOAD, // хэш есть, ждёт загрузки на сервер
     UPLOADING,      // сейчас загружается
     SYNCED,         // есть на сервере, всё хорошо
