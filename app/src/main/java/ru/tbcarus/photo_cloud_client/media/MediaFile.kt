@@ -8,7 +8,7 @@ data class MediaFile(
     @PrimaryKey
     val id: Long,
     val mediaStoreId: Long,
-    val remoteId: Long? = null, // ID файла на сервере, null до загрузки
+    val serverFileId: Long? = null, // ID файла на сервере, null до загрузки
     val uri: String,
     val mimeType: String,
     val size: Long,

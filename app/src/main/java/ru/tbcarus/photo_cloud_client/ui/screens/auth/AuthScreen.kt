@@ -12,7 +12,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.hilt.navigation.compose.hiltViewModel
 import ru.tbcarus.photo_cloud_client.auth.AuthUiState
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
@@ -20,7 +20,7 @@ import ru.tbcarus.photo_cloud_client.ui.components.showDialog
 
 @Composable
 fun AuthScreen(
-    viewModel: AuthViewModel = viewModel()
+    viewModel: AuthViewModel = hiltViewModel()
 ) {
     val state = viewModel.uiState.collectAsState().value
 

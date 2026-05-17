@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.network
 
+import android.util.Log
 import okhttp3.Authenticator
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,8 +24,8 @@ class TokenAuthenticator @Inject constructor(
 
     private val lock = Any()
 
-    private fun refreshService(): AuthService = Retrofit.Builder()
-        .baseUrl(baseUrlProvider.baseUrl.ifBlank { "http://localhost/" })
+    private fun refreshService(baseUrl: String): AuthService = Retrofit.Builder()
+        .baseUrl(baseUrl)
         .addConverterFactory(GsonConverterFactory.create())
         .client(okHttpClient)
         .build()
@@ -34,6 +35,12 @@ class TokenAuthenticator @Inject constructor(
         if (responseCount(response) >= 2) return null
 
         synchronized(lock) {
+            val baseUrl = baseUrlProvider.baseUrl
+            if (baseUrl.isBlank()) {
+                Log.w("TokenAuthenticator", "Base URL is not configured; skipping token refresh")
+                return null
+            }
+
             val current = storage.getTokens() ?: return null
 
             val latest = storage.getTokens() ?: return null
@@ -43,7 +50,7 @@ class TokenAuthenticator @Inject constructor(
                     .build()
             }
 
-            val refreshResp = refreshService().refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
+            val refreshResp = refreshService(baseUrl).refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
             if (!refreshResp.isSuccessful) {
                 storage.clear()
                 return null

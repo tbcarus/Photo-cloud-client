@@ -17,7 +17,7 @@ import okhttp3.OkHttpClient
 import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import ru.tbcarus.photo_cloud_client.api.AuthService
+import ru.tbcarus.photo_cloud_client.api.TestService
 import ru.tbcarus.photo_cloud_client.auth.NetworkUiState
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
@@ -74,7 +74,7 @@ class NetworkViewModel @Inject constructor(
             .addConverterFactory(GsonConverterFactory.create())
             .client(plainClient)
             .build()
-            .create(AuthService::class.java)
+            .create(TestService::class.java)
 
         _uiState.update { it.copy(isLoading = true, message = null) }
 

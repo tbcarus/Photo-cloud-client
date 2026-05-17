@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import ru.tbcarus.photo_cloud_client.api.AuthService
+import ru.tbcarus.photo_cloud_client.api.TestService
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
 import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
@@ -41,6 +42,13 @@ class AuthRepository @Inject constructor(
         .build()
         .create(AuthService::class.java)
 
+    private fun authTestService(): TestService = Retrofit.Builder()
+        .baseUrl(baseUrlProvider.baseUrl)
+        .addConverterFactory(GsonConverterFactory.create())
+        .client(authClient)
+        .build()
+        .create(TestService::class.java)
+
     suspend fun register(email: String, password: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val resp = plainService().register(AuthRequest(email, password)).execute()
@@ -70,7 +78,7 @@ class AuthRepository @Inject constructor(
 
     suspend fun testAuth(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val resp = authService().testAuth("").execute()
+            val resp = authTestService().testAuth("").execute()
             if (resp.isSuccessful) resp.body()?.message ?: "OK"
             else throw Exception(getHttpStatusDescription(resp.code()))
         }
