@@ -2,27 +2,18 @@ package ru.tbcarus.photo_cloud_client.core.server
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import retrofit2.HttpException
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
-import ru.tbcarus.photo_cloud_client.api.TestService
+import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import java.io.IOException
 import javax.inject.Inject
-import javax.inject.Named
 import javax.inject.Singleton
 
 @Singleton
 class ServerRepository @Inject constructor(
-    @Named("plain") private val plainClient: OkHttpClient
+    private val apiServiceFactory: ApiServiceFactory
 ) {
     suspend fun testConnection(baseUrl: String): Result<String> {
-        val api = Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .addConverterFactory(GsonConverterFactory.create())
-            .client(plainClient)
-            .build()
-            .create(TestService::class.java)
+        val api = apiServiceFactory.plainTestService(baseUrl)
 
         return withContext(Dispatchers.IO) {
             try {

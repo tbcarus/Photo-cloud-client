@@ -16,36 +16,33 @@ class ApiServiceFactory @Inject constructor(
     @Named("plain") private val plainClient: OkHttpClient,
     @Named("auth") private val authClient: OkHttpClient
 ) {
+    private fun build(baseUrl: String, client: OkHttpClient): Retrofit =
+        Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(client)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+
     fun plainAuthService(): AuthService {
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(plainClient)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(AuthService::class.java)
+        return build(baseUrl, plainClient).create(AuthService::class.java)
     }
 
     fun authAuthService(): AuthService {
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(authClient)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(AuthService::class.java)
+        return build(baseUrl, authClient).create(AuthService::class.java)
     }
 
     fun authTestService(): TestService {
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(authClient)
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(TestService::class.java)
+        return build(baseUrl, authClient).create(TestService::class.java)
+    }
+
+    fun plainTestService(baseUrl: String): TestService {
+        require(baseUrl.isNotBlank()) { "Server URL is not configured" }
+        return build(baseUrl, plainClient).create(TestService::class.java)
     }
 }
