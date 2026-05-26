@@ -53,7 +53,7 @@ class AuthRepository @Inject constructor(
 
     suspend fun testAuth(): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val resp = apiServiceFactory.authTestService().testAuth("").execute()
+            val resp = apiServiceFactory.authTestService().testAuth().execute()
             if (resp.isSuccessful) resp.body()?.message ?: "OK"
             else throw Exception(getHttpStatusDescription(resp.code()))
         }
