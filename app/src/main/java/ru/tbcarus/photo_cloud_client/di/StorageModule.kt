@@ -4,8 +4,8 @@ import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
-import ru.tbcarus.photo_cloud_client.auth.EncryptedPrefsTokenStorage
-import ru.tbcarus.photo_cloud_client.auth.TokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.EncryptedPrefsTokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import javax.inject.Singleton
 
 @Module

@@ -30,7 +30,7 @@ interface MediaFileDao {
     @Query("UPDATE media_files SET checksum = :checksum WHERE mediaStoreId = :mediaStoreId")
     suspend fun updateChecksum(mediaStoreId: Long, checksum: String)
 
-    @Query("UPDATE media_files SET status = 'UPLOADED', serverFileId = :serverFileId WHERE mediaStoreId = :mediaStoreId")
+    @Query("UPDATE media_files SET status = 'SYNCED', serverFileId = :serverFileId WHERE mediaStoreId = :mediaStoreId")
     suspend fun markUploaded(mediaStoreId: Long, serverFileId: Long)
 
     @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")

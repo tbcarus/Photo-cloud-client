@@ -18,7 +18,7 @@ import retrofit2.HttpException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import ru.tbcarus.photo_cloud_client.api.TestService
-import ru.tbcarus.photo_cloud_client.auth.NetworkUiState
+
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.AppPreferences

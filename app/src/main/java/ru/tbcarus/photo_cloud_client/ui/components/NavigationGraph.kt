@@ -14,7 +14,7 @@ import ru.tbcarus.photo_cloud_client.utils.Routes
 
 @Composable
 fun NavigationGraph(navController: NavHostController, networkViewModel: NetworkViewModel) {
-    NavHost(navController, startDestination = "network") {
+    NavHost(navController, startDestination = Routes.Network) {
         composable(Routes.Network) { NetworkScreen(viewModel = networkViewModel) }
         composable(Routes.Login) { AuthScreen() }
         composable(Routes.Settings) { SettingsScreen() }

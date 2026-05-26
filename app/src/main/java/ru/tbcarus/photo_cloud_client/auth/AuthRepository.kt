@@ -9,6 +9,8 @@ import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.api.TestService
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
 import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.utils.getHttpStatusDescription
 import javax.inject.Inject

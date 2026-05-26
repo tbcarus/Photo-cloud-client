@@ -1,12 +1,10 @@
-package ru.tbcarus.photo_cloud_client.auth
-
+package ru.tbcarus.photo_cloud_client.core.storage
 
 interface TokenStorage {
     fun getTokens(): Tokens?
     fun saveTokens(tokens: Tokens)
     fun clear()
 
-    // Удобные геттеры/сеттеры по-месту
     fun getAccess(): String? = getTokens()?.accessToken
     fun getRefresh(): String? = getTokens()?.refreshToken
     fun saveAccess(access: String) {

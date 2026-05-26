@@ -1,4 +1,4 @@
-package ru.tbcarus.photo_cloud_client.auth
+package ru.tbcarus.photo_cloud_client.core.storage
 
 import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences

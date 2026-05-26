@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.auth.AuthRepository
 import ru.tbcarus.photo_cloud_client.auth.AuthUiState
-import ru.tbcarus.photo_cloud_client.auth.Tokens
+import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
 import javax.inject.Inject

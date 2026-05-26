@@ -1,4 +1,4 @@
-package ru.tbcarus.photo_cloud_client.network
+package ru.tbcarus.photo_cloud_client.core.network
 
 import android.util.Log
 import okhttp3.Authenticator
@@ -10,8 +10,8 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import ru.tbcarus.photo_cloud_client.api.AuthService
 import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
-import ru.tbcarus.photo_cloud_client.auth.TokenStorage
-import ru.tbcarus.photo_cloud_client.auth.Tokens
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import javax.inject.Inject
 import javax.inject.Named

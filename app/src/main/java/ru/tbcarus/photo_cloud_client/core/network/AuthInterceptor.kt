@@ -1,8 +1,8 @@
-package ru.tbcarus.photo_cloud_client.network
+package ru.tbcarus.photo_cloud_client.core.network
 
 import okhttp3.Interceptor
 import okhttp3.Response
-import ru.tbcarus.photo_cloud_client.auth.TokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import javax.inject.Inject
 
 class AuthInterceptor @Inject constructor(private val storage: TokenStorage) : Interceptor {

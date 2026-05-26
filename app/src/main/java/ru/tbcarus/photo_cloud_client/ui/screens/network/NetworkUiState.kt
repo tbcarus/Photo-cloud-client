@@ -1,4 +1,4 @@
-package ru.tbcarus.photo_cloud_client.auth
+package ru.tbcarus.photo_cloud_client.ui.screens.network
 
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 

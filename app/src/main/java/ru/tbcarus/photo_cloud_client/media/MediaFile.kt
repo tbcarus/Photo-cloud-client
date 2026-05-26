@@ -6,7 +6,6 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "media_files")
 data class MediaFile(
     @PrimaryKey
-    val id: Long,
     val mediaStoreId: Long,
     val serverFileId: Long? = null, // ID файла на сервере, null до загрузки
     val uri: String,

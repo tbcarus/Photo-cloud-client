@@ -6,8 +6,8 @@ import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
-import ru.tbcarus.photo_cloud_client.network.AuthInterceptor
-import ru.tbcarus.photo_cloud_client.network.TokenAuthenticator
+import ru.tbcarus.photo_cloud_client.core.network.AuthInterceptor
+import ru.tbcarus.photo_cloud_client.core.network.TokenAuthenticator
 import java.util.concurrent.TimeUnit
 import javax.inject.Named
 import javax.inject.Singleton

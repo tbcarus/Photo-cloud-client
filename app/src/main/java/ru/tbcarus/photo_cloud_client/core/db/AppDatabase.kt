@@ -1,4 +1,4 @@
-package ru.tbcarus.photo_cloud_client.media
+package ru.tbcarus.photo_cloud_client.core.db
 
 import android.content.Context
 import androidx.room.Database
@@ -6,6 +6,9 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import ru.tbcarus.photo_cloud_client.media.MediaFile
+import ru.tbcarus.photo_cloud_client.media.MediaFileDao
+import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 
 @Database(entities = [MediaFile::class], version = 1, exportSchema = false)
 @TypeConverters(AppDatabase.Converters::class)
@@ -31,7 +34,11 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "photo_cloud.db"
-                ).build().also { INSTANCE = it }
+                )
+                    // TODO: временное решение на этапе разработки — при изменении схемы БД
+                    // все данные удаляются. Перед production заменить на полноценные миграции Room.
+                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    .build().also { INSTANCE = it }
             }
         }
     }
