@@ -41,24 +41,34 @@ class TokenAuthenticator @Inject constructor(
                 return null
             }
 
+            // Extract the access token that was used in the failed request
+            val failedAccessToken = response.request.header("Authorization")
+                ?.removePrefix("Bearer ")
+
             val current = storage.getTokens() ?: return null
 
-            val latest = storage.getTokens() ?: return null
-            if (latest.accessToken != current.accessToken) {
+            // If the stored token differs from the failed one, another thread already refreshed —
+            // retry the request with the updated token without performing a new refresh
+            if (failedAccessToken != null && failedAccessToken != current.accessToken) {
                 return response.request.newBuilder()
-                    .header("Authorization", "Bearer ${latest.accessToken}")
+                    .header("Authorization", "Bearer ${current.accessToken}")
                     .build()
             }
 
-            val refreshResp = refreshService(baseUrl).refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
+            val refreshResp = refreshService(baseUrl)
+                .refreshToken(RefreshTokenRequest(current.refreshToken))
+                .execute()
+
             if (!refreshResp.isSuccessful) {
                 storage.clear()
                 return null
             }
+
             val body = refreshResp.body() ?: return null
             val newAccess = body.accessToken ?: return null
-            val newRefresh = body.refreshToken ?: current.refreshToken
-            val newTokens = Tokens(newAccess, newRefresh)
+
+            // Server does not rotate the refresh token; keep the existing one
+            val newTokens = Tokens(newAccess, current.refreshToken)
             storage.saveTokens(newTokens)
 
             return response.request.newBuilder()
