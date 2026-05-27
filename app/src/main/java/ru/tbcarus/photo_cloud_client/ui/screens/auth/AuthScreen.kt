@@ -2,7 +2,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.auth
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Button
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -104,7 +104,7 @@ private fun ProfileContent(
     )
 
     Spacer(Modifier.height(24.dp))
-    Divider()
+    HorizontalDivider()
     Spacer(Modifier.height(12.dp))
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
