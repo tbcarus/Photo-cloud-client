@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
 
 class EncryptedPrefsTokenStorage @Inject constructor(
@@ -20,6 +22,9 @@ class EncryptedPrefsTokenStorage @Inject constructor(
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
+    private val _tokensFlow = MutableStateFlow<Tokens?>(getTokens())
+    override val tokensFlow: StateFlow<Tokens?> = _tokensFlow
+
     override fun getTokens(): Tokens? {
         val access = prefs.getString("accessToken", null)
         val refresh = prefs.getString("refreshToken", null)
@@ -30,9 +35,11 @@ class EncryptedPrefsTokenStorage @Inject constructor(
         prefs.edit().putString("accessToken", tokens.accessToken)
             .putString("refreshToken", tokens.refreshToken)
             .apply()
+        _tokensFlow.value = tokens
     }
 
     override fun clear() {
         prefs.edit().clear().apply()
+        _tokensFlow.value = null
     }
 }

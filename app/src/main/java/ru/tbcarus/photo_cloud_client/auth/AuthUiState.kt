@@ -7,12 +7,7 @@ data class AuthUiState(
     val password: String = "",
     val status: ConnectionStatus = ConnectionStatus.NONE,
     val message: String? = null,
-
-    val savedAccessToken: String? = null,
-    val savedRefreshToken: String? = null,
-    val isAccessValid: Boolean = false,
-    val isRefreshValid: Boolean = false,
-
     val isLoggedIn: Boolean = false,
-    val userEmail: String? = null
+    val userEmail: String? = null,
+    val isVerifying: Boolean = false
 )

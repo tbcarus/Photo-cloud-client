@@ -1,6 +1,7 @@
 package ru.tbcarus.photo_cloud_client.auth
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import ru.tbcarus.photo_cloud_client.api.models.AuthRequest
 import ru.tbcarus.photo_cloud_client.api.models.LogoutRequest
@@ -18,6 +19,8 @@ class AuthRepository @Inject constructor(
     private val baseUrlProvider: BaseUrlProvider,
     private val apiServiceFactory: ApiServiceFactory
 ) {
+    val tokensFlow: Flow<Tokens?> get() = storage.tokensFlow
+
     fun isReady(): Boolean = baseUrlProvider.isReady
 
     fun getTokens(): Tokens? = storage.getTokens()

@@ -24,7 +24,19 @@ class AuthViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            refreshTokensOverview()
+            repo.tokensFlow.collect { tokens ->
+                _uiState.update {
+                    it.copy(
+                        isLoggedIn = tokens != null,
+                        userEmail = tokens?.accessToken?.let { token ->
+                            JwtUtils.getSubject(token)
+                        }
+                    )
+                }
+            }
+        }
+
+        viewModelScope.launch {
             verifySession()
         }
     }
@@ -60,7 +72,6 @@ class AuthViewModel @Inject constructor(
             repo.login(uiState.value.email, uiState.value.password)
                 .onSuccess { tokens ->
                     repo.saveTokens(tokens)
-                    refreshTokensOverview()
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
                 }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка входа") }
@@ -72,18 +83,22 @@ class AuthViewModel @Inject constructor(
         updateStatus(ConnectionStatus.LOADING)
         viewModelScope.launch {
             repo.testAuth()
-                .onSuccess { refreshTokensOverview(); updateStatus(ConnectionStatus.SUCCESS, it) }
+                .onSuccess { updateStatus(ConnectionStatus.SUCCESS, it) }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка подключения") }
-            refreshTokensOverview()
         }
     }
 
     fun verifySession() {
-        if (!repo.isReady()) { refreshTokensOverview(); return }
-        if (repo.getTokens() == null) { _uiState.update { it.copy(isLoggedIn = false) }; return }
+        if (!repo.isReady()) return
+        if (repo.getTokens() == null) return
+
         viewModelScope.launch {
-            runCatching { repo.testAuth() }
-            refreshTokensOverview()
+            _uiState.update { it.copy(isVerifying = true) }
+            try {
+                repo.testAuth()
+            } finally {
+                _uiState.update { it.copy(isVerifying = false) }
+            }
         }
     }
 
@@ -92,24 +107,8 @@ class AuthViewModel @Inject constructor(
         updateStatus(ConnectionStatus.LOADING)
         viewModelScope.launch {
             repo.logout()
-                .onSuccess { refreshTokensOverview(); updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully") }
+                .onSuccess { updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully") }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Logout error") }
-        }
-    }
-
-    fun refreshTokensOverview() {
-        val tokens = repo.getTokens()
-        val access = tokens?.accessToken
-        val refresh = tokens?.refreshToken
-        _uiState.update {
-            it.copy(
-                savedAccessToken = access,
-                savedRefreshToken = refresh,
-                isAccessValid = !JwtUtils.isExpired(access.toString()),
-                isRefreshValid = !JwtUtils.isExpired(refresh.toString()),
-                isLoggedIn = tokens != null,
-                userEmail = access?.let { JwtUtils.getSubject(it) }
-            )
         }
     }
 }
