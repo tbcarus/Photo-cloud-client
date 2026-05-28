@@ -21,20 +21,56 @@ interface MediaFileDao {
     @Query("SELECT * FROM media_files WHERE status = :status ORDER BY createdAt DESC")
     fun getByStatus(status: MediaFileStatus): Flow<List<MediaFile>>
 
+    fun getPending(): Flow<List<MediaFile>> = getByStatus(MediaFileStatus.PENDING)
+
     @Query("UPDATE media_files SET status = :status WHERE mediaStoreId = :mediaStoreId")
     suspend fun updateStatus(mediaStoreId: Long, status: MediaFileStatus)
 
-    @Query("SELECT * FROM media_files WHERE status = 'PENDING' ORDER BY createdAt DESC")
-    fun getPending(): Flow<List<MediaFile>>
+    @Query("""
+        UPDATE media_files
+        SET checksum = :checksum,
+            status = :status
+        WHERE mediaStoreId = :mediaStoreId
+    """)
+    suspend fun updateChecksum(
+        mediaStoreId: Long,
+        checksum: String,
+        status: MediaFileStatus = MediaFileStatus.CHECKSUM_READY
+    )
 
-    @Query("UPDATE media_files SET checksum = :checksum WHERE mediaStoreId = :mediaStoreId")
-    suspend fun updateChecksum(mediaStoreId: Long, checksum: String)
+    @Query("""
+        UPDATE media_files
+        SET displayName = :displayName,
+            relativePath = :relativePath,
+            mimeType = :mimeType,
+            size = :size,
+            createdAt = :createdAt,
+            lastModified = :lastModified,
+            uri = :uri
+        WHERE mediaStoreId = :mediaStoreId
+    """)
+    suspend fun updateLocalMetadata(
+        mediaStoreId: Long,
+        displayName: String,
+        relativePath: String?,
+        mimeType: String,
+        size: Long,
+        createdAt: Long,
+        lastModified: Long,
+        uri: String
+    )
 
     @Query("UPDATE media_files SET status = 'SYNCED', serverFileId = :serverFileId WHERE mediaStoreId = :mediaStoreId")
     suspend fun markUploaded(mediaStoreId: Long, serverFileId: Long)
 
     @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")
     suspend fun exists(mediaStoreId: Long): Int
+
+    @Query("SELECT mediaStoreId FROM media_files")
+    suspend fun getAllMediaStoreIds(): List<Long>
+
+    @Query("DELETE FROM media_files WHERE mediaStoreId IN (:ids)")
+    suspend fun deleteByMediaStoreIds(ids: List<Long>)
 
     @Query("SELECT MAX(createdAt) FROM media_files")
     suspend fun getLatestCreatedAt(): Long?
