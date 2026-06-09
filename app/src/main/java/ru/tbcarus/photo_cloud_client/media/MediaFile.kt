@@ -14,7 +14,7 @@ data class MediaFile(
     val mimeType: String,
     val size: Long,
     val createdAt: Long,            // DATE_TAKEN из MediaStore (ms)
-    val lastModified: Long,         // DATE_MODIFIED из MediaStore (секунды)
+    val lastModified: Long,         // DATE_MODIFIED из MediaStore, нормализован в milliseconds
     val checksum: String?,          // SHA-256, null пока не посчитан
     val status: MediaFileStatus = MediaFileStatus.PENDING
 )
