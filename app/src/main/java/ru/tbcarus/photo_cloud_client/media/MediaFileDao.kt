@@ -72,6 +72,38 @@ interface MediaFileDao {
     @Query("DELETE FROM media_files WHERE mediaStoreId IN (:ids)")
     suspend fun deleteByMediaStoreIds(ids: List<Long>)
 
+    /**
+     * Разовый snapshot записей с заданным статусом (не Flow).
+     * Используется для batch-обработки checksum без загрузки всей библиотеки в память.
+     */
+    @Query("SELECT * FROM media_files WHERE status = :status ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun getByStatusOnce(status: MediaFileStatus, limit: Int): List<MediaFile>
+
+    /**
+     * Массово переводит все записи из [sourceStatus] в [targetStatus].
+     * Используется для recovery: HASHING → PENDING после краша приложения.
+     */
+    @Query("UPDATE media_files SET status = :targetStatus WHERE status = :sourceStatus")
+    suspend fun resetStatus(sourceStatus: MediaFileStatus, targetStatus: MediaFileStatus)
+
+    /**
+     * Сбрасывает checksum и статус для конкретной записи, если изменились size или lastModified.
+     * Вызывать ДО [updateLocalMetadata] — иначе новые значения уже в БД и сравнение не сработает.
+     */
+    @Query("""
+        UPDATE media_files
+        SET checksum = NULL,
+            status = :status
+        WHERE mediaStoreId = :mediaStoreId
+          AND (size != :size OR lastModified != :lastModified)
+    """)
+    suspend fun resetChecksumIfFileChanged(
+        mediaStoreId: Long,
+        size: Long,
+        lastModified: Long,
+        status: MediaFileStatus = MediaFileStatus.PENDING
+    )
+
     @Query("SELECT MAX(createdAt) FROM media_files")
     suspend fun getLatestCreatedAt(): Long?
 }

@@ -39,9 +39,16 @@ class MediaFileRepository @Inject constructor(
 
         // 2. Обновляем MediaStore-поля для всех записей.
         // checksum, status и serverFileId не затрагиваются — это зона sync/upload этапов.
-        // TODO: на этапе checksum нужно сбрасывать checksum/status,
-        // если size или lastModified изменились после предыдущего расчёта.
         images.forEach { image ->
+            // Сбрасываем checksum, если файл изменился с момента последнего расчёта.
+            // Вызов ДО updateLocalMetadata — иначе новые size/lastModified уже в БД и сравнение не сработает.
+            // TODO: когда появится upload/sync, уточнить откат статусов SYNCED/PENDING_UPLOAD
+            // при локальном изменении файла. Сейчас checksum сбрасывается только для локального индекса.
+            dao.resetChecksumIfFileChanged(
+                mediaStoreId = image.mediaStoreId,
+                size         = image.size,
+                lastModified = image.lastModified
+            )
             dao.updateLocalMetadata(
                 mediaStoreId = image.mediaStoreId,
                 displayName  = image.displayName,
