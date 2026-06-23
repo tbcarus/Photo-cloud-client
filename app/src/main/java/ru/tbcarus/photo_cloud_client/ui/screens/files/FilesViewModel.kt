@@ -8,13 +8,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckOutcome
+import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckRepository
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.ScanOutcome
 import javax.inject.Inject
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
-    private val mediaFileRepository: MediaFileRepository
+    private val mediaFileRepository: MediaFileRepository,
+    private val checksumPrecheckRepository: ChecksumPrecheckRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -70,6 +73,38 @@ class FilesViewModel @Inject constructor(
                 }
             } finally {
                 _uiState.update { it.copy(isScanning = false) }
+            }
+        }
+    }
+
+    fun runPrecheck() {
+        if (_uiState.value.isPrechecking) return
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isPrechecking      = true,
+                    errorMessage       = null,
+                    lastPrecheckResult = null
+                )
+            }
+            try {
+                when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
+                    is ChecksumPrecheckOutcome.Success -> _uiState.update {
+                        it.copy(
+                            lastPrecheckResult = outcome.result,
+                            errorMessage       = null
+                        )
+                    }
+                    is ChecksumPrecheckOutcome.Error -> _uiState.update {
+                        it.copy(
+                            errorMessage       = outcome.message,
+                            lastPrecheckResult = null
+                        )
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(isPrechecking = false) }
             }
         }
     }

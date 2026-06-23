@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
@@ -31,7 +32,7 @@ import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
 
-    if (state.isScanning) {
+    if (state.isScanning || state.isPrechecking) {
         LoadingDialog()
     }
 
@@ -44,10 +45,21 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже заменить ручной запуск scan на автоматический/фоновый сценарий через WorkManager.
         Button(
             onClick = viewModel::scanPhotos,
-            enabled = !state.isScanning,
+            enabled = !state.isScanning && !state.isPrechecking,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Scan photos")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // TODO: позже pre-check будет частью автоматического sync pipeline.
+        Button(
+            onClick = viewModel::runPrecheck,
+            enabled = !state.isScanning && !state.isPrechecking,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Pre-check")
         }
 
         Spacer(Modifier.height(8.dp))
@@ -73,6 +85,15 @@ fun FilesScreen(viewModel: FilesViewModel) {
         state.lastScanResult?.let { result ->
             Text(
                 text = formatScanResult(result),
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+
+        // Результат последнего pre-check
+        state.lastPrecheckResult?.let { result ->
+            Text(
+                text = formatPrecheckResult(result),
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(Modifier.height(4.dp))
@@ -137,9 +158,17 @@ private fun StatusCountersRow(files: List<MediaFile>) {
     val hashing      = files.count { it.status == MediaFileStatus.HASHING }
     val checksumReady = files.count { it.status == MediaFileStatus.CHECKSUM_READY }
     val failed       = files.count { it.status == MediaFileStatus.FAILED }
+    val pendingUpload = files.count { it.status == MediaFileStatus.PENDING_UPLOAD }
+    val uploading    = files.count { it.status == MediaFileStatus.UPLOADING }
+    val synced       = files.count { it.status == MediaFileStatus.SYNCED }
 
     Text(
         text = "Total: $total | Pending: $pending | Hashing: $hashing | Ready: $checksumReady | Failed: $failed",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Text(
+        text = "Pending upload: $pendingUpload | Uploading: $uploading | Synced: $synced",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -192,3 +221,6 @@ private fun formatStatus(status: MediaFileStatus): String = when (status) {
 
 private fun formatScanResult(result: ScanResult): String =
     "Scan result: scanned = ${result.scanned}, inserted/updated = ${result.insertedOrUpdated}, deleted stale = ${result.deletedStale}"
+
+private fun formatPrecheckResult(result: ChecksumPrecheckResult): String =
+    "Pre-check result: checked = ${result.checked}, existing = ${result.existing}, pending upload = ${result.pendingUpload}, unchanged = ${result.unchanged}"

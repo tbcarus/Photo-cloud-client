@@ -106,4 +106,34 @@ interface MediaFileDao {
 
     @Query("SELECT MAX(createdAt) FROM media_files")
     suspend fun getLatestCreatedAt(): Long?
+
+    /**
+     * Snapshot записей с заданным статусом и непустым checksum.
+     * Используется для batch pre-check: берём только готовые к запросу на сервер.
+     */
+    @Query("""
+        SELECT * FROM media_files
+        WHERE status = :status
+          AND checksum IS NOT NULL
+        ORDER BY createdAt DESC
+        LIMIT :limit
+    """)
+    suspend fun getByStatusWithChecksumOnce(
+        status: MediaFileStatus,
+        limit: Int
+    ): List<MediaFile>
+
+    /**
+     * Массовое обновление статуса по списку mediaStoreId.
+     * Обновляем по mediaStoreId (а не по checksum) — безопаснее для будущих multi-folder сценариев.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = :status
+        WHERE mediaStoreId IN (:mediaStoreIds)
+    """)
+    suspend fun updateStatusByMediaStoreIds(
+        mediaStoreIds: List<Long>,
+        status: MediaFileStatus
+    )
 }

@@ -6,6 +6,8 @@ enum class MediaFileStatus {
     CHECKSUM_READY, // checksum есть, готов к pre-check с сервером
     PENDING_UPLOAD, // прошёл pre-check, ждёт загрузки на сервер
     UPLOADING,      // сейчас загружается
+    // SYNCED после pre-check может означать, что файл уже есть на сервере,
+    // но serverFileId пока неизвестен. Id будет заполнен будущим list-sync.
     SYNCED,         // есть на сервере, всё хорошо
     FAILED,         // ошибка (IO при hashing или upload), будет повтор
     LOCAL_DELETED,  // удалён локально (для будущей логики удаления на сервере)

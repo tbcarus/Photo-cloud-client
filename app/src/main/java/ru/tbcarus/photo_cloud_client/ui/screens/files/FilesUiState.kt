@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.files
 
+import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.ScanResult
 
@@ -8,5 +9,7 @@ data class FilesUiState(
     val isScanning: Boolean = false,
     val lastScanResult: ScanResult? = null, // результат последнего успешного scan
     val permissionDenied: Boolean = false,  // нет разрешения на доступ к медиа
-    val errorMessage: String? = null        // ошибка прогона (не per-file)
+    val errorMessage: String? = null,       // ошибка прогона (не per-file)
+    val isPrechecking: Boolean = false,
+    val lastPrecheckResult: ChecksumPrecheckResult? = null
 )
