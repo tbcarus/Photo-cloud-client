@@ -12,6 +12,7 @@ object ApiPaths {
     const val AUTH_LOGOUT = "$API_V1/auth/logout"
 
     const val FILES = "$API_V1/files"
+    const val FILES_UPLOAD = "$FILES/upload"
     const val FILES_CHECKSUMS_EXISTS = "$FILES/checksums/exists"
 
     const val FOLDERS = "$API_V1/folders"

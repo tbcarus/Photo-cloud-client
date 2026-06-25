@@ -32,6 +32,8 @@ object NetworkModule {
             .addInterceptor(logging)
             .build()
 
+    // TODO: при появлении фоновой синхронизации можно выделить отдельный upload client.
+    // Read/write увеличены до 60s: 5s почти наверняка мало для upload файла.
     @Provides
     @Singleton
     @Named("auth")
@@ -41,9 +43,9 @@ object NetworkModule {
         tokenAuthenticator: TokenAuthenticator
     ): OkHttpClient =
         OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .writeTimeout(5, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .addInterceptor(logging)
             .addInterceptor(authInterceptor)
             .authenticator(tokenAuthenticator)

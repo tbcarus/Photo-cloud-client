@@ -10,14 +10,17 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckOutcome
 import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckRepository
+import ru.tbcarus.photo_cloud_client.media.FileUploadRepository
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.ScanOutcome
+import ru.tbcarus.photo_cloud_client.media.UploadOutcome
 import javax.inject.Inject
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
-    private val checksumPrecheckRepository: ChecksumPrecheckRepository
+    private val checksumPrecheckRepository: ChecksumPrecheckRepository,
+    private val fileUploadRepository: FileUploadRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -105,6 +108,38 @@ class FilesViewModel @Inject constructor(
                 }
             } finally {
                 _uiState.update { it.copy(isPrechecking = false) }
+            }
+        }
+    }
+
+    fun uploadPending() {
+        if (_uiState.value.isUploading) return
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isUploading      = true,
+                    errorMessage     = null,
+                    lastUploadResult = null
+                )
+            }
+            try {
+                when (val outcome = fileUploadRepository.uploadPendingCameraFiles()) {
+                    is UploadOutcome.Success -> _uiState.update {
+                        it.copy(
+                            lastUploadResult = outcome.result,
+                            errorMessage     = null
+                        )
+                    }
+                    is UploadOutcome.Error -> _uiState.update {
+                        it.copy(
+                            errorMessage     = outcome.message,
+                            lastUploadResult = outcome.result
+                        )
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(isUploading = false) }
             }
         }
     }

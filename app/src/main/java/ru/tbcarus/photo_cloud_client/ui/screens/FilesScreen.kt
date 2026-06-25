@@ -25,6 +25,7 @@ import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
+import ru.tbcarus.photo_cloud_client.media.UploadResult
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 
@@ -32,7 +33,7 @@ import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
 
-    if (state.isScanning || state.isPrechecking) {
+    if (state.isScanning || state.isPrechecking || state.isUploading) {
         LoadingDialog()
     }
 
@@ -45,7 +46,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже заменить ручной запуск scan на автоматический/фоновый сценарий через WorkManager.
         Button(
             onClick = viewModel::scanPhotos,
-            enabled = !state.isScanning && !state.isPrechecking,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Scan photos")
@@ -56,10 +57,21 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже pre-check будет частью автоматического sync pipeline.
         Button(
             onClick = viewModel::runPrecheck,
-            enabled = !state.isScanning && !state.isPrechecking,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Pre-check")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // TODO: позже upload будет выполняться автоматически через WorkManager.
+        Button(
+            onClick = viewModel::uploadPending,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Upload pending")
         }
 
         Spacer(Modifier.height(8.dp))
@@ -94,6 +106,15 @@ fun FilesScreen(viewModel: FilesViewModel) {
         state.lastPrecheckResult?.let { result ->
             Text(
                 text = formatPrecheckResult(result),
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+
+        // Результат последнего upload
+        state.lastUploadResult?.let { result ->
+            Text(
+                text = formatUploadResult(result),
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(Modifier.height(4.dp))
@@ -224,3 +245,6 @@ private fun formatScanResult(result: ScanResult): String =
 
 private fun formatPrecheckResult(result: ChecksumPrecheckResult): String =
     "Pre-check result: checked = ${result.checked}, existing = ${result.existing}, pending upload = ${result.pendingUpload}, unchanged = ${result.unchanged}"
+
+private fun formatUploadResult(result: UploadResult): String =
+    "Upload result: attempted = ${result.attempted}, succeeded = ${result.succeeded}, failed = ${result.failed}, left pending = ${result.leftPending}"
