@@ -87,12 +87,14 @@ interface MediaFileDao {
     suspend fun resetStatus(sourceStatus: MediaFileStatus, targetStatus: MediaFileStatus)
 
     /**
-     * Сбрасывает checksum и статус для конкретной записи, если изменились size или lastModified.
+     * Сбрасывает checksum, serverFileId и статус для конкретной записи, если изменились size или lastModified.
      * Вызывать ДО [updateLocalMetadata] — иначе новые значения уже в БД и сравнение не сработает.
      */
+    // При изменении локального файла старый serverFileId больше не соответствует содержимому.
     @Query("""
         UPDATE media_files
         SET checksum = NULL,
+            serverFileId = NULL,
             status = :status
         WHERE mediaStoreId = :mediaStoreId
           AND (size != :size OR lastModified != :lastModified)

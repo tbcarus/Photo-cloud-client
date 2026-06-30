@@ -33,7 +33,7 @@ import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
 
-    if (state.isScanning || state.isPrechecking || state.isUploading) {
+    if (state.isScanning || state.isPrechecking || state.isUploading || state.isSyncing) {
         LoadingDialog()
     }
 
@@ -46,7 +46,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже заменить ручной запуск scan на автоматический/фоновый сценарий через WorkManager.
         Button(
             onClick = viewModel::scanPhotos,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Scan photos")
@@ -57,7 +57,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже pre-check будет частью автоматического sync pipeline.
         Button(
             onClick = viewModel::runPrecheck,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Pre-check")
@@ -68,10 +68,21 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // TODO: позже upload будет выполняться автоматически через WorkManager.
         Button(
             onClick = viewModel::uploadPending,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Upload pending")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // TODO: periodic sync будет добавлен отдельным этапом.
+        Button(
+            onClick = viewModel::runSync,
+            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Run sync")
         }
 
         Spacer(Modifier.height(8.dp))

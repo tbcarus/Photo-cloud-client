@@ -13,6 +13,7 @@ import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckRepository
 import ru.tbcarus.photo_cloud_client.media.FileUploadRepository
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.ScanOutcome
+import ru.tbcarus.photo_cloud_client.media.SyncScheduler
 import ru.tbcarus.photo_cloud_client.media.UploadOutcome
 import javax.inject.Inject
 
@@ -20,7 +21,8 @@ import javax.inject.Inject
 class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
-    private val fileUploadRepository: FileUploadRepository
+    private val fileUploadRepository: FileUploadRepository,
+    private val syncScheduler: SyncScheduler
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -31,6 +33,13 @@ class FilesViewModel @Inject constructor(
         viewModelScope.launch {
             mediaFileRepository.observeAll().collect { files ->
                 _uiState.update { it.copy(files = files) }
+            }
+        }
+
+        // Отражаем состояние WorkManager-sync в UI (для disable кнопок и LoadingDialog).
+        viewModelScope.launch {
+            syncScheduler.observeIsSyncing().collect { syncing ->
+                _uiState.update { it.copy(isSyncing = syncing) }
             }
         }
     }
@@ -142,6 +151,11 @@ class FilesViewModel @Inject constructor(
                 _uiState.update { it.copy(isUploading = false) }
             }
         }
+    }
+
+    fun runSync() {
+        // ViewModel не работает с WorkManager напрямую — только через SyncScheduler.
+        syncScheduler.enqueueOneTimeSync()
     }
 
     fun clearMessages() {

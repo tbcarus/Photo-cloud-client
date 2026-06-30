@@ -14,5 +14,6 @@ data class FilesUiState(
     val isPrechecking: Boolean = false,
     val lastPrecheckResult: ChecksumPrecheckResult? = null,
     val isUploading: Boolean = false,
-    val lastUploadResult: UploadResult? = null
+    val lastUploadResult: UploadResult? = null,
+    val isSyncing: Boolean = false
 )
