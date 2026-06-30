@@ -1,5 +1,10 @@
 package ru.tbcarus.photo_cloud_client.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -18,9 +23,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
@@ -32,6 +40,35 @@ import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 @Composable
 fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+
+    // Разрешение зависит от версии Android: с Android 13 (TIRAMISU) — точечное READ_MEDIA_IMAGES.
+    val mediaPermission = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_IMAGES
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+    }
+
+    // Если разрешили — scan выполнится; если отказали — scanImages вернёт PermissionDenied,
+    // и отобразится существующая card. Сам scan без доступа фактически не запускается.
+    // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        viewModel.scanPhotos()
+    }
+
+    fun onScanClick() {
+        val granted = ContextCompat.checkSelfPermission(context, mediaPermission) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            viewModel.scanPhotos()
+        } else {
+            permissionLauncher.launch(mediaPermission)
+        }
+    }
 
     if (state.isScanning || state.isPrechecking || state.isUploading || state.isSyncing) {
         LoadingDialog()
@@ -45,7 +82,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
         // Кнопка ручного запуска scan
         // TODO: позже заменить ручной запуск scan на автоматический/фоновый сценарий через WorkManager.
         Button(
-            onClick = viewModel::scanPhotos,
+            onClick = { onScanClick() },
             enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
             modifier = Modifier.fillMaxWidth()
         ) {
