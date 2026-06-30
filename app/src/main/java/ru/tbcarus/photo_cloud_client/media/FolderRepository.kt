@@ -31,6 +31,8 @@ class FolderRepository @Inject constructor(
      * root → children → поиск по folderType == "CAMERA".
      */
     suspend fun resolveCameraFolderId(): CameraFolderOutcome = withContext(Dispatchers.IO) {
+        // TODO: Кэшировать идентификатор CAMERA-папки,
+        // чтобы не выполнять GET /folders/root и GET /folders/{id}/children перед каждой синхронизацией.
         try {
             val rootResp = apiServiceFactory.authFolderService().getRoot().execute()
             if (!rootResp.isSuccessful) {

@@ -51,6 +51,8 @@ class MediaStoreRepository @Inject constructor(
             MediaStore.Images.Media.DATE_ADDED
         )
 
+        // TODO: Для автосинхронизации перейти на сканирование только камеры (DCIM/Camera или минимум DCIM/),
+        // сейчас для упрощения разработки читаются все изображения из MediaStore.
         val cursor = context.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,

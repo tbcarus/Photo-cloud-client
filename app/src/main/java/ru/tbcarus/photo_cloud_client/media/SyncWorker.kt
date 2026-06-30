@@ -9,6 +9,8 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
+import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 
 /**
  * Автоматический one-time sync через WorkManager.
@@ -21,7 +23,9 @@ class SyncWorker @AssistedInject constructor(
     private val mediaFileRepository: MediaFileRepository,
     private val checksumRepository: ChecksumRepository,
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
-    private val fileUploadRepository: FileUploadRepository
+    private val fileUploadRepository: FileUploadRepository,
+    private val serverRepository: ServerRepository,
+    private val baseUrlProvider: BaseUrlProvider
 ) : CoroutineWorker(appContext, params) {
 
     private companion object {
@@ -39,6 +43,14 @@ class SyncWorker @AssistedInject constructor(
     }
 
     private suspend fun runSync(): Result {
+        // Быстрая проверка доступности сервера через существующую тестовую ручку (GET /api/v1/test).
+        // Если сервер недоступен — не гоняем весь pipeline впустую в timeout, а сразу просим повтор.
+        val baseUrl = baseUrlProvider.baseUrl
+        if (baseUrl.isBlank() || serverRepository.testConnection(baseUrl).isFailure) {
+            Log.w(TAG, "Сервер недоступен — откладываем sync")
+            return Result.retry()
+        }
+
         var sync = SyncResult()
 
         // 1. Scan
