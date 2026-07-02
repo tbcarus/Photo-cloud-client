@@ -3,6 +3,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.files
 import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.ScanResult
+import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
 import ru.tbcarus.photo_cloud_client.media.UploadResult
 
 data class FilesUiState(
@@ -15,5 +16,6 @@ data class FilesUiState(
     val lastPrecheckResult: ChecksumPrecheckResult? = null,
     val isUploading: Boolean = false,
     val lastUploadResult: UploadResult? = null,
-    val isSyncing: Boolean = false
+    val isSyncing: Boolean = false,
+    val lastSyncStatus: SyncStatusRecord? = null
 )

@@ -19,7 +19,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class SyncScheduler @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val syncStatusStore: SyncStatusStore
 ) {
 
     companion object {
@@ -43,15 +44,18 @@ class SyncScheduler @Inject constructor(
         )
     }
 
-    /** true, пока sync находится в очереди или выполняется. */
+    /**
+     * true только пока worker реально выполняется (RUNNING).
+     * ENQUEUED / BLOCKED означают «запланировано / ждёт retry», а не активный прогон —
+     * иначе UI показывал бы бесконечный loader между попытками retry.
+     */
     fun observeIsSyncing(): Flow<Boolean> =
         WorkManager.getInstance(context)
             .getWorkInfosForUniqueWorkFlow(UNIQUE_SYNC_WORK_NAME)
             .map { infos ->
-                infos.any { info ->
-                    info.state == WorkInfo.State.ENQUEUED ||
-                        info.state == WorkInfo.State.RUNNING ||
-                        info.state == WorkInfo.State.BLOCKED
-                }
+                infos.any { info -> info.state == WorkInfo.State.RUNNING }
             }
+
+    /** Итог последнего завершённого прогона sync (null, если ещё не запускался в этой сессии). */
+    fun observeLastSyncStatus(): Flow<SyncStatusRecord?> = syncStatusStore.observe()
 }

@@ -25,7 +25,8 @@ class SyncWorker @AssistedInject constructor(
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
     private val fileUploadRepository: FileUploadRepository,
     private val serverRepository: ServerRepository,
-    private val baseUrlProvider: BaseUrlProvider
+    private val baseUrlProvider: BaseUrlProvider,
+    private val syncStatusStore: SyncStatusStore
 ) : CoroutineWorker(appContext, params) {
 
     private companion object {
@@ -38,6 +39,7 @@ class SyncWorker @AssistedInject constructor(
         } catch (e: Exception) {
             // Не пробрасываем исключение наружу — даём WorkManager шанс повторить.
             Log.e(TAG, "Sync завершился исключением", e)
+            syncStatusStore.record(SyncStatus.ERROR)
             Result.retry()
         }
     }
@@ -48,6 +50,7 @@ class SyncWorker @AssistedInject constructor(
         val baseUrl = baseUrlProvider.baseUrl
         if (baseUrl.isBlank() || serverRepository.testConnection(baseUrl).isFailure) {
             Log.w(TAG, "Сервер недоступен — откладываем sync")
+            syncStatusStore.record(SyncStatus.SERVER_UNAVAILABLE)
             return Result.retry()
         }
 
@@ -58,20 +61,29 @@ class SyncWorker @AssistedInject constructor(
             is ScanOutcome.Success -> sync = sync.copy(scan = outcome.result)
             // Фоновый worker не может запросить runtime-разрешение — это не crash и не retry.
             is ScanOutcome.PermissionDenied -> return Result.success()
-            is ScanOutcome.Error -> return Result.retry()
+            is ScanOutcome.Error -> {
+                syncStatusStore.record(SyncStatus.ERROR)
+                return Result.retry()
+            }
         }
 
         // 2. Checksum (обязательная стадия — без неё pipeline стоит)
         when (val outcome = checksumRepository.computePendingChecksums()) {
             is ChecksumOutcome.Success -> sync = sync.copy(checksum = outcome.result)
             is ChecksumOutcome.PermissionDenied -> return Result.success()
-            is ChecksumOutcome.Error -> return Result.retry()
+            is ChecksumOutcome.Error -> {
+                syncStatusStore.record(SyncStatus.ERROR)
+                return Result.retry()
+            }
         }
 
         // 3. Pre-check
         when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
             is ChecksumPrecheckOutcome.Success -> sync = sync.copy(precheck = outcome.result)
-            is ChecksumPrecheckOutcome.Error -> return Result.retry()
+            is ChecksumPrecheckOutcome.Error -> {
+                syncStatusStore.record(SyncStatus.ERROR)
+                return Result.retry()
+            }
         }
 
         // 4. Upload
@@ -91,7 +103,14 @@ class SyncWorker @AssistedInject constructor(
             }
         }
 
-        return if (retryNeeded) Result.retry() else Result.success(buildOutput(sync))
+        return if (retryNeeded) {
+            // Осталась очередь / transient error на upload — WorkManager повторит.
+            syncStatusStore.record(SyncStatus.RETRY_SCHEDULED)
+            Result.retry()
+        } else {
+            syncStatusStore.record(SyncStatus.SUCCESS)
+            Result.success(buildOutput(sync))
+        }
     }
 
     /** Минимальная сводка по стадиям — для логов/диагностики через outputData. */

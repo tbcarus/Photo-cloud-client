@@ -42,6 +42,13 @@ class FilesViewModel @Inject constructor(
                 _uiState.update { it.copy(isSyncing = syncing) }
             }
         }
+
+        // Итог последнего прогона sync — для card под кнопками.
+        viewModelScope.launch {
+            syncScheduler.observeLastSyncStatus().collect { status ->
+                _uiState.update { it.copy(lastSyncStatus = status) }
+            }
+        }
     }
 
     fun scanPhotos() {

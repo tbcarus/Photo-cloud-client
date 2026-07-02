@@ -33,6 +33,8 @@ import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
+import ru.tbcarus.photo_cloud_client.media.SyncStatus
+import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
 import ru.tbcarus.photo_cloud_client.media.UploadResult
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
@@ -123,6 +125,12 @@ fun FilesScreen(viewModel: FilesViewModel) {
         }
 
         Spacer(Modifier.height(8.dp))
+
+        // Итог последнего прогона sync
+        state.lastSyncStatus?.let { status ->
+            SyncStatusCard(status)
+            Spacer(Modifier.height(8.dp))
+        }
 
         // Предупреждение об отсутствии разрешения
         if (state.permissionDenied) {
@@ -217,6 +225,39 @@ private fun PermissionDeniedCard() {
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
         }
+    }
+}
+
+@Composable
+private fun SyncStatusCard(record: SyncStatusRecord) {
+    val message = when (record.status) {
+        SyncStatus.SUCCESS            -> "Синхронизация завершена"
+        SyncStatus.SERVER_UNAVAILABLE -> "Сервер недоступен, повтор будет выполнен позже"
+        SyncStatus.ERROR              -> "Ошибка синхронизации, повтор будет выполнен позже"
+        SyncStatus.RETRY_SCHEDULED    -> "Синхронизация ожидает повтора"
+    }
+    val isProblem = record.status != SyncStatus.SUCCESS
+    val container = if (isProblem) {
+        MaterialTheme.colorScheme.errorContainer
+    } else {
+        MaterialTheme.colorScheme.secondaryContainer
+    }
+    val onContainer = if (isProblem) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = container),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = onContainer,
+            modifier = Modifier.padding(12.dp)
+        )
     }
 }
 
