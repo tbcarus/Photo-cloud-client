@@ -9,13 +9,15 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.auth.AuthRepository
 import ru.tbcarus.photo_cloud_client.auth.AuthUiState
+import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
 import javax.inject.Inject
 
 @HiltViewModel
 class AuthViewModel @Inject constructor(
-    private val repo: AuthRepository
+    private val repo: AuthRepository,
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AuthUiState())
@@ -71,6 +73,8 @@ class AuthViewModel @Inject constructor(
             repo.login(uiState.value.email, uiState.value.password)
                 .onSuccess { tokens ->
                     repo.saveTokens(tokens)
+                    // Токены появились — включаем periodic sync (от текущего состояния).
+                    periodicSyncCoordinator.reconcile()
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
                 }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка входа") }
@@ -108,6 +112,8 @@ class AuthViewModel @Inject constructor(
             repo.logout()
                 .onSuccess { updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully") }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Logout error") }
+            // logout() очищает токены в обоих исходах — переоцениваем periodic sync (отменяем).
+            periodicSyncCoordinator.reconcile()
         }
     }
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
+import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.isValidIpAddress
 import javax.inject.Inject
@@ -20,7 +21,8 @@ import javax.inject.Inject
 class NetworkViewModel @Inject constructor(
     private val baseUrlProvider: BaseUrlProvider,
     private val serverPreferences: ServerPreferences,
-    private val serverRepository: ServerRepository
+    private val serverRepository: ServerRepository,
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NetworkUiState())
@@ -35,6 +37,8 @@ class NetworkViewModel @Inject constructor(
                 _uiState.update { it.copy(ip = ip, port = port) }
                 testConnection()
             }
+            // baseUrl восстановлен (или нет) — переоцениваем periodic sync от текущего состояния.
+            periodicSyncCoordinator.reconcile()
         }
     }
 

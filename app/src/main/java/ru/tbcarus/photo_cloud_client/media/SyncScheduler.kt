@@ -2,14 +2,17 @@ package ru.tbcarus.photo_cloud_client.media
 
 import android.content.Context
 import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,6 +28,8 @@ class SyncScheduler @Inject constructor(
 
     companion object {
         const val UNIQUE_SYNC_WORK_NAME = "photo_sync"
+        private const val UNIQUE_PERIODIC_SYNC_WORK_NAME = "photo_sync_periodic"
+        private const val PERIODIC_INTERVAL_HOURS = 1L
     }
 
     fun enqueueOneTimeSync() {
@@ -42,6 +47,36 @@ class SyncScheduler @Inject constructor(
             ExistingWorkPolicy.KEEP,
             request
         )
+    }
+
+    /**
+     * Периодический фоновый sync (тот же [SyncWorker], отдельное unique-имя).
+     * Интервал 1 час; для periodic дополнительно требуем «батарея не низкая», чтобы
+     * фоновый прогон не запускал тяжёлый pipeline при низком заряде.
+     */
+    fun enqueuePeriodicSync() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiresBatteryNotLow(true)
+            .build()
+
+        val request = PeriodicWorkRequestBuilder<SyncWorker>(
+            PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS
+        )
+            .setConstraints(constraints)
+            .build()
+
+        // UPDATE подхватывает новые параметры расписания, не сбрасывая отсчитанный период.
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            UNIQUE_PERIODIC_SYNC_WORK_NAME,
+            ExistingPeriodicWorkPolicy.UPDATE,
+            request
+        )
+    }
+
+    fun cancelPeriodicSync() {
+        WorkManager.getInstance(context)
+            .cancelUniqueWork(UNIQUE_PERIODIC_SYNC_WORK_NAME)
     }
 
     /**
