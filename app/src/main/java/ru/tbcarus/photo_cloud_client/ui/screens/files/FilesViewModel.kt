@@ -8,21 +8,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckOutcome
-import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckRepository
-import ru.tbcarus.photo_cloud_client.media.FileUploadRepository
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.media.ScanOutcome
 import ru.tbcarus.photo_cloud_client.media.SyncScheduler
-import ru.tbcarus.photo_cloud_client.media.UploadOutcome
 import javax.inject.Inject
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
-    private val checksumPrecheckRepository: ChecksumPrecheckRepository,
-    private val fileUploadRepository: FileUploadRepository,
     private val syncScheduler: SyncScheduler,
     private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : ViewModel() {
@@ -98,78 +92,20 @@ class FilesViewModel @Inject constructor(
         }
     }
 
-    fun runPrecheck() {
-        if (_uiState.value.isPrechecking) return
+    /** true, если автосинк настроен (есть токены и baseUrl) — можно запрашивать media permission. */
+    fun isAutoSyncConfigured(): Boolean = periodicSyncCoordinator.isAutoSyncConfigured()
 
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isPrechecking      = true,
-                    errorMessage       = null,
-                    lastPrecheckResult = null
-                )
-            }
-            try {
-                when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
-                    is ChecksumPrecheckOutcome.Success -> _uiState.update {
-                        it.copy(
-                            lastPrecheckResult = outcome.result,
-                            errorMessage       = null
-                        )
-                    }
-                    is ChecksumPrecheckOutcome.Error -> _uiState.update {
-                        it.copy(
-                            errorMessage       = outcome.message,
-                            lastPrecheckResult = null
-                        )
-                    }
-                }
-            } finally {
-                _uiState.update { it.copy(isPrechecking = false) }
-            }
-        }
-    }
-
-    fun uploadPending() {
-        if (_uiState.value.isUploading) return
-
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isUploading      = true,
-                    errorMessage     = null,
-                    lastUploadResult = null
-                )
-            }
-            try {
-                when (val outcome = fileUploadRepository.uploadPendingCameraFiles()) {
-                    is UploadOutcome.Success -> _uiState.update {
-                        it.copy(
-                            lastUploadResult = outcome.result,
-                            errorMessage     = null
-                        )
-                    }
-                    is UploadOutcome.Error -> _uiState.update {
-                        it.copy(
-                            errorMessage     = outcome.message,
-                            lastUploadResult = outcome.result
-                        )
-                    }
-                }
-            } finally {
-                _uiState.update { it.copy(isUploading = false) }
-            }
-        }
-    }
-
-    fun runSync() {
-        // ViewModel не работает с WorkManager напрямую — только через SyncScheduler.
-        syncScheduler.enqueueOneTimeSync()
+    /**
+     * Вызывать при входе на экран, когда media permission уже выдано.
+     * Поднимает автосинк (observer + periodic) без scan — просто гарантирует, что он запущен.
+     */
+    fun ensureAutoSyncStarted() {
+        periodicSyncCoordinator.reconcile()
     }
 
     /**
      * Вызывать после выдачи runtime-разрешения на фото.
-     * Переоцениваем автосинк (включаем periodic + observer), затем как раньше — scan.
+     * Переоцениваем автосинк (включаем periodic + observer), затем — scan для немедленного индекса.
      */
     fun onMediaPermissionGranted() {
         periodicSyncCoordinator.reconcile()

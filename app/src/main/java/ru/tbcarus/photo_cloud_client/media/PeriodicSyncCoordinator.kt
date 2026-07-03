@@ -28,6 +28,13 @@ class PeriodicSyncCoordinator @Inject constructor(
     private val syncScheduler: SyncScheduler,
     private val mediaChangeObserver: MediaChangeObserver
 ) {
+    /**
+     * true, если автосинк настроен: есть токены и baseUrl.
+     * Media permission НЕ учитывается — именно его UI запрашивает при входе на экран.
+     */
+    fun isAutoSyncConfigured(): Boolean =
+        authRepository.getTokens() != null && authRepository.isReady()
+
     fun reconcile() {
         val hasTokens = authRepository.getTokens() != null
         val hasBaseUrl = authRepository.isReady()

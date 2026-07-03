@@ -14,13 +14,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -29,13 +29,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckResult
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
 import ru.tbcarus.photo_cloud_client.media.SyncStatus
 import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
-import ru.tbcarus.photo_cloud_client.media.UploadResult
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 
@@ -53,8 +51,8 @@ fun FilesScreen(viewModel: FilesViewModel) {
         }
     }
 
-    // Если разрешили — scan выполнится; если отказали — scanImages вернёт PermissionDenied,
-    // и отобразится существующая card. Сам scan без доступа фактически не запускается.
+    // Если разрешили — включаем автосинк и делаем scan; если отказали — scanImages вернёт
+    // PermissionDenied и отобразится существующая card.
     // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -68,17 +66,22 @@ fun FilesScreen(viewModel: FilesViewModel) {
         }
     }
 
-    fun onScanClick() {
-        val granted = ContextCompat.checkSelfPermission(context, mediaPermission) ==
-            PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            viewModel.scanPhotos()
-        } else {
-            permissionLauncher.launch(mediaPermission)
+    // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan):
+    // если пользователь залогинен и baseUrl настроен — запрашиваем разрешение (или,
+    // если оно уже есть, просто поднимаем observer + periodic через reconcile()).
+    LaunchedEffect(Unit) {
+        if (viewModel.isAutoSyncConfigured()) {
+            val granted = ContextCompat.checkSelfPermission(context, mediaPermission) ==
+                PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                viewModel.ensureAutoSyncStarted()
+            } else {
+                permissionLauncher.launch(mediaPermission)
+            }
         }
     }
 
-    if (state.isScanning || state.isPrechecking || state.isUploading || state.isSyncing) {
+    if (state.isScanning || state.isSyncing) {
         LoadingDialog()
     }
 
@@ -87,50 +90,9 @@ fun FilesScreen(viewModel: FilesViewModel) {
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        // Кнопка ручного запуска scan
-        // TODO: позже заменить ручной запуск scan на автоматический/фоновый сценарий через WorkManager.
-        Button(
-            onClick = { onScanClick() },
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Scan photos")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // TODO: позже pre-check будет частью автоматического sync pipeline.
-        Button(
-            onClick = viewModel::runPrecheck,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Pre-check")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // TODO: позже upload будет выполняться автоматически через WorkManager.
-        Button(
-            onClick = viewModel::uploadPending,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Upload pending")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // TODO: periodic sync будет добавлен отдельным этапом.
-        Button(
-            onClick = viewModel::runSync,
-            enabled = !state.isScanning && !state.isPrechecking && !state.isUploading && !state.isSyncing,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Run sync")
-        }
-
-        Spacer(Modifier.height(8.dp))
+        // Экран — монитор состояния автосинхронизации. Ручные debug-кнопки удалены (Stage 5J.2);
+        // permission/bootstrap автосинка выполняются в LaunchedEffect выше, синхронизацию ведут
+        // MediaChangeObserver + periodic WorkManager.
 
         // Итог последнего прогона sync
         state.lastSyncStatus?.let { status ->
@@ -164,24 +126,6 @@ fun FilesScreen(viewModel: FilesViewModel) {
             Spacer(Modifier.height(4.dp))
         }
 
-        // Результат последнего pre-check
-        state.lastPrecheckResult?.let { result ->
-            Text(
-                text = formatPrecheckResult(result),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(4.dp))
-        }
-
-        // Результат последнего upload
-        state.lastUploadResult?.let { result ->
-            Text(
-                text = formatUploadResult(result),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(4.dp))
-        }
-
         // Счётчики по статусам — производные от files, не хранятся в UiState
         // TODO: запуск checksum и отображение прогресса будут добавлены отдельным этапом.
         StatusCountersRow(files = state.files)
@@ -198,7 +142,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                Text("Нет локальных фото. Нажмите Scan photos.")
+                Text("Нет локальных фото. Синхронизация запустится автоматически.")
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -337,9 +281,3 @@ private fun formatStatus(status: MediaFileStatus): String = when (status) {
 
 private fun formatScanResult(result: ScanResult): String =
     "Scan result: scanned = ${result.scanned}, inserted/updated = ${result.insertedOrUpdated}, deleted stale = ${result.deletedStale}"
-
-private fun formatPrecheckResult(result: ChecksumPrecheckResult): String =
-    "Pre-check result: checked = ${result.checked}, existing = ${result.existing}, pending upload = ${result.pendingUpload}, unchanged = ${result.unchanged}"
-
-private fun formatUploadResult(result: UploadResult): String =
-    "Upload result: attempted = ${result.attempted}, succeeded = ${result.succeeded}, failed = ${result.failed}, left pending = ${result.leftPending}"
