@@ -58,8 +58,14 @@ fun FilesScreen(viewModel: FilesViewModel) {
     // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { _ ->
-        viewModel.scanPhotos()
+    ) { isGranted ->
+        if (isGranted) {
+            // Доступ выдан — включаем автосинк (periodic + observer) и запускаем scan.
+            viewModel.onMediaPermissionGranted()
+        } else {
+            // Отказ — прежнее поведение: scan вернёт PermissionDenied и покажет card.
+            viewModel.scanPhotos()
+        }
     }
 
     fun onScanClick() {

@@ -12,6 +12,7 @@ import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckOutcome
 import ru.tbcarus.photo_cloud_client.media.ChecksumPrecheckRepository
 import ru.tbcarus.photo_cloud_client.media.FileUploadRepository
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
+import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.media.ScanOutcome
 import ru.tbcarus.photo_cloud_client.media.SyncScheduler
 import ru.tbcarus.photo_cloud_client.media.UploadOutcome
@@ -22,7 +23,8 @@ class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
     private val fileUploadRepository: FileUploadRepository,
-    private val syncScheduler: SyncScheduler
+    private val syncScheduler: SyncScheduler,
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -163,6 +165,15 @@ class FilesViewModel @Inject constructor(
     fun runSync() {
         // ViewModel не работает с WorkManager напрямую — только через SyncScheduler.
         syncScheduler.enqueueOneTimeSync()
+    }
+
+    /**
+     * Вызывать после выдачи runtime-разрешения на фото.
+     * Переоцениваем автосинк (включаем periodic + observer), затем как раньше — scan.
+     */
+    fun onMediaPermissionGranted() {
+        periodicSyncCoordinator.reconcile()
+        scanPhotos()
     }
 
     fun clearMessages() {
