@@ -51,12 +51,19 @@ class MediaStoreRepository @Inject constructor(
             MediaStore.Images.Media.DATE_ADDED
         )
 
-        // TODO: Для автосинхронизации перейти на сканирование только камеры (DCIM/Camera или минимум DCIM/),
-        // сейчас для упрощения разработки читаются все изображения из MediaStore.
+        // Сканируем только папку DCIM/ (снимки/видео устройства), исключая Download, Pictures,
+        // Pictures/Screenshots и т.п. Широкий фильтр DCIM/% переносим между вендорами (имя подпапки
+        // камеры отличается). Фильтр применяется в запросе MediaStore, а не пост-фильтром.
+        // TODO: При необходимости уточнить фильтр до конкретных подпапок камеры, если DCIM/ будет захватывать лишнее.
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("DCIM/%")
+
         val cursor = context.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,
-            null, null, null
+            selection,
+            selectionArgs,
+            null
         ) ?: return@withContext MediaStoreScanOutcome.Error("MediaStore query вернул null cursor")
 
         return@withContext try {
