@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.FileNotFoundException
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -26,6 +28,32 @@ class ChecksumRepository @Inject constructor(
     private companion object {
         const val CHECKSUM_BATCH_SIZE = 100
         const val TAG = "ChecksumRepository"
+
+        // Stage 5K: ограниченный auto-retry для временных (CHECKSUM_IO) ошибок.
+        const val MAX_AUTO_RETRY_COUNT = 3
+        const val RETRY_COOLDOWN_MS = 5 * 60 * 1000L
+        const val RETRY_RESTORE_BATCH_SIZE = 500
+    }
+
+    /**
+     * Возвращает в pipeline временно упавшие (CHECKSUM_IO) записи, у которых
+     * не исчерпан лимит попыток и прошёл cooldown. Один снимок за вызов —
+     * восстановленные записи становятся PENDING и в этом же прогоне повторно не выбираются
+     * (см. требование Stage 5K: максимум один retry записи за проход worker'а).
+     * @return число восстановленных записей.
+     */
+    suspend fun restoreRetryableFailed(): Int = withContext(Dispatchers.IO) {
+        val retryBefore = System.currentTimeMillis() - RETRY_COOLDOWN_MS
+        val batch = mediaFileDao.getRetryableFailed(
+            reason = FailureReason.CHECKSUM_IO,
+            maxRetryCount = MAX_AUTO_RETRY_COUNT,
+            retryBefore = retryBefore,
+            limit = RETRY_RESTORE_BATCH_SIZE
+        )
+        for (file in batch) {
+            mediaFileDao.resetFailedForRetry(file.mediaStoreId)
+        }
+        batch.size
     }
 
     /**
@@ -78,7 +106,7 @@ class ChecksumRepository @Inject constructor(
                     val stream = context.contentResolver.openInputStream(Uri.parse(file.uri))
                     if (stream == null) {
                         Log.w(TAG, "openInputStream вернул null, mediaStoreId=${file.mediaStoreId}")
-                        mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                        mediaFileDao.markFailed(file.mediaStoreId, FailureReason.FILE_NOT_FOUND, System.currentTimeMillis())
                         failed++
                         continue
                     }
@@ -90,11 +118,20 @@ class ChecksumRepository @Inject constructor(
                 } catch (e: SecurityException) {
                     // TODO: позже различать per-file ошибки доступа и общий отзыв permission.
                     Log.w(TAG, "Ошибка доступа, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.PERMISSION, System.currentTimeMillis())
+                    failed++
+                } catch (e: FileNotFoundException) {
+                    Log.w(TAG, "Файл не найден, mediaStoreId=${file.mediaStoreId}: ${e.message}")
+                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.FILE_NOT_FOUND, System.currentTimeMillis())
+                    failed++
+                } catch (e: IOException) {
+                    // Временная IO-ошибка чтения — единственная retryable причина.
+                    Log.w(TAG, "IO-ошибка checksum, mediaStoreId=${file.mediaStoreId}: ${e.message}")
+                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.CHECKSUM_IO, System.currentTimeMillis())
                     failed++
                 } catch (e: Exception) {
-                    Log.w(TAG, "Ошибка при расчёте checksum, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                    Log.w(TAG, "Неизвестная ошибка checksum, mediaStoreId=${file.mediaStoreId}: ${e.message}")
+                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.UNKNOWN, System.currentTimeMillis())
                     failed++
                 }
             }

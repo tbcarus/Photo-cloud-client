@@ -56,6 +56,12 @@ class SyncWorker @AssistedInject constructor(
 
         var sync = SyncResult()
 
+        // 0. Auto-retry (Stage 5K): до обычного pipeline возвращаем в очередь
+        // временно упавшие (CHECKSUM_IO) записи, у которых прошёл cooldown и не исчерпан лимит попыток.
+        // Восстанавливаем один раз за проход — повторно упавшие записи в этом же прогоне не выбираются.
+        val restored = checksumRepository.restoreRetryableFailed()
+        if (restored > 0) Log.i(TAG, "Auto-retry: восстановлено retryable FAILED = $restored")
+
         // 1. Scan
         when (val outcome = mediaFileRepository.scanImages()) {
             is ScanOutcome.Success -> sync = sync.copy(scan = outcome.result)

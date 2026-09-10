@@ -26,10 +26,14 @@ interface MediaFileDao {
     @Query("UPDATE media_files SET status = :status WHERE mediaStoreId = :mediaStoreId")
     suspend fun updateStatus(mediaStoreId: Long, status: MediaFileStatus)
 
+    // Успешный checksum — стабильное состояние, чистим failure-метаданные (Stage 5K).
     @Query("""
         UPDATE media_files
         SET checksum = :checksum,
-            status = :status
+            status = :status,
+            failureReason = NULL,
+            retryCount = 0,
+            lastFailureAt = NULL
         WHERE mediaStoreId = :mediaStoreId
     """)
     suspend fun updateChecksum(
@@ -37,6 +41,53 @@ interface MediaFileDao {
         checksum: String,
         status: MediaFileStatus = MediaFileStatus.CHECKSUM_READY
     )
+
+    /**
+     * Атомарный перевод записи в FAILED с причиной (Stage 5K).
+     * Инкремент retryCount делается в SQL, без read-modify-write в Kotlin.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = 'FAILED',
+            failureReason = :reason,
+            retryCount = retryCount + 1,
+            lastFailureAt = :failureAt
+        WHERE mediaStoreId = :mediaStoreId
+    """)
+    suspend fun markFailed(mediaStoreId: Long, reason: FailureReason, failureAt: Long)
+
+    /**
+     * Retryable FAILED-записи, готовые к авто-повтору: конкретная причина,
+     * не исчерпан лимит попыток и прошёл cooldown ([retryBefore] = now - cooldown).
+     */
+    @Query("""
+        SELECT * FROM media_files
+        WHERE status = 'FAILED'
+          AND failureReason = :reason
+          AND retryCount < :maxRetryCount
+          AND lastFailureAt <= :retryBefore
+        ORDER BY createdAt DESC
+        LIMIT :limit
+    """)
+    suspend fun getRetryableFailed(
+        reason: FailureReason,
+        maxRetryCount: Int,
+        retryBefore: Long,
+        limit: Int
+    ): List<MediaFile>
+
+    /**
+     * Возвращает retryable-запись в pipeline. retryCount намеренно НЕ сбрасывается —
+     * иначе лимит попыток перестанет действовать.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = 'PENDING',
+            failureReason = NULL,
+            lastFailureAt = NULL
+        WHERE mediaStoreId = :mediaStoreId
+    """)
+    suspend fun resetFailedForRetry(mediaStoreId: Long)
 
     @Query("""
         UPDATE media_files
@@ -60,7 +111,16 @@ interface MediaFileDao {
         uri: String
     )
 
-    @Query("UPDATE media_files SET status = 'SYNCED', serverFileId = :serverFileId WHERE mediaStoreId = :mediaStoreId")
+    // Успешный upload → SYNCED, чистим failure-метаданные (Stage 5K).
+    @Query("""
+        UPDATE media_files
+        SET status = 'SYNCED',
+            serverFileId = :serverFileId,
+            failureReason = NULL,
+            retryCount = 0,
+            lastFailureAt = NULL
+        WHERE mediaStoreId = :mediaStoreId
+    """)
     suspend fun markUploaded(mediaStoreId: Long, serverFileId: Long)
 
     @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")
@@ -91,11 +151,15 @@ interface MediaFileDao {
      * Вызывать ДО [updateLocalMetadata] — иначе новые значения уже в БД и сравнение не сработает.
      */
     // При изменении локального файла старый serverFileId больше не соответствует содержимому.
+    // Изменившийся файл — новая попытка с чистого состояния, поэтому чистим и failure-метаданные (Stage 5K).
     @Query("""
         UPDATE media_files
         SET checksum = NULL,
             serverFileId = NULL,
-            status = :status
+            status = :status,
+            failureReason = NULL,
+            retryCount = 0,
+            lastFailureAt = NULL
         WHERE mediaStoreId = :mediaStoreId
           AND (size != :size OR lastModified != :lastModified)
     """)

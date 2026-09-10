@@ -16,5 +16,8 @@ data class MediaFile(
     val createdAt: Long,            // DATE_TAKEN из MediaStore (ms)
     val lastModified: Long,         // DATE_MODIFIED из MediaStore, нормализован в milliseconds
     val checksum: String?,          // SHA-256, null пока не посчитан
-    val status: MediaFileStatus = MediaFileStatus.PENDING
+    val status: MediaFileStatus = MediaFileStatus.PENDING,
+    val failureReason: FailureReason? = null, // причина последнего FAILED, null если не падал
+    val retryCount: Int = 0,        // число попыток, закончившихся FAILED (для лимита auto-retry)
+    val lastFailureAt: Long? = null // время последнего FAILED (ms), для cooldown
 )

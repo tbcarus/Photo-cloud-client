@@ -78,15 +78,16 @@ class FileUploadRepository @Inject constructor(
 
                 // Защитно: на 5D грузим только фото.
                 if (!file.mimeType.startsWith("image/")) {
-                    mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.NOT_IMAGE, System.currentTimeMillis())
                     failed++
                     continue
                 }
 
                 // Проверяем доступ к локальному файлу заранее — так отличаем
                 // постоянную ошибку файла от сетевой ошибки во время upload.
-                if (!canOpen(file.uri)) {
-                    mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                val openFailure = openFailureReason(file.uri)
+                if (openFailure != null) {
+                    mediaFileDao.markFailed(file.mediaStoreId, openFailure, System.currentTimeMillis())
                     failed++
                     continue
                 }
@@ -125,8 +126,9 @@ class FileUploadRepository @Inject constructor(
                 } else {
                     val code = response.code()
                     val message = ApiErrorParser.parse(response)
-                    if (isPermanentHttpError(code)) {
-                        mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.FAILED)
+                    val permanentReason = permanentHttpReason(code)
+                    if (permanentReason != null) {
+                        mediaFileDao.markFailed(file.mediaStoreId, permanentReason, System.currentTimeMillis())
                         failed++
                         continue
                     } else {
@@ -146,13 +148,17 @@ class FileUploadRepository @Inject constructor(
         return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, leftPending))
     }
 
-    /** true, если поток к файлу открывается; локальные ошибки доступа считаем permanent. */
-    private fun canOpen(uriString: String): Boolean = try {
-        context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } ?: false
+    /**
+     * null — поток к файлу открывается; иначе конкретная permanent-причина FAILED.
+     * Различаем отсутствие файла и отзыв доступа для дальнейшего показа в UI.
+     */
+    private fun openFailureReason(uriString: String): FailureReason? = try {
+        val opened = context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } ?: false
+        if (opened) null else FailureReason.FILE_NOT_FOUND
     } catch (e: FileNotFoundException) {
-        false
+        FailureReason.FILE_NOT_FOUND
     } catch (e: SecurityException) {
-        false
+        FailureReason.PERMISSION
     }
 
     private fun createFilePart(file: MediaFile): MultipartBody.Part {
@@ -167,7 +173,11 @@ class FileUploadRepository @Inject constructor(
         return folderId.toString().toRequestBody("text/plain".toMediaTypeOrNull())
     }
 
-    /** Постоянные HTTP-ошибки upload: повтор не поможет. */
-    private fun isPermanentHttpError(code: Int): Boolean =
-        code == 400 || code == 409 || code == 413
+    /** Постоянные HTTP-ошибки upload: повтор не поможет. null — код не считаем permanent. */
+    private fun permanentHttpReason(code: Int): FailureReason? = when (code) {
+        400 -> FailureReason.HTTP_400
+        409 -> FailureReason.HTTP_409
+        413 -> FailureReason.HTTP_413
+        else -> null
+    }
 }

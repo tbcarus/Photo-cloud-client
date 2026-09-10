@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
@@ -259,7 +260,21 @@ private fun buildSecondaryLine(file: MediaFile): String {
     val size     = formatSize(file.size)
     val status   = formatStatus(file.status)
     val checksum = if (file.checksum != null) "✓ checksum" else "— checksum"
-    return "$path · $size · $status · $checksum"
+    val base = "$path · $size · $status · $checksum"
+    // Для FAILED показываем краткую причину (Stage 5K).
+    val reason = file.failureReason?.let { " · ${formatFailureReason(it)}" } ?: ""
+    return base + reason
+}
+
+private fun formatFailureReason(reason: FailureReason): String = when (reason) {
+    FailureReason.CHECKSUM_IO    -> "Checksum I/O error"
+    FailureReason.FILE_NOT_FOUND -> "File not found"
+    FailureReason.PERMISSION     -> "Permission denied"
+    FailureReason.NOT_IMAGE      -> "Not an image"
+    FailureReason.HTTP_400       -> "HTTP 400"
+    FailureReason.HTTP_409       -> "HTTP 409"
+    FailureReason.HTTP_413       -> "HTTP 413"
+    FailureReason.UNKNOWN        -> "Unknown error"
 }
 
 private fun formatSize(bytes: Long): String = when {
