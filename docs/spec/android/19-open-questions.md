@@ -152,7 +152,7 @@ Logout/cancel нельзя считать измеренным барьером 
 
 ### Current As-Is
 
-Routes/parts согласованы с frozen API; actual deployed revision/proxy, framework error wire и доступ к LAN endpoint с текущим cleartext XML на целевом устройстве не проверены.
+Routes/parts согласованы с Server API; actual deployed revision/proxy, framework error wire и доступ к LAN endpoint с текущим cleartext XML на целевом устройстве не проверены.
 
 ### Question
 
@@ -160,7 +160,7 @@ Routes/parts согласованы с frozen API; actual deployed revision/prox
 
 ### Why it matters
 
-Отделяет зафиксированный contract от deployment; frozen OPEN-SRV-030 не разрешён здесь. Normal folderId text/plain shape не остаётся неизвестным.
+Отделяет зафиксированный contract от deployment; OPEN-SRV-030 не разрешён здесь. Normal folderId text/plain shape не остаётся неизвестным.
 
 ## OPEN-AND-011
 
@@ -168,7 +168,7 @@ Routes/parts согласованы с frozen API; actual deployed revision/prox
 
 ### Current As-Is
 
-Scope — Images/DCIM, vendor folders попадают только если находятся под DCIM; video/outside media отсутствуют. Android ищет серверную CAMERA, а при omitted folderId действует frozen default routing.
+Scope — Images/DCIM, vendor folders попадают только если находятся под DCIM; video/outside media отсутствуют. Android ищет серверную CAMERA, а при omitted folderId действует server default routing.
 
 ### Question
 
@@ -344,7 +344,7 @@ SYNCED означает logical existing или upload id>0; возможен nu
 
 ### Current As-Is
 
-Client size guard отсутствует; frozen service limit100MiB, отказ413 terminal.
+Client size guard отсутствует; server service limit100MiB, отказ413 terminal.
 
 ### Question
 
@@ -472,7 +472,7 @@ Product automated tests отсутствуют; runtime metrics/matrix не за
 
 ### Current As-Is
 
-Frozen existing/duplicate не проверяют и не чинят missing bytes; Android repair flow отсутствует.
+Серверные existing/duplicate не проверяют и не чинят missing bytes; Android repair flow отсутствует.
 
 ### Question
 

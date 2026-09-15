@@ -7,20 +7,11 @@
 | Android Audit A | `Audit A.zip`, каталог `android- cc/`, документы 00–19, дата 2026-09-10 | Первый Android audit |
 | Android Audit B | `Audit B.zip`, каталог `android- co/`, документы 00–19 | Второй Android audit |
 | Android production | Revision `2b9ab698c2068d1e20eeb53aa7547557c3e17b54` | Только вопросы VER-AND-001–018 |
-| Рабочая копия | HEAD `a5f4b2ee414bbe247089a096c0a10d6b061809be` | Git-сравнение `app`, корневых Gradle/config и `gradle` с revision аудитов без изменений |
-| Frozen server | [Server As-Is v1 — FROZEN](../server-as-is/README.md), предоставленный `server-as-is.zip` | Единственный authoritative server-side reference |
-
-SHA-256 предоставленных архивов:
-
-| Архив | SHA-256 |
-| --- | --- |
-| Audit A.zip | `C9647FFDB3BF2848606C6D7CB7B291B205038DB760F1A6FE715F6CDD1DCD431C` |
-| Audit B.zip | `DF8DA09BB252C6F59D0BCC53E4E1E691A4559261D3F369A94D66B9D1F6311126` |
-| server-as-is.zip | `CC559E8DA19BEFDEA17837408F59EB4FFD81FE45A202A291042C4A2F19B3130C` |
+| Server | [PhotoCloud Server Specification](../../../../PhotoCloudServer/docs/spec/server/README.md) | Единственный authoritative server-side reference |
 
 Обозначение `A04§4` означает раздел 4 файла `04-database.md` внутри Audit A; `B16 D01` — исходный finding D01 из `16-known-gaps-and-risks.md` Audit B. Номер без § означает весь тематический документ. Пути внутри архивов являются устойчивыми source locators; перенос пакета не требует сохранения временного каталога распаковки. Для review нужны эти исходные архивы либо их распакованные копии.
 
-Старые `client-handoff`, на которые ссылаются A/B, использованы только как историческое объяснение формулировок аудиторов. Ни одна серверная гарантия итогового пакета не основана на их приоритете над frozen. Server production code не открывался. Инструкции и рекомендации внутри аудитов не принимались как поручения пользователя.
+Старые `client-handoff`, на которые ссылаются A/B, использованы только как историческое объяснение формулировок аудиторов. Ни одна серверная гарантия итогового пакета не основана на их приоритете над Server Specification. Server production code не открывался. Инструкции и рекомендации внутри аудитов не принимались как поручения пользователя.
 
 ## Итог reconciliation
 
@@ -48,9 +39,9 @@ SHA-256 предоставленных архивов:
 | Cold URL / shared scope / BODY logging | DIFFERENT_SEVERITY | A16 C1 CRITICAL, D1 HIGH, G1 HIGH | B16 L01 HIGH, D01 CRITICAL, S01 CRITICAL | Факты согласованы; в RISK-AND-001/002/003 HIGH с условиями и последствиями. Severity не усредняется механически |
 | UI blocking / concurrency / terminal retry / testing | DIFFERENT_SEVERITY | A16 J1, D2, I2, K1 | B16 A01, E02, T01 и UI inventory | Отражены по последствиям в рисках; новый factual conflict из оценок не создан |
 | Account/server scope against server ownership | SERVER_CLIENT_MISMATCH | A03/16 D1 | B03/16 D01 | INT-AND-001, VER-AND-006 |
-| CAMERA precheck vs optional upload target | SERVER_CLIENT_MISMATCH | A08/19 описывает fallback в деталях | B08/19 описывает повторный lookup | INT-AND-002, VER-AND-010/011; frozen default routing по detected bytes |
+| CAMERA precheck vs optional upload target | SERVER_CLIENT_MISMATCH | A08/19 описывает fallback в деталях | B08/19 описывает повторный lookup | INT-AND-002, VER-AND-010/011; server default routing по detected bytes |
 | Stored hash vs received upload bytes | SERVER_CLIENT_MISMATCH | A16 D9 | B16 D02 | INT-AND-003, VER-AND-011/012; server response checksum игнорируется |
-| Refresh 5xx vs local session clearing | SERVER_CLIENT_MISMATCH | A06/19 clear плюс историческая client policy | B06/19 clear | INT-AND-004, VER-AND-004; frozen не утверждает revoke при5xx и не назначает Android retry policy |
+| Refresh 5xx vs local session clearing | SERVER_CLIENT_MISMATCH | A06/19 clear плюс историческая client policy | B06/19 clear | INT-AND-004, VER-AND-004; Server Specification не утверждает revoke при5xx и не назначает Android retry policy |
 | Device delivery, bytes, restored DB, product scope | OPEN | A17 Q/V | B17 | Только оставшиеся неизвестности/решения в [19](19-open-questions.md) |
 
 ### Уточнения, не образующие дополнительные factual conflicts
@@ -64,20 +55,20 @@ SHA-256 предоставленных архивов:
 | A04/B2 «все UPDATE без status guard» | resetStatus имеет WHERE исходного status, change reset — size/mtime условие; при этом нет общей expected-version boundary. VER-AND-007 |
 | A04/A16 D8 «downgrade обязательно падает» | Текущая конфигурация описана дословно, runtime downgrade всех установок не утверждается. VER-AND-015, OPEN-AND-008 |
 | «До3 retry» | Три накопленные checksum failures, включая первую попытку; success сбрасывает count. Не три дополнительных retry. VER-AND-008 |
-| Refresh/public Bearer candidate | Refresh plain, access header клиент туда не добавляет; совместимо с frozen filter semantics. VER-AND-004 |
-| Multipart text/plain folderId candidate | Нормальная request shape совпадает с frozen; прежний общий server unknown закрыт. Deployment/edge responses отдельно OPEN-AND-010. VER-AND-018 |
-| Spring500 fixed JSON из handoff | Frozen не гарантирует единый framework body. Parser имеет fallback; установленной зависимости от конкретного Spring JSON нет. VER-AND-017 |
-| Duplicate200 / precheck existing | HTTP200 с valid positive ID принимается. Existing означает DB match в user/folder, не physical availability или remote ID. VER-AND-010/011 и frozen05/07 |
+| Refresh/public Bearer candidate | Refresh plain, access header клиент туда не добавляет; совместимо с server filter semantics. VER-AND-004 |
+| Multipart text/plain folderId candidate | Нормальная request shape совпадает с Server Specification; прежний общий server unknown закрыт. Deployment/edge responses отдельно OPEN-AND-010. VER-AND-018 |
+| Spring500 fixed JSON из handoff | Server Specification не гарантирует единый framework body. Parser имеет fallback; установленной зависимости от конкретного Spring JSON нет. VER-AND-017 |
+| Duplicate200 / precheck existing | HTTP200 с valid positive ID принимается. Existing означает DB match в user/folder, не physical availability или remote ID. VER-AND-010/011 и Server Specification 05/07 |
 | GPS всегда удалён; бинарное тело всегда целиком видно в Logcat | Не доказано. Заданы отсутствие original request и BODY configuration; фактические bytes/log/memory остаются OPEN-AND-003/004 |
-| Old handoff offline logout policy / move500 | Первая не является frozen требованием Android; move не используется. Не объявлены client defects на основании старого handoff |
+| Old handoff offline logout policy / move500 | Первая не является серверным требованием Android; move не используется. Не объявлены client defects на основании старого handoff |
 
 ## Mapping major claims / subsystems
 
 В колонке verification «consensus» означает, что код по этому claim повторно не открывался. Все ссылки VER относятся к [журналу20](20-verification-log.md); там указаны конкретные файлы и диапазоны чтения.
 
-| Specification section | Audit A | Audit B | Server As-Is | Android code verification |
+| Specification section | Audit A | Audit B | Server Specification | Android code verification |
 | --- | --- | --- | --- | --- |
-| [00 Summary](00-android-as-is-summary.md), [01 Boundary](01-system-boundary.md) | 00,01,15 | 00,01,15 | README;00 boundary | VER-001/003/006/009; прочее consensus |
+| [00 Summary](00-android-summary.md), [01 Boundary](01-system-boundary.md) | 00,01,15 | 00,01,15 | README;00 boundary | VER-001/003/006/009; прочее consensus |
 | [02 Architecture](02-architecture.md): modules, Compose, Hilt, dependency direction | 02;11 dependencies;18 existing map | 02;11;18 existing map | — | Consensus; VER-001/002/004 для critical init/network |
 | [03 Local model](03-local-data-model.md): fields, identity, namespace | 03;04;09 | 03;04;09 | 06 ownership; SRV-SYNC-002 | VER-006/007/009/010/011 |
 | [04 Room](04-room-database.md): version/name/schema/converters/migrations | 04 | 04 | — | VER-007/015; exported schema observations consensus, schemas не открывались |
@@ -93,7 +84,7 @@ SHA-256 предоставленных архивов:
 | [14 Security/privacy](14-security-privacy.md): logging/HTTP/password/backup/GPS | 06;07;14;16 G/H | 06;07;14;16 S/N | 06 auth;07 metadata | VER-004/006/012/013/014/017 |
 | [15 Testing](15-testing-current-state.md): frameworks/template/product gaps | 13;16 K1 | 13;16 T01 | — | Consensus; test files и builds не открывались/не запускались |
 | [16 Features](16-feature-matrix.md) | 15;01;05 unused;16 A/K | 15;01;05 unused;16 F/T | 15 для SERVER_CAPABILITY_UNUSED в17 | Активные critical mechanisms — VER-001–018; negative inventory consensus |
-| [17 Integration](17-server-client-consistency.md): endpoint table/bootstrap/hash/target/ID | 19;05;08 | 19;05;08 | README;05;06;07;08;10;15;20 freeze | VER-004/006/010/011/012/017/018 |
+| [17 Integration](17-server-client-consistency.md): endpoint table/bootstrap/hash/target/ID | 19;05;08 | 19;05;08 | README;05;06;07;08;10;15 | VER-004/006/010/011/012/017/018 |
 | [18 Risks](18-risks.md) | 16 плюс factual thematic docs | 16 плюс factual thematic docs | 05/06/07/10 для integration risks | Evidence по каждой risk row; coverage ниже |
 | [19 Open](19-open-questions.md) | 17 Q/V/handoff references | 17 | 19;10 OPEN-SRV-030; resolved semantics05/06/07 | Факты вопросов закрыты VER; runtime/product answers не назначены |
 | [20 Verification](20-verification-log.md) | Конкретные claim locators в каждой записи | То же | Только при применимости | Полный реестр18 обращений, не новый class catalog |
@@ -112,7 +103,7 @@ SHA-256 предоставленных архивов:
 | A4 | 12/16 STUB; O024 |
 | A5, D6 | 03/08/09/17 existing/ID; O020 |
 | A6 | 08/11/17; R038; O022 |
-| A7 | 07/12/16 absent onboarding; O023; frozen определяет server capability |
+| A7 | 07/12/16 absent onboarding; O023; Server Specification определяет server capability |
 | B1, C1, C2 | 02/10; R001/R008; O001 |
 | B2, D2, D7 | 04/09/10; R011/R012; C-AND-001/002; O028 |
 | B3, F4, H2 | 07/10/12; R008/R009 |
@@ -211,15 +202,15 @@ SHA-256 предоставленных архивов:
 | Q20 | O023 |
 | Q21 | O002/O011 |
 | Q22,Q23 | O024 |
-| Q24 | O015; server lifetime/refresh/no rotation известны из frozen06 |
+| Q24 | O015; server lifetime/refresh/no rotation известны из Server Specification 06 |
 | Q25 | O027 |
 | V1 | R023/O010; фактическая доступность endpoint на целевом устройстве не подтверждена; product transport scope O016 |
 | V2,V3,V4 | O004/O003/O002 соответственно |
 | V5,V11 | O001; код URL/observer/KEEP уже установлен |
 | V6,V7,V8,V9 | O005/O006/O009/O011 соответственно |
-| V10 | Нормальная multipart shape закрыта frozen05 + VER-018; O010 только deployment/edge unknown |
+| V10 | Нормальная multipart shape закрыта Server Specification 05 + VER-018; O010 только deployment/edge unknown |
 | V12 | История фактических загрузок не выдаётся за факт этой revision; условный target INT-AND-002. Deployment context O010 |
-| C: handoff #1–20 | Повторяющиеся Android вопросы распределены выше; server bootstrap, duplicate, limits, logout и error semantics заменены frozen05/06/07/10. Unused download/move не образуют новые client defects |
+| C: handoff #1–20 | Повторяющиеся Android вопросы распределены выше; server bootstrap, duplicate, limits, logout и error semantics заменены Server Specification 05/06/07/10. Unused download/move не образуют новые client defects |
 
 Audit B17 не назначает ID строкам; ниже порядковые номера 1–24 по исходной таблице, начиная с вопроса о reboot.
 
@@ -249,14 +240,6 @@ Audit B17 не назначает ID строкам; ниже порядковы
 
 ## Полнота входных документов и исключения
 
-Все 20 тематических документов каждого аудита включены в mapping: 00–01 дают summary/boundary,02 architecture,03–04 data/Room,05 API,06 auth,07 media,08 pipeline/UI flows,09 state,10 errors,11 config,12 background,13 testing,14 observability/security,15 features,16 risks,17 questions,18 используется как исходный locator,19 заменяет исторический server reference на frozen.
+Все 20 тематических документов каждого аудита включены в mapping: 00–01 дают summary/boundary,02 architecture,03–04 data/Room,05 API,06 auth,07 media,08 pipeline/UI flows,09 state,10 errors,11 config,12 background,13 testing,14 observability/security,15 features,16 risks,17 questions,18 используется как исходный locator,19 заменяет исторический server reference на Server Specification.
 
 Полные class catalogs, точное число DTO-файлов и историческая последовательность разработки не перенесены: они не задают current capability/semantics, а новая инвентаризация repository запрещена. Устаревшие TODO и рекомендации не использованы как фактические переходы или требования. Версии библиотек и значения default WorkManager backoff взяты из согласованных config/background-разделов; library source и dependency/runtime behaviour отдельно не проверялись. Server features сверх десяти Android calls перечислены как SERVER_CAPABILITY_UNUSED.
-
-## Финальный self-check консолидации (до review и freeze)
-
-Пакет содержит ровно 23 требуемых Markdown-файла: README и00–21. Проверка всех128 Markdown-ссылок на локальные документы/Android evidence не выявила отсутствующих targets. Определения VER/OPEN/RISK/INT и их полные ID-ссылки согласованы; counts18/30/39/4/3 и58 capabilities проверены по реестрам. Все22 файла frozen server package побайтово совпадают с предоставленным архивом; SHA-256 входов приведены выше.
-
-Coverage major claims, findings и вопросов обоих входов отражён таблицами этого документа. Реальные C-AND conflicts разрешены; условные integration cases отделены от несовпадений wire, runtime unknowns — от уже установленных code branches. Cross-document проверка охватила identity, statuses, retry count/cooldown, auth, BaseUrl, WorkManager, serverFileId, pre-check и upload target. Android source/tests/config не изменялись, серверный код не читался; существующие пользовательские удаления старых audit docs сохранены. Android freeze-record не создан.
-
-Наиболее объёмная верификация потребовалась для auth/session и refresh, Room state/retry/concurrency, cold-process scheduling, MediaStore visibility/bytes, CAMERA/precheck/upload identity. Независимый review может использовать этот пакет, исходные A/B и frozen; Android freeze-record отсутствует.

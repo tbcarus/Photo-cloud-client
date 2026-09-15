@@ -1,6 +1,6 @@
 # Verified Android API usage
 
-Все paths ниже относительны к base URL `http://IPv4:port/` и начинаются `/api/v1`. Клиент использует **10** method/path операций. Server wire authority — [Server As-Is v1 API](../server-as-is/05-api.md).
+Все paths ниже относительны к base URL `http://IPv4:port/` и начинаются `/api/v1`. Клиент использует **10** method/path операций. Server wire authority — [PhotoCloud Server Specification — API](../../../../PhotoCloudServer/docs/spec/server/05-api.md).
 
 ## HTTP infrastructure
 
@@ -28,7 +28,7 @@ Interfaces возвращают Call<T>; execute используется син
 | POST /api/v1/files/checksums/exists | auth | JSON folderId:Long, checksums:List<String> | existing/missing lists; lowercase lookup → status-only writes | ChecksumPrecheckRepository |
 | POST /api/v1/files/upload | auth | Multipart file + nullable folderId text/plain | FileItemDto; только id>0 определяет успех | FileUploadRepository для каждого PENDING_UPLOAD |
 
-Все вызывающие принимают isSuccessful (2xx), а не только один exact success status. Frozen сервер определяет 201 для register, 200 для остальных используемых операций.
+Все вызывающие принимают isSuccessful (2xx), а не только один exact success status. Сервер определяет 201 для register, 200 для остальных используемых операций.
 
 ## Wire shapes
 
@@ -50,6 +50,6 @@ UUID error id и machine code не сохраняются как structured stat
 
 ## Available on server but unused by Android
 
-[Server As-Is v1](../server-as-is/05-api.md) содержит 36 mappings; остальные 26 не вызываются Android. Реализованные, но неиспользуемые capabilities: email confirmation, logout-all/others, password reset JSON, profile read, folder CRUD, file list/get/download/rename/move/copy/delete, full checksum list; legacy POST /files — неиспользуемый alias.
+[PhotoCloud Server Specification](../../../../PhotoCloudServer/docs/spec/server/05-api.md) содержит 36 mappings; остальные 26 не вызываются Android. Реализованные, но неиспользуемые capabilities: email confirmation, logout-all/others, password reset JSON, profile read, folder CRUD, file list/get/download/rename/move/copy/delete, full checksum list; legacy POST /files — неиспользуемый alias.
 
 Серверные resend, reset page GET/POST, profile edit/settings — STUB, также не вызываются. Video/general file acceptance сервера не означает Android video support. Полная классификация — [17](17-server-client-consistency.md); само неиспользование не является mismatch.

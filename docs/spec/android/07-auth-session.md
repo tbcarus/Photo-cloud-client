@@ -26,7 +26,7 @@ TokenAuthenticator:
 
 Пустая строка access не отвергается на шаге 7. Проверка отличается от login. Повторный 401 после replay прекращает refresh, но эта ветка сама tokens не очищает.
 
-Refresh не содержит access Authorization и не использует auth client. Это соответствует public refresh и избегает frozen server filter-сценария «expired Bearer отклонён до controller». Сервер выдаёт только новый access, не ротирует и не продлевает refresh — [SRV-AUTH-005](../server-as-is/06-auth-security.md).
+Refresh не содержит access Authorization и не использует auth client. Это соответствует public refresh и избегает server filter-сценария «expired Bearer отклонён до controller». Сервер выдаёт только новый access, не ротирует и не продлевает refresh — [SRV-AUTH-005](../../../../PhotoCloudServer/docs/spec/server/06-auth-security.md).
 
 | Refresh outcome | Pair | Исходный request |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ AuthViewModel вызывает reconcile после полученного Resul
 
 Logout не очищает Room, IP/port, SyncStatusStore и email/password формы. One-time photo_sync не отменяется. Worker не имеет entry auth gate и может продолжить scan/hash, затем получить auth errors; отмена periodic не гарантирует немедленной остановки уже идущего blocking HTTP.
 
-Frozen сервер отзывается только refresh; уже выданный access живёт до exp. Его HTTP 404 unknown refresh не объявлен успешным ответом; Android показывает ошибку. Offline local-clear policy сервером не назначается — [17](17-server-client-consistency.md).
+Сервер отзывается только refresh; уже выданный access живёт до exp. Его HTTP 404 unknown refresh не объявлен успешным ответом; Android показывает ошибку. Offline local-clear policy сервером не назначается — [17](17-server-client-consistency.md).
 
 ## Session UI и background
 

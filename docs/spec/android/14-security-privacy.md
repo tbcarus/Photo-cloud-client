@@ -12,7 +12,7 @@ Password не сохраняется в preferences, но хранится от�
 
 URL строится только как HTTP IPv4/port. При разрешённом соединении пароль, токены и media передаются без TLS. Приложение не задаёт certificate pinning или HTTPS selector. Manifest/XML configuration не является доказательством доступности любого LAN host; конкретный effective runtime оставлен OPEN.
 
-AuthInterceptor отправляет текущий access всем requests auth client. Plain register/login/refresh/public test не используют Bearer. Смена server URL не очищает credentials, а refresh использует текущий BaseUrlProvider. Область проверки сервером — frozen principal/ownership, а не локальная Room identity.
+AuthInterceptor отправляет текущий access всем requests auth client. Plain register/login/refresh/public test не используют Bearer. Смена server URL не очищает credentials, а refresh использует текущий BaseUrlProvider. Область проверки сервером — серверные principal/ownership, а не локальная Room identity.
 
 JWT sub декодируется для показа без проверки подписи на клиенте; server authorization не выводится из этого UI helper. Срок access локально не проверяется. Logout и refresh failures описаны в [07](07-auth-session.md).
 
@@ -30,7 +30,7 @@ Crash reporting, analytics SDK, structured traces, persistent sync history и se
 
 Клиент читает Images/DCIM по runtime permission и не изменяет оригиналы. Нет video permission, отдельного selected-photos flow, ACCESS_MEDIA_LOCATION или setRequireOriginal. EXIF/GPS клиент не извлекает/редактирует самостоятельно.
 
-Поток ContentResolver может зависеть от OS grants и MediaStore redaction; наличие GPS и побайтовая идентичность оригиналу остаются runtime вопросами. Frozen сервер извлекает metadata из полученных bytes best effort; nullable GPS сервера не доказывает само по себе Android redaction.
+Поток ContentResolver может зависеть от OS grants и MediaStore redaction; наличие GPS и побайтовая идентичность оригиналу остаются runtime вопросами. Сервер извлекает metadata из полученных bytes best effort; nullable GPS сервера не доказывает само по себе Android redaction.
 
 Изображения не staging-копируются в private folder, upload response metadata клиент не сохраняет. Stale delete удаляет историю Room, не оригиналы и не серверную копию.
 

@@ -1,29 +1,22 @@
-# Verified Android As-Is Specification — PhotoCloud
+# PhotoCloud Android Specification
 
-- Version: `PhotoCloud Android As-Is v1`
-- Status: `FROZEN`
-- Production revision: `2b9ab698c2068d1e20eeb53aa7547557c3e17b54`
-- Review: `PASS_WITH_MINOR_FIXES → all REV-AND-001…006 closed`
-- Server baseline: `PhotoCloud Server As-Is v1 — FROZEN`
-- Freeze record: [22-freeze-record.md](22-freeze-record.md)
+Это living specification текущего компонента. Она описывает актуальное подтверждённое техническое поведение Android-клиента `ru.tbcarus.photo_cloud_client` — локальную модель, работу с фотографиями, HTTP-вызовы, сессию, фоновые задания и интерфейс — и обновляется вместе с осознанными изменениями поведения и реализации.
 
-Дата консолидации: 2026-09-12.
+При изменении поведения сначала принимается решение на соответствующем верхнем уровне (для системного поведения — в [system/](../../../../system-spec/docs/spec/system/README.md)), затем обновляются component specification и code. Направление: `system/ → server/ + android/ → production code`. Расхождение spec и code требует явного `CHECK`. Существующие OPEN и риски сохраняются до их явного пересмотра.
 
-Пакет описывает фактический Android-клиент `ru.tbcarus.photo_cloud_client`: локальную модель, работу с фотографиями, HTTP-вызовы, сессию, фоновые задания и интерфейс. Это клиентская основа для будущей System As-Is v1.
+Git хранит историю предыдущих состояний, включая прежний freeze. Отдельная неизменяемая копия этой спецификации не поддерживается.
 
-Production revision: `2b9ab698c2068d1e20eeb53aa7547557c3e17b54`. Рабочий HEAD при консолидации: `a5f4b2ee414bbe247089a096c0a10d6b061809be`; Git-сравнение production/config путей не выявило отличий от revision аудитов. Приложение, tests и Gradle не изменялись.
-
-Единственный источник серверного поведения — [PhotoCloud Server As-Is v1 — FROZEN](../server-as-is/README.md). Этот пакет распакован из предоставленного server-as-is.zip без изменения содержимого. Его существующая серверная запись freeze не является freeze Android.
+Источник серверного поведения — [PhotoCloud Server Specification](../../../../PhotoCloudServer/docs/spec/server/README.md). Происхождение подтверждённых фактов и revision первоначальных аудитов указаны в [реестре источников](21-source-traceability.md).
 
 Обычный текст означает AS-IS. IMPLEMENTED означает наличие активного механизма в указанном объёме, а не доказанный успех на устройстве. PARTIAL — механизм с существенными ограничениями; STUB — доступная заглушка; UNUSED — объявленный элемент без активного использования; NOT PRESENT — отсутствующая возможность; OPEN — нерешённый вопрос или предел доказательности.
 
-Начало чтения: [сводка](00-android-as-is-summary.md), [pipeline](08-sync-pipeline.md), [state model](09-state-model.md), [интеграция](17-server-client-consistency.md). Стабильные capability ID находятся в [матрице](16-feature-matrix.md).
+Начало чтения: [сводка](00-android-summary.md), [pipeline](08-sync-pipeline.md), [state model](09-state-model.md), [интеграция](17-server-client-consistency.md). Стабильные capability ID находятся в [матрице](16-feature-matrix.md).
 
 ## Состав
 
 | Документ | Содержание |
 | --- | --- |
-| [00](00-android-as-is-summary.md) | Сводка клиента |
+| [00](00-android-summary.md) | Сводка клиента |
 | [01](01-system-boundary.md) | Границы ответственности |
 | [02](02-architecture.md) | Архитектура и зависимости |
 | [03](03-local-data-model.md) | Локальные сущности и identity |
@@ -40,12 +33,11 @@ Production revision: `2b9ab698c2068d1e20eeb53aa7547557c3e17b54`. Рабочий 
 | [14](14-security-privacy.md) | Защита данных и логирование |
 | [15](15-testing-current-state.md) | Текущее тестовое покрытие |
 | [16](16-feature-matrix.md) | Android capability ID |
-| [17](17-server-client-consistency.md) | Сверка с frozen сервером |
+| [17](17-server-client-consistency.md) | Согласованность с Server Specification |
 | [18](18-risks.md) | Риски и последствия |
 | [19](19-open-questions.md) | Нерешённые вопросы |
 | [20](20-verification-log.md) | Только обращения к Android-коду |
 | [21](21-source-traceability.md) | Источники, reconciliation, coverage |
-| [22](22-freeze-record.md) | Android As-Is v1 — Freeze Record |
 
 ## Пределы проверки
 

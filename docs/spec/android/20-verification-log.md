@@ -12,7 +12,7 @@
 
 **Audit B:** 00 L01; 08§1–2; 12 Restart: та же зависимость, init ping запускается асинхронно.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Кто восстанавливает URL; сохраняется ли URL при неуспешном init ping и вызывает ли отдельный Network Test reconcile?
 
@@ -30,7 +30,7 @@
 
 **Audit B:** 12 Scheduling/Duplicate work: отдельные names, нет dirty follow-up; UI только photo_sync.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Каковы names/policies/constraints, trigger и observer lifecycle; что реально отменяет reconcile?
 
@@ -48,7 +48,7 @@
 
 **Audit B:** 08§9–11; 12 Diagnostics; W05: SUCCESS совместим с FAILED/unchanged.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Точный порядок стадий, auth gate, success/permission paths и persistent recovery entry?
 
@@ -66,7 +66,7 @@
 
 **Audit B:** 06 Expiration/lock;19 Auth:5xx clear и no session lock; blank access принимается.
 
-**Server As-Is:** SRV-AUTH-005; server06 Refresh/Public; server10:5xx не сообщает revoke, public invalid Bearer может отклоняться filter.
+**Server Specification:** SRV-AUTH-005; server06 Refresh/Public; server10:5xx не сообщает revoke, public invalid Bearer может отклоняться filter.
 
 **Question:** Посылается ли access на refresh, чем отличаются4xx/5xx/IO/empty success и как ограничен concurrent replay?
 
@@ -84,7 +84,7 @@
 
 **Audit B:** 06 Logout и session UI: retained pair может оставить periodic; verify Result ignored.
 
-**Server As-Is:** SRV-AUTH-006; server06: revoke refresh, access до exp; server10 не задаёт offline client policy.
+**Server Specification:** SRV-AUTH-006; server06: revoke refresh, access до exp; server10 не задаёт offline client policy.
 
 **Question:** Когда logout действительно очищает pair, как меняет UI/background и вызывает ли login/verify общий session barrier?
 
@@ -102,7 +102,7 @@
 
 **Audit B:** 03 MediaFile;16 D01: server/account switch может направлять old credentials/new scope.
 
-**Server As-Is:** SRV-AUTH-004; SRV-SYNC-002; server06 owner-scoped access.
+**Server Specification:** SRV-AUTH-004; SRV-SYNC-002; server06 owner-scoped access.
 
 **Question:** Какие identity/scope поля persisted и как encrypted storage связывает pair с server/account?
 
@@ -120,7 +120,7 @@
 
 **Audit B:** 09 Invariants: PENDING с old hash/ID допустим, SQL не гарантирует сочетания; пример CHECKSUM_READY/null сформулирован слишком широко.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Являются ли эти hash/status/reason сочетания инвариантами и какие поля сохраняют status-only transitions?
 
@@ -138,7 +138,7 @@
 
 **Audit B:** 10 Auto recovery: stale concurrent snapshot может reset уже начатую/обработанную row;3 failures=initial+2, cooldown не timer.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Идемпотентен ли restore при overlap worker; как именно работают count/cooldown и checksum exceptions?
 
@@ -156,7 +156,7 @@
 
 **Audit B:** 07 Permissions: query вне scanner try, Exception ловит MediaFileRepository; malformed row successful partial snapshot.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Где ловится query failure, каковы scope/normalization и когда применяются stale deletes?
 
@@ -174,13 +174,13 @@
 
 **Audit B:** 08§7;19 Bootstrap/Existing: no ID, partition/no-progress, null children→absence.
 
-**Server As-Is:** SRV-FOLDER-001/002/003, SRV-SYNC-002; server05 exists и server08 bootstrap.
+**Server Specification:** SRV-FOLDER-001/002/003, SRV-SYNC-002; server05 exists и server08 bootstrap.
 
 **Question:** Как разрешается CAMERA, что происходит при отсутствии/ошибке, и какие writes делает existing/неполная partition?
 
 **Android code inspected:** [app/src/main/java/ru/tbcarus/photo_cloud_client/media/FolderRepository.kt](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/media/FolderRepository.kt) (1–63); [app/src/main/java/ru/tbcarus/photo_cloud_client/media/ChecksumPrecheckRepository.kt](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/media/ChecksumPrecheckRepository.kt) (1–160). Повторно использовано: DAO status-only query из007.
 
-**Verified result:** Root→children exact CAMERA; cache нет. Error stops precheck, absence переводит все ready с nonnull checksum в pending без exists. Batch500 rows→lowercase grouping/dedup; existing priority над missing; неизвестный hash unchanged; no-progress exits Success. Existing пишет только status, не получает/не очищает ID. Counts — local rows, unchangedTotal финального no-progress batch, не full queue. Frozen logical existing/bytes boundary соблюдён в тексте.
+**Verified result:** Root→children exact CAMERA; cache нет. Error stops precheck, absence переводит все ready с nonnull checksum в pending без exists. Batch500 rows→lowercase grouping/dedup; existing priority над missing; неизвестный hash unchanged; no-progress exits Success. Existing пишет только status, не получает/не очищает ID. Counts — local rows, unchangedTotal финального no-progress batch, не full queue. Граница между logical existing и доступностью bytes на сервере соблюдена в тексте.
 
 **Applied to:** 03,06,08,09,17; RISK-AND-017/019/027.
 
@@ -192,7 +192,7 @@
 
 **Audit B:** 08§8;16 N03/D02;19 target/hash: отсутствие snapshot и response comparison.
 
-**Server As-Is:** SRV-FILE-001/002/003; SRV-MEDIA-001; server05 upload/error; server07 default target по detected bytes.
+**Server Specification:** SRV-FILE-001/002/003; SRV-MEDIA-001; server05 upload/error; server07 default target по detected bytes.
 
 **Question:** Может ли upload после CAMERA precheck уйти без target, как принимаются duplicate200/ID и как обрабатываются errors?
 
@@ -210,7 +210,7 @@
 
 **Audit B:** 07 Bytes;16 D02/N05: независимые reads, size>0 else−1, no immutable snapshot; GPS не развит отдельно.
 
-**Server As-Is:** SRV-MEDIA-001/002; server07 hash/size по полученным bytes и best-effort metadata.
+**Server Specification:** SRV-MEDIA-001/002; server07 hash/size по полученным bytes и best-effort metadata.
 
 **Question:** Какие именно bytes/length клиент читает для hash/upload, запрашивает ли оригинал и что можно утверждать без runtime?
 
@@ -228,7 +228,7 @@
 
 **Audit B:** 18 LoadingDialog descriptor;06 visible password;12 Diagnostics;16 L03/U01: permission effect и periodic invisible.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Когда loader блокирует экран, маскируется ли пароль, что именно запускается после grant/already granted?
 
@@ -246,7 +246,7 @@
 
 **Audit B:** 06/14: тот же secret-body risk, аккуратнее о реальном Authorization/binary output.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Каковы фактические logging, transport, media permissions и backup declarations без вывода неизвестного library/device runtime?
 
@@ -264,7 +264,7 @@
 
 **Audit B:** 04: current schema/migrations, defaults различаются; runtime migration validation не выполнялась.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Что текущая DB конфигурация реально задаёт и какие последствия для current migrated fields устанавливаются без нового migration audit?
 
@@ -282,7 +282,7 @@
 
 **Audit B:** 08§2;16 N02: malformed port→factory exception до Result, UI может не завершить loading.
 
-**Server As-Is:** Не требуется: вопрос о client behaviour.
+**Server Specification:** Не требуется: вопрос о client behaviour.
 
 **Question:** Может ли ошибка URL construction миновать штатную Network Result обработку?
 
@@ -300,13 +300,13 @@
 
 **Audit B:** 05/10/19: parser/raw fallback и отсутствие uniform framework JSON; тоже есть historical shape examples.
 
-**Server As-Is:** server10 Границы единого формата; server05 Framework surface OPEN-SRV-030.
+**Server Specification:** server10 Границы единого формата; server05 Framework surface OPEN-SRV-030.
 
 **Question:** Зависит ли Android от фиксированного framework error JSON и какие данные parser реально сохраняет/возвращает?
 
 **Android code inspected:** [app/src/main/java/ru/tbcarus/photo_cloud_client/core/network/ApiErrorParser.kt](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/core/network/ApiErrorParser.kt) (1–40).
 
-**Verified result:** Read body catch→null; blank→HTTP N; Gson JsonSyntaxException→raw; dto null/unknown keys→HTTP N; fieldErrors→nonblank message→nonblank code. UUID не возвращается. Универсальная зависимость от fixed Spring shape не установлена; этот candidate mismatch снят. Другие exceptions не превращаются магически в любой гарантированный parser success; server framework body остаётся frozen OPEN.
+**Verified result:** Read body catch→null; blank→HTTP N; Gson JsonSyntaxException→raw; dto null/unknown keys→HTTP N; fieldErrors→nonblank message→nonblank code. UUID не возвращается. Универсальная зависимость от fixed Spring shape не установлена; этот candidate mismatch снят. Другие exceptions не превращаются магически в любой гарантированный parser success; server framework body остаётся OPEN в Server Specification.
 
 **Applied to:** 06,11,14,17; RISK-AND-035; OPEN-AND-010.
 
@@ -318,12 +318,12 @@
 
 **Audit B:** 05/19 method/path/wire inventory: text/plain folderId shape согласован,10 calls.
 
-**Server As-Is:** server05 все десять используемых mappings и optional folderId multipart/request param; SRV-API-001.
+**Server Specification:** server05 все десять используемых mappings и optional folderId multipart/request param; SRV-API-001.
 
-**Question:** Совпадают ли используемые method/path, выбор clients и multipart parts с frozen API, без чтения остальных API/DTO catalogs заново?
+**Question:** Совпадают ли используемые method/path, выбор clients и multipart parts с Server API, без чтения остальных API/DTO catalogs заново?
 
 **Android code inspected:** [app/src/main/java/ru/tbcarus/photo_cloud_client/core/network/ApiServiceFactory.kt](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/core/network/ApiServiceFactory.kt) (1–62); [app/src/main/java/ru/tbcarus/photo_cloud_client/api/ApiPaths.kt](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/api/ApiPaths.kt) (1–21); [app/src/main/java/ru/tbcarus/photo_cloud_client/api/FileService.java](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/api/FileService.java) (1–28); [app/src/main/java/ru/tbcarus/photo_cloud_client/api/AuthService.java](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/api/AuthService.java) (1–27); [app/src/main/java/ru/tbcarus/photo_cloud_client/api/TestService.java](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/api/TestService.java) (1–13); [app/src/main/java/ru/tbcarus/photo_cloud_client/api/FolderService.java](../../../app/src/main/java/ru/tbcarus/photo_cloud_client/api/FolderService.java) (1–16).
 
-**Verified result:** Десять method/path mappings соответствуют frozen; factory разделяет plain/auth; refresh отдельный plain из004. Upload file + optional text/plain folderId, no extra checksum/status/date parts; Java nullable part передаётся из011. DTO fields взяты из A/B consensus19; malformed/deployed binding response не выдаётся за live verification. Candidate normal multipart mismatch снят.
+**Verified result:** Десять method/path mappings соответствуют Server Specification; factory разделяет plain/auth; refresh отдельный plain из004. Upload file + optional text/plain folderId, no extra checksum/status/date parts; Java nullable part передаётся из011. DTO fields взяты из A/B consensus19; malformed/deployed binding response не выдаётся за live verification. Candidate normal multipart mismatch снят.
 
 **Applied to:** 06,17,16; все API rows; OPEN-AND-010 только deployment/edge runtime.

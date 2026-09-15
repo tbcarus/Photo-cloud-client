@@ -9,7 +9,7 @@ Android отвечает за выбор локальных изображени
 | Сессия | Login/refresh/logout requests, encrypted pair, Bearer | Сервер определяет валидность токенов и principal |
 | Server URL | IPv4/port в DataStore; in-memory BaseUrlProvider | Доступность сети и server deployment вне клиента |
 | Background | Constraints, unique work, observer/debounce, порядок стадий | ОС/WorkManager определяют фактическое время запуска и остановку |
-| HTTP | Десять операций, JSON/multipart и клиентская обработка результатов | Серверный контракт закреплён в frozen пакете |
+| HTTP | Десять операций, JSON/multipart и клиентская обработка результатов | Серверный контракт описан в Server Specification |
 | UI | Network/Auth/Files, permissions, сообщения, две заглушки | Пользователь вводит сервер и credentials, выдаёт доступ |
 
 ```mermaid
@@ -27,4 +27,4 @@ flowchart LR
 
 Серверная identity `FileItem.id` отличается от локальной `mediaStoreId`. Клиент не хранит server internals, StoredObject или серверное состояние обработки. В сервер не отправляются локальные статусы, URI, createdAt, lastModified или checksum как upload metadata.
 
-Отсутствуют server→device reconciliation, remote gallery, download, удаление/переименование/перемещение/копирование файлов, управление папками и device registration. Наличие этих серверных возможностей не расширяет границу Android. Authoritative server reference — [Server As-Is v1](../server-as-is/README.md).
+Отсутствуют server→device reconciliation, remote gallery, download, удаление/переименование/перемещение/копирование файлов, управление папками и device registration. Наличие этих серверных возможностей не расширяет границу Android. Authoritative server reference — [PhotoCloud Server Specification](../../../../PhotoCloudServer/docs/spec/server/README.md).
