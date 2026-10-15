@@ -16,7 +16,8 @@ import javax.inject.Singleton
 class ApiServiceFactory @Inject constructor(
     private val baseUrlProvider: BaseUrlProvider,
     @Named("plain") private val plainClient: OkHttpClient,
-    @Named("auth") private val authClient: OkHttpClient
+    @Named("auth") private val authClient: OkHttpClient,
+    @Named("register") private val registerClient: OkHttpClient
 ) {
     private fun build(baseUrl: String, client: OkHttpClient): Retrofit =
         Retrofit.Builder()
@@ -29,6 +30,13 @@ class ApiServiceFactory @Inject constructor(
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
         return build(baseUrl, plainClient).create(AuthService::class.java)
+    }
+
+    // Только для POST регистрации: увеличенное ожидание ответа и без автоповтора.
+    fun registerAuthService(): AuthService {
+        val baseUrl = baseUrlProvider.baseUrl
+        check(baseUrl.isNotBlank()) { "Server URL is not configured" }
+        return build(baseUrl, registerClient).create(AuthService::class.java)
     }
 
     fun authAuthService(): AuthService {

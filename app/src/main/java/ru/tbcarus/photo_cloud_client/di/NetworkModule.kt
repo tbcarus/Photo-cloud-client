@@ -32,6 +32,19 @@ object NetworkModule {
             .addInterceptor(logging)
             .build()
 
+    // Server отвечает на регистрацию только после SMTP-отправки, 5s read для этого мало.
+    // callTimeout ограничивает всё ожидание (включая DNS), но не гарантирует, что Server успеет отправить письмо.
+    // Без автоповтора: повторный POST регистрации аннулирует ссылку из уже отправленного письма.
+    @Provides
+    @Singleton
+    @Named("register")
+    fun provideRegisterOkHttpClient(@Named("plain") plainClient: OkHttpClient): OkHttpClient =
+        plainClient.newBuilder()
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(40, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
+            .build()
+
     // TODO: при появлении фоновой синхронизации можно выделить отдельный upload client.
     // Read/write увеличены до 60s: 5s почти наверняка мало для upload файла.
     @Provides

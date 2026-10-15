@@ -28,6 +28,7 @@ import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
+import ru.tbcarus.photo_cloud_client.di.NetworkModule
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import java.util.concurrent.TimeUnit
@@ -38,6 +39,7 @@ class AuthViewModelRegisterTest {
     private companion object {
         const val EMAIL = "user@test.local"
         const val PASSWORD = "pass1"
+        const val PLAIN_READ_TIMEOUT_MS = 300L
     }
 
     private val server = MockWebServer()
@@ -49,9 +51,14 @@ class AuthViewModelRegisterTest {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         server.start()
         val baseUrlProvider = BaseUrlProvider().apply { baseUrl = server.url("/").toString() }
-        // Короткий readTimeout имитирует клиентский таймаут без долгого ожидания.
-        val client = OkHttpClient.Builder().readTimeout(1, TimeUnit.SECONDS).build()
-        val repository = AuthRepository(NoTokenStorage, baseUrlProvider, ApiServiceFactory(baseUrlProvider, client, client))
+        // Сокращённые таймауты вместо боевых: plain 5 s → 300 ms, register 30 s → 1.5 s.
+        val plainClient = OkHttpClient.Builder().readTimeout(PLAIN_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+        // Клиент регистрации строится боевым провайдером; сокращается только readTimeout, retryOnConnectionFailure=false сохраняется.
+        val registerClient = NetworkModule.provideRegisterOkHttpClient(plainClient).newBuilder()
+            .readTimeout(1_500, TimeUnit.MILLISECONDS)
+            .build()
+        val apiServiceFactory = ApiServiceFactory(baseUrlProvider, plainClient, plainClient, registerClient)
+        val repository = AuthRepository(NoTokenStorage, baseUrlProvider, apiServiceFactory)
         // Координатор нужен только login/logout; в регистрации не вызывается.
         viewModel = AuthViewModel(repository, mock(PeriodicSyncCoordinator::class.java))
         viewModel.onEmailChange(EMAIL)
@@ -167,6 +174,42 @@ class AuthViewModelRegisterTest {
         viewModel.register()
         assertEquals(ConnectionStatus.SUCCESS, awaitCompletion().status)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun registerReceivesResponseDelayedBeyondPlainReadTimeout() {
+        val delayMs = PLAIN_READ_TIMEOUT_MS * 3
+        server.enqueue(created().setHeadersDelay(delayMs, TimeUnit.MILLISECONDS))
+
+        viewModel.register()
+
+        // Через plain-клиент такой ответ не дождался бы: значит, регистрация идёт через клиент register.
+        assertEquals(ConnectionStatus.SUCCESS, awaitCompletion().status)
+        assertEquals(1, server.requestCount)
+
+        // Login остаётся на plain и прежнем readTimeout.
+        viewModel.clearMessage()
+        server.enqueue(MockResponse().setBody("""{"accessToken":"a","refreshToken":"r"}""")
+            .setHeadersDelay(delayMs, TimeUnit.MILLISECONDS))
+        viewModel.login()
+        assertEquals(ConnectionStatus.ERROR, awaitCompletion().status)
+    }
+
+    @Test
+    fun connectionDropAfterRequestShowsUnknownResultAndDoesNotRetry() {
+        // Сервер получил запрос и оборвал соединение: исход неизвестен, POST не повторяется.
+        // Сам флаг retryOnConnectionFailure проверяется в NetworkModuleTest.
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        server.enqueue(created())
+
+        viewModel.register()
+
+        val state = awaitCompletion()
+        assertEquals(ConnectionStatus.ERROR, state.status)
+        assertTrue(state.message!!, state.message!!.contains("результат регистрации неизвестен"))
+        assertNotNull(server.takeRequest(1, TimeUnit.SECONDS))
+        assertNull(server.takeRequest(300, TimeUnit.MILLISECONDS))
+        assertEquals(1, server.requestCount)
     }
 
     @Test

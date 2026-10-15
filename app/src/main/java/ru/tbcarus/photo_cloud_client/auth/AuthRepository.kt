@@ -29,7 +29,7 @@ class AuthRepository @Inject constructor(
 
     suspend fun register(email: String, password: String): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val resp = apiServiceFactory.plainAuthService().register(AuthRequest(email, password)).execute()
+            val resp = apiServiceFactory.registerAuthService().register(AuthRequest(email, password)).execute()
             if (resp.isSuccessful) resp.body()?.get("message") ?: "Registered"
             else throw Exception(ApiErrorParser.parse(resp))
         }
