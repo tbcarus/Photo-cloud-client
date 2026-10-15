@@ -1,11 +1,13 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.auth
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
@@ -50,6 +52,39 @@ fun AuthScreen(
             viewModel.clearMessage()
         }
     }
+
+    state.repeatRegistrationEmail?.let { email ->
+        RepeatRegistrationDialog(
+            email = email,
+            onConfirm = viewModel::confirmRepeatRegistration,
+            onDismiss = viewModel::cancelRepeatRegistration
+        )
+    }
+}
+
+@Composable
+private fun RepeatRegistrationDialog(
+    email: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Зарегистрироваться повторно?") },
+        text = {
+            Text(
+                "На $email уже отправлено письмо со ссылкой для подтверждения. " +
+                    "Новая регистрация аннулирует ссылку из предыдущего письма.\n\n" +
+                    "Продолжайте, если ссылка истекла или письмо не пришло."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Зарегистрировать") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+        }
+    )
 }
 
 @Composable
@@ -61,6 +96,8 @@ private fun LoginContent(
     onLogin: () -> Unit,
     onTestAuth: () -> Unit
 ) {
+    val enabled = state.status != ConnectionStatus.LOADING
+
     Text("Вход / Регистрация", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(16.dp))
 
@@ -68,6 +105,7 @@ private fun LoginContent(
         value = state.email,
         onValueChange = onEmailChange,
         label = { Text("Email") },
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth()
     )
 
@@ -75,6 +113,7 @@ private fun LoginContent(
         value = state.password,
         onValueChange = onPasswordChange,
         label = { Text("Password") },
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth()
     )
 
@@ -84,9 +123,9 @@ private fun LoginContent(
             .padding(top = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Button(onClick = onRegister) { Text("Register") }
-        Button(onClick = onLogin) { Text("Login") }
-        Button(onClick = onTestAuth) { Text("Test Auth") }
+        Button(onClick = onRegister, enabled = enabled) { Text("Register") }
+        Button(onClick = onLogin, enabled = enabled) { Text("Login") }
+        Button(onClick = onTestAuth, enabled = enabled) { Text("Test Auth") }
     }
 }
 

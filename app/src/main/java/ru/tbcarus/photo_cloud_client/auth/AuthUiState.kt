@@ -9,5 +9,9 @@ data class AuthUiState(
     val message: String? = null,
     val isLoggedIn: Boolean = false,
     val userEmail: String? = null,
-    val isVerifying: Boolean = false
+    val isVerifying: Boolean = false,
+    // Email, для которого на этом экране получен 201: повторная регистрация аннулирует ссылку из письма.
+    val registeredEmail: String? = null,
+    // Не null — показать подтверждение повторной регистрации этого email.
+    val repeatRegistrationEmail: String? = null
 )

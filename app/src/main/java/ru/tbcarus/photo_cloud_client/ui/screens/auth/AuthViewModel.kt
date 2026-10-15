@@ -12,6 +12,7 @@ import ru.tbcarus.photo_cloud_client.auth.AuthUiState
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.utils.JwtUtils
+import java.io.IOException
 import javax.inject.Inject
 
 @HiltViewModel
@@ -57,14 +58,54 @@ class AuthViewModel @Inject constructor(
     }
 
     fun register() {
+        // Проверка в ViewModel: кнопка блокируется только после рекомпозиции, второй клик может успеть раньше.
+        if (uiState.value.status == ConnectionStatus.LOADING) return
         if (notReady()) return
+        val email = uiState.value.email
+        if (email.equals(uiState.value.registeredEmail, ignoreCase = true)) {
+            _uiState.update { it.copy(repeatRegistrationEmail = email) }
+            return
+        }
+        sendRegistration(email)
+    }
+
+    fun confirmRepeatRegistration() {
+        val email = uiState.value.repeatRegistrationEmail ?: return
+        cancelRepeatRegistration()
+        if (uiState.value.status == ConnectionStatus.LOADING) return
+        if (notReady()) return
+        sendRegistration(email)
+    }
+
+    fun cancelRepeatRegistration() = _uiState.update { it.copy(repeatRegistrationEmail = null) }
+
+    private fun sendRegistration(email: String) {
         updateStatus(ConnectionStatus.LOADING)
         viewModelScope.launch {
-            repo.register(uiState.value.email, uiState.value.password)
-                .onSuccess { updateStatus(ConnectionStatus.SUCCESS, it) }
-                .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка") }
+            repo.register(email, uiState.value.password)
+                .onSuccess {
+                    _uiState.update { it.copy(registeredEmail = email) }
+                    updateStatus(ConnectionStatus.SUCCESS, registrationSentMessage(email))
+                }
+                .onFailure { e ->
+                    // Без ответа сервера исход неизвестен: регистрация и письмо могли пройти. POST не повторяем.
+                    val message = if (e is IOException) registrationUnknownResultMessage(email)
+                    else e.localizedMessage ?: "Ошибка"
+                    updateStatus(ConnectionStatus.ERROR, message)
+                }
         }
     }
+
+    private fun registrationSentMessage(email: String) =
+        "Письмо для подтверждения регистрации отправлено на $email.\n\n" +
+            "Проверьте почту, в том числе папку «Спам», и откройте ссылку из письма. " +
+            "После подтверждения войдите в приложение кнопкой Login."
+
+    private fun registrationUnknownResultMessage(email: String) =
+        "Не удалось получить ответ сервера, поэтому результат регистрации неизвестен. " +
+            "Сервер мог сохранить регистрацию и отправить письмо на $email.\n\n" +
+            "Сначала проверьте почту, в том числе папку «Спам». " +
+            "Повторная регистрация аннулирует ссылку из ранее отправленного письма."
 
     fun login() {
         if (notReady()) return
