@@ -11,10 +11,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
+import ru.tbcarus.photo_cloud_client.core.server.buildBaseUrl
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
-import ru.tbcarus.photo_cloud_client.utils.isValidIpAddress
 import javax.inject.Inject
 
 @HiltViewModel
@@ -32,8 +32,9 @@ class NetworkViewModel @Inject constructor(
         viewModelScope.launch {
             val ip = serverPreferences.getIp().first()
             val port = serverPreferences.getPort().first()
+            // Адрес в памяти восстанавливается тем же правилом, что и в SyncWorker.
+            baseUrlProvider.reload()
             if (!ip.isNullOrEmpty() && !port.isNullOrEmpty()) {
-                baseUrlProvider.baseUrl = "http://$ip:$port/"
                 _uiState.update { it.copy(ip = ip, port = port) }
                 testConnection()
             }
@@ -50,14 +51,13 @@ class NetworkViewModel @Inject constructor(
         val ip = uiState.value.ip.trim()
         val port = uiState.value.port.trim()
 
-        if (!isValidIpAddress(ip) || port.isEmpty()) {
+        val baseUrl = buildBaseUrl(ip, port)
+        if (baseUrl == null) {
             _uiState.update {
                 it.copy(connectionStatus = ConnectionStatus.ERROR, message = "Введите корректные IP и порт")
             }
             return
         }
-
-        val baseUrl = "http://$ip:$port/"
         Log.d("BASE_URL", baseUrl)
 
         _uiState.update { it.copy(isLoading = true, message = null) }

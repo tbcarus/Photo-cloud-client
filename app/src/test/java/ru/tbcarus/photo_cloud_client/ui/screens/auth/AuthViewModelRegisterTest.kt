@@ -25,6 +25,7 @@ import org.mockito.Mockito.mock
 import ru.tbcarus.photo_cloud_client.auth.AuthRepository
 import ru.tbcarus.photo_cloud_client.auth.AuthUiState
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
+import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
@@ -50,7 +51,8 @@ class AuthViewModelRegisterTest {
         // viewModelScope работает на Main; Unconfined выполняет корутины сразу, без ручного продвижения времени.
         Dispatchers.setMain(UnconfinedTestDispatcher())
         server.start()
-        val baseUrlProvider = BaseUrlProvider().apply { baseUrl = server.url("/").toString() }
+        // Адрес задаётся напрямую: регистрация не перечитывает настройки, ServerPreferences здесь не используется.
+        val baseUrlProvider = BaseUrlProvider(mock(ServerPreferences::class.java)).apply { baseUrl = server.url("/").toString() }
         // Сокращённые таймауты вместо боевых: plain 5 s → 300 ms, register 30 s → 1.5 s.
         val plainClient = OkHttpClient.Builder().readTimeout(PLAIN_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
         // Клиент регистрации строится боевым провайдером; сокращается только readTimeout, retryOnConnectionFailure=false сохраняется.

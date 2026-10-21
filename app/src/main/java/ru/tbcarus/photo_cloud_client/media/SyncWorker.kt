@@ -45,9 +45,11 @@ class SyncWorker @AssistedInject constructor(
     }
 
     private suspend fun runSync(): Result {
+        // Адрес берём из сохранённых настроек, а не из памяти: процесс мог быть запущен WorkManager без UI,
+        // а пользователь — сменить адрес после прошлого прогона.
+        val baseUrl = baseUrlProvider.reload()
         // Быстрая проверка доступности сервера через существующую тестовую ручку (GET /api/v1/test).
         // Если сервер недоступен — не гоняем весь pipeline впустую в timeout, а сразу просим повтор.
-        val baseUrl = baseUrlProvider.baseUrl
         if (baseUrl.isBlank() || serverRepository.testConnection(baseUrl).isFailure) {
             Log.w(TAG, "Сервер недоступен — откладываем sync")
             syncStatusStore.record(SyncStatus.SERVER_UNAVAILABLE)
