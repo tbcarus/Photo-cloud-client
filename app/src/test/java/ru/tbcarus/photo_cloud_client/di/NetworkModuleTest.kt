@@ -1,9 +1,11 @@
 package ru.tbcarus.photo_cloud_client.di
 
+import okhttp3.logging.HttpLoggingInterceptor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import ru.tbcarus.photo_cloud_client.BuildConfig
 
 class NetworkModuleTest {
 
@@ -18,6 +20,14 @@ class NetworkModuleTest {
         assertEquals(30_000, registerClient.readTimeoutMillis)
         assertEquals(40_000, registerClient.callTimeoutMillis)
         assertFalse(registerClient.retryOnConnectionFailure)
+    }
+
+    @Test
+    fun httpLoggingIsBasicInDebugAndOffInRelease() {
+        assertEquals(HttpLoggingInterceptor.Level.BASIC, NetworkModule.httpLoggingLevel(debug = true))
+        assertEquals(HttpLoggingInterceptor.Level.NONE, NetworkModule.httpLoggingLevel(debug = false))
+        // Провайдер выбирает уровень по типу сборки; BODY не используется ни в одной из них.
+        assertEquals(NetworkModule.httpLoggingLevel(BuildConfig.DEBUG), NetworkModule.provideLoggingInterceptor().level)
     }
 
     @Test

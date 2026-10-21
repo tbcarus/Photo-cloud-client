@@ -41,6 +41,8 @@ android {
 
     buildFeatures {
         compose = true
+        // BuildConfig.DEBUG выбирает уровень HTTP-логирования: BASIC в debug, без логов в release.
+        buildConfig = true
     }
 }
 

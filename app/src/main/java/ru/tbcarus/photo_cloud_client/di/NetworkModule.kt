@@ -6,6 +6,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
+import ru.tbcarus.photo_cloud_client.BuildConfig
 import ru.tbcarus.photo_cloud_client.core.network.AuthInterceptor
 import ru.tbcarus.photo_cloud_client.core.network.TokenAuthenticator
 import java.util.concurrent.TimeUnit
@@ -19,7 +20,12 @@ object NetworkModule {
     @Provides
     @Singleton
     fun provideLoggingInterceptor(): HttpLoggingInterceptor =
-        HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BODY }
+        HttpLoggingInterceptor().apply { level = httpLoggingLevel(BuildConfig.DEBUG) }
+
+    // BASIC — только метод, URL, код и длительность: без заголовков (JWT) и тел (пароли, токены, байты файлов).
+    // BODY читал бы тело upload целиком в память ещё до отправки. В release HTTP-логирования нет.
+    internal fun httpLoggingLevel(debug: Boolean): HttpLoggingInterceptor.Level =
+        if (debug) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
 
     @Provides
     @Singleton
