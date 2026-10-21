@@ -27,6 +27,8 @@ import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
+import ru.tbcarus.photo_cloud_client.core.storage.InMemoryTokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
@@ -148,7 +150,10 @@ class SyncWorkerServerAddressTest {
                 FileUploadRepository(dao, apiServiceFactory, folderRepository, appContext),
                 ServerRepository(apiServiceFactory),
                 baseUrlProvider,
-                syncStatusStore
+                syncStatusStore,
+                // Сессия есть: эти тесты проверяют адрес, а не остановку фона без токенов.
+                InMemoryTokenStorage(Tokens("access", "refresh")),
+                mock(PeriodicSyncCoordinator::class.java)
             )
         }
         return TestListenableWorkerBuilder<SyncWorker>(context).setWorkerFactory(factory).build()

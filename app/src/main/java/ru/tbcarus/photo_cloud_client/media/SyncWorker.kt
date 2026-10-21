@@ -10,6 +10,7 @@ import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 
 /**
@@ -26,11 +27,16 @@ class SyncWorker @AssistedInject constructor(
     private val fileUploadRepository: FileUploadRepository,
     private val serverRepository: ServerRepository,
     private val baseUrlProvider: BaseUrlProvider,
-    private val syncStatusStore: SyncStatusStore
+    private val syncStatusStore: SyncStatusStore,
+    private val tokenStorage: TokenStorage,
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : CoroutineWorker(appContext, params) {
 
-    private companion object {
-        const val TAG = "SyncWorker"
+    companion object {
+        private const val TAG = "SyncWorker"
+        /** Ключ outputData с причиной остановки без синхронизации. */
+        const val STOP_REASON_KEY = "stop_reason"
+        const val STOP_REASON_NO_SESSION = "no_session"
     }
 
     override suspend fun doWork(): Result {
@@ -45,6 +51,16 @@ class SyncWorker @AssistedInject constructor(
     }
 
     private suspend fun runSync(): Result {
+        // Без пары авторизованные стадии гарантированно получат 401: до сетевых запросов останавливаем фон и не просим retry.
+        if (tokenStorage.getTokens() == null) {
+            Log.w(TAG, "Нет сессии — фоновая синхронизация остановлена до входа")
+            syncStatusStore.record(SyncStatus.ERROR)
+            // Последнее действие прогона: reconcile без пары только отменяет periodic и observer и ничего не планирует.
+            // Если это сам periodic, WorkManager остановит уже завершающийся прогон — повтора не будет.
+            periodicSyncCoordinator.reconcile()
+            return Result.success(workDataOf(STOP_REASON_KEY to STOP_REASON_NO_SESSION))
+        }
+
         // Адрес берём из сохранённых настроек, а не из памяти: процесс мог быть запущен WorkManager без UI,
         // а пользователь — сменить адрес после прошлого прогона.
         val baseUrl = baseUrlProvider.reload()

@@ -253,5 +253,6 @@ class AuthViewModelRegisterTest {
         override fun getTokens(): Tokens? = null
         override fun saveTokens(tokens: Tokens) = Unit
         override fun clear() = Unit
+        override fun replaceIf(expected: Tokens, replacement: Tokens?) = false
     }
 }

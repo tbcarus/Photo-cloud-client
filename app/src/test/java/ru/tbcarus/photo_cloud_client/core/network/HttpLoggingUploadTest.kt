@@ -125,5 +125,6 @@ class HttpLoggingUploadTest {
         override fun getTokens(): Tokens = tokens
         override fun saveTokens(tokens: Tokens) = Unit
         override fun clear() = Unit
+        override fun replaceIf(expected: Tokens, replacement: Tokens?) = false
     }
 }

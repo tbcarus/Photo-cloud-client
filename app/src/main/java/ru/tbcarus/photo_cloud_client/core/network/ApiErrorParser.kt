@@ -37,4 +37,19 @@ object ApiErrorParser {
 
         return "HTTP ${response.code()}"
     }
+
+    /** Код ErrorResponse из тела ошибки; null, если тела нет или это не ErrorResponse. Тело читается один раз. */
+    fun errorCode(response: Response<*>): String? {
+        val rawBody = try {
+            response.errorBody()?.string()
+        } catch (e: Exception) {
+            null
+        }
+        if (rawBody.isNullOrBlank()) return null
+        return try {
+            gson.fromJson(rawBody, ErrorResponseDto::class.java)?.code
+        } catch (e: JsonSyntaxException) {
+            null
+        }
+    }
 }

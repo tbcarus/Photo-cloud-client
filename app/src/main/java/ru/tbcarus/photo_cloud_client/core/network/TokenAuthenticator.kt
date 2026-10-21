@@ -13,6 +13,7 @@ import ru.tbcarus.photo_cloud_client.api.models.RefreshTokenRequest
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Named
 
@@ -21,6 +22,12 @@ class TokenAuthenticator @Inject constructor(
     private val baseUrlProvider: BaseUrlProvider,
     @Named("plain") private val okHttpClient: OkHttpClient
 ) : Authenticator {
+
+    private companion object {
+        // Коды ErrorResponse Server для окончательного отказа refresh (GlobalExceptionHandler).
+        const val INVALID_REFRESH_TOKEN = "INVALID_REFRESH_TOKEN"
+        const val REFRESH_TOKEN_REVOKED = "REFRESH_TOKEN_REVOKED"
+    }
 
     private val lock = Any()
 
@@ -50,32 +57,57 @@ class TokenAuthenticator @Inject constructor(
             // If the stored token differs from the failed one, another thread already refreshed —
             // retry the request with the updated token without performing a new refresh
             if (failedAccessToken != null && failedAccessToken != current.accessToken) {
-                return response.request.newBuilder()
-                    .header("Authorization", "Bearer ${current.accessToken}")
-                    .build()
+                return withAccessToken(response, current.accessToken)
             }
 
-            val refreshResp = refreshService(baseUrl)
-                .refreshToken(RefreshTokenRequest(current.refreshToken))
-                .execute()
-
-            if (!refreshResp.isSuccessful) {
-                storage.clear()
+            // null — окончательный отказ refresh; временный отказ выходит отсюда как IOException.
+            val newAccess = requestNewAccessToken(baseUrl, current.refreshToken)
+            if (newAccess == null) {
+                // replaceIf не тронет пару, если её уже сменили login/logout: стирается только отвергнутая сессия.
+                storage.replaceIf(current, null)
                 return null
             }
 
-            val body = refreshResp.body() ?: return null
-            val newAccess = body.accessToken ?: return null
-
             // Server does not rotate the refresh token; keep the existing one
-            val newTokens = Tokens(newAccess, current.refreshToken)
-            storage.saveTokens(newTokens)
-
-            return response.request.newBuilder()
-                .header("Authorization", "Bearer ${newTokens.accessToken}")
-                .build()
+            val refreshed = Tokens(newAccess, current.refreshToken)
+            if (storage.replaceIf(current, refreshed)) {
+                return withAccessToken(response, refreshed.accessToken)
+            }
+            // Пара сменилась во время refresh: новую не перезаписываем, а после logout старую не восстанавливаем.
+            val actual = storage.getTokens() ?: return null
+            return withAccessToken(response, actual.accessToken)
         }
     }
+
+    /**
+     * Новый access по refresh. null — окончательный отказ Server: refresh недействителен или отозван.
+     * Любой другой исход временный: IOException без токенов в тексте, пара при этом не меняется.
+     */
+    private fun requestNewAccessToken(baseUrl: String, refreshToken: String): String? {
+        // Сетевые ошибки и timeout пробрасываются как есть — это IOException.
+        val refreshResp = try {
+            refreshService(baseUrl).refreshToken(RefreshTokenRequest(refreshToken)).execute()
+        } catch (e: RuntimeException) {
+            // Тело 2xx не разобралось как ответ refresh. Причину не прикладываем: в ней мог быть фрагмент тела.
+            throw IOException("Token refresh returned an invalid response")
+        }
+        if (refreshResp.isSuccessful) {
+            return refreshResp.body()?.accessToken?.takeIf { it.isNotBlank() }
+                ?: throw IOException("Token refresh returned no access token")
+        }
+        val status = refreshResp.code()
+        // По коду ErrorResponse, а не только по статусу: 401 может прийти и от необработанной ошибки Server.
+        val code = ApiErrorParser.errorCode(refreshResp)
+        val rejected = (status == 401 && code == INVALID_REFRESH_TOKEN) ||
+            (status == 403 && code == REFRESH_TOKEN_REVOKED)
+        if (rejected) return null
+        throw IOException("Token refresh temporarily failed: HTTP $status")
+    }
+
+    private fun withAccessToken(response: Response, accessToken: String): Request =
+        response.request.newBuilder()
+            .header("Authorization", "Bearer $accessToken")
+            .build()
 
     private fun responseCount(response: Response): Int {
         var count = 1

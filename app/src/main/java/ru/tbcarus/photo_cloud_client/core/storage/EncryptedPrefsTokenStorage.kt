@@ -22,24 +22,41 @@ class EncryptedPrefsTokenStorage @Inject constructor(
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
 
+    // Одна блокировка на чтение и все изменения: пара читается целиком, replaceIf сравнивает и пишет атомарно,
+    // а tokensFlow меняется вместе с хранилищем. apply() обновляет данные в памяти сразу, на диск — асинхронно.
+    private val lock = Any()
+
     private val _tokensFlow = MutableStateFlow<Tokens?>(getTokens())
     override val tokensFlow: StateFlow<Tokens?> = _tokensFlow
 
-    override fun getTokens(): Tokens? {
+    override fun getTokens(): Tokens? = synchronized(lock) {
         val access = prefs.getString("accessToken", null)
         val refresh = prefs.getString("refreshToken", null)
-        return if (access != null && refresh != null) Tokens(access, refresh) else null
+        if (access != null && refresh != null) Tokens(access, refresh) else null
     }
 
-    override fun saveTokens(tokens: Tokens) {
-        prefs.edit().putString("accessToken", tokens.accessToken)
-            .putString("refreshToken", tokens.refreshToken)
-            .apply()
+    override fun saveTokens(tokens: Tokens) = synchronized(lock) {
+        write(tokens)
+    }
+
+    override fun clear() = synchronized(lock) {
+        write(null)
+    }
+
+    override fun replaceIf(expected: Tokens, replacement: Tokens?): Boolean = synchronized(lock) {
+        if (getTokens() != expected) return false
+        write(replacement)
+        true
+    }
+
+    private fun write(tokens: Tokens?) {
+        if (tokens == null) {
+            prefs.edit().clear().apply()
+        } else {
+            prefs.edit().putString("accessToken", tokens.accessToken)
+                .putString("refreshToken", tokens.refreshToken)
+                .apply()
+        }
         _tokensFlow.value = tokens
-    }
-
-    override fun clear() {
-        prefs.edit().clear().apply()
-        _tokensFlow.value = null
     }
 }
