@@ -55,10 +55,18 @@ class AuthRepository @Inject constructor(
     suspend fun logout(): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val refresh = storage.getTokens()?.refreshToken ?: throw Exception("No tokens")
-            val resp = apiServiceFactory.authAuthService().logout(LogoutRequest(refresh)).execute()
+            val service = apiServiceFactory.authAuthService()
+            val resp = service.logout(LogoutRequest(refresh)).execute()
+            // Истёкший access мог запустить refresh с заменой R1 на R2, а повтор logout отправил R1 из тела.
+            // R1 уже отозван заменой, поэтому отзываем и сохранённый R2, иначе он останется действующим.
+            val replaced = storage.getTokens()?.refreshToken?.takeIf { it != refresh }
+            val replacedResp = replaced?.let { service.logout(LogoutRequest(it)).execute() }
             storage.clear()
             if (!resp.isSuccessful) {
                 throw Exception(ApiErrorParser.parse(resp))
+            }
+            if (replacedResp != null && !replacedResp.isSuccessful) {
+                throw Exception(ApiErrorParser.parse(replacedResp))
             }
         }
     }

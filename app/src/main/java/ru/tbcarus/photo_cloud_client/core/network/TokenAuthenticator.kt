@@ -61,15 +61,14 @@ class TokenAuthenticator @Inject constructor(
             }
 
             // null — окончательный отказ refresh; временный отказ выходит отсюда как IOException.
-            val newAccess = requestNewAccessToken(baseUrl, current.refreshToken)
-            if (newAccess == null) {
+            val refreshed = requestNewTokens(baseUrl, current)
+            if (refreshed == null) {
                 // replaceIf не тронет пару, если её уже сменили login/logout: стирается только отвергнутая сессия.
                 storage.replaceIf(current, null)
                 return null
             }
 
-            // Server does not rotate the refresh token; keep the existing one
-            val refreshed = Tokens(newAccess, current.refreshToken)
+            // Новый refresh пишется синхронно; неподтверждённая запись выходит отсюда как IOException.
             if (storage.replaceIf(current, refreshed)) {
                 return withAccessToken(response, refreshed.accessToken)
             }
@@ -80,20 +79,26 @@ class TokenAuthenticator @Inject constructor(
     }
 
     /**
-     * Новый access по refresh. null — окончательный отказ Server: refresh недействителен или отозван.
+     * Новая пара по refresh: новый access и новый refresh, если Server заменил его, иначе прежний.
+     * null — окончательный отказ Server: refresh недействителен или отозван.
      * Любой другой исход временный: IOException без токенов в тексте, пара при этом не меняется.
      */
-    private fun requestNewAccessToken(baseUrl: String, refreshToken: String): String? {
+    private fun requestNewTokens(baseUrl: String, current: Tokens): Tokens? {
         // Сетевые ошибки и timeout пробрасываются как есть — это IOException.
         val refreshResp = try {
-            refreshService(baseUrl).refreshToken(RefreshTokenRequest(refreshToken)).execute()
+            refreshService(baseUrl).refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
         } catch (e: RuntimeException) {
             // Тело 2xx не разобралось как ответ refresh. Причину не прикладываем: в ней мог быть фрагмент тела.
             throw IOException("Token refresh returned an invalid response")
         }
         if (refreshResp.isSuccessful) {
-            return refreshResp.body()?.accessToken?.takeIf { it.isNotBlank() }
+            val body = refreshResp.body()
+            val access = body?.accessToken?.takeIf { it.isNotBlank() }
                 ?: throw IOException("Token refresh returned no access token")
+            // Поля нет — Server не заменял refresh; пустая строка — некорректный ответ.
+            val refresh = body.refreshToken ?: current.refreshToken
+            if (refresh.isBlank()) throw IOException("Token refresh returned an empty refresh token")
+            return Tokens(access, refresh)
         }
         val status = refreshResp.code()
         // По коду ErrorResponse, а не только по статусу: 401 может прийти и от необработанной ошибки Server.

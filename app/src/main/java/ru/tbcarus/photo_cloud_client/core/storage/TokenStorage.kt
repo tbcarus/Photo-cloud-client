@@ -13,6 +13,8 @@ interface TokenStorage {
      * Атомарно заменяет пару, только если в хранилище сейчас ровно [expected] (и access, и refresh);
      * replacement = null очищает пару. Нужен refresh: запоздалый результат не должен затронуть пару,
      * сменившуюся после login/logout. Возвращает true, если замена выполнена.
+     * Замена с новым refresh записывается синхронно (вызывать на рабочем потоке): прежний refresh Server уже
+     * отозвал. Если запись не подтверждена, бросает IOException; в памяти при этом уже новая пара.
      */
     fun replaceIf(expected: Tokens, replacement: Tokens?): Boolean
 

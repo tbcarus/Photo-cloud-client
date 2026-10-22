@@ -20,6 +20,7 @@ import org.junit.Test
 import org.mockito.Mockito.mock
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.storage.InMemoryTokenStorage
+import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.di.NetworkModule
@@ -54,6 +55,7 @@ class TokenAuthenticatorTest {
     @Volatile
     private var onRefresh: () -> MockResponse = { refreshOk("new-access") }
 
+    private lateinit var baseUrlProvider: BaseUrlProvider
     private lateinit var client: OkHttpClient
 
     @Before
@@ -70,14 +72,18 @@ class TokenAuthenticatorTest {
                 }
         }
         server.start(InetAddress.getByName("127.0.0.1"), 0)
-        val baseUrlProvider = BaseUrlProvider(mock(ServerPreferences::class.java))
+        baseUrlProvider = BaseUrlProvider(mock(ServerPreferences::class.java))
             .apply { baseUrl = "http://127.0.0.1:${server.port}/" }
+        client = authClient(storage)
+    }
+
+    private fun authClient(tokenStorage: TokenStorage): OkHttpClient {
         // Refresh идёт через plain-клиент; короткий timeout нужен только для теста зависшего ответа.
         val plainClient = OkHttpClient.Builder().readTimeout(500, TimeUnit.MILLISECONDS).build()
-        client = NetworkModule.provideAuthOkHttpClient(
+        return NetworkModule.provideAuthOkHttpClient(
             HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.NONE },
-            AuthInterceptor(storage),
-            TokenAuthenticator(storage, baseUrlProvider, plainClient)
+            AuthInterceptor(tokenStorage),
+            TokenAuthenticator(tokenStorage, baseUrlProvider, plainClient)
         )
     }
 
@@ -96,6 +102,47 @@ class TokenAuthenticatorTest {
         assertEquals(1, refreshCount.get())
         // 401 со старым access, refresh, один повтор с новым access.
         assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun oldServerResponseWithoutRefreshKeepsStoredRefresh() {
+        // Ответ без замены: поля нет или оно null — сохраняется прежний refresh.
+        listOf(refreshOk("new-access"), refreshOk("new-access", refresh = null)).forEach { body ->
+            storage.saveTokens(OLD)
+            onRefresh = { body }
+
+            callProtected().use { response -> assertEquals(200, response.code) }
+
+            assertEquals(Tokens("new-access", OLD.refreshToken), storage.getTokens())
+        }
+    }
+
+    @Test
+    fun responseWithReplacementSavesNewPair() {
+        onRefresh = { refreshOk("new-access", refresh = "refresh-2-rotated") }
+
+        callProtected().use { response -> assertEquals(200, response.code) }
+
+        assertEquals(Tokens("new-access", "refresh-2-rotated"), storage.getTokens())
+        assertEquals(1, refreshCount.get())
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun unconfirmedStorageWriteIsTemporaryFailure() {
+        val failing = object : TokenStorage by storage {
+            override fun replaceIf(expected: Tokens, replacement: Tokens?): Boolean =
+                throw IOException("Token storage did not confirm the write")
+        }
+        onRefresh = { refreshOk("new-access", refresh = "refresh-2-rotated") }
+
+        val exception = assertThrows(IOException::class.java) {
+            authClient(failing).newCall(protectedRequest()).execute().close()
+        }
+
+        assertEquals(1, refreshCount.get())
+        assertNoTokens(exception)
+        assertFalse(exception.message.orEmpty().contains("refresh-2-rotated"))
     }
 
     @Test
@@ -147,6 +194,7 @@ class TokenAuthenticatorTest {
         listOf(
             MockResponse().setBody("{}"),
             refreshOk(""),
+            refreshOk("new-access", refresh = ""),
             MockResponse().setBody("not json")
         ).forEach { body ->
             onRefresh = { body }
@@ -199,6 +247,25 @@ class TokenAuthenticatorTest {
     }
 
     @Test
+    fun concurrentRequestsShareOneReplacement() {
+        onRefresh = {
+            Thread.sleep(300)
+            refreshOk("new-access", refresh = "refresh-2-rotated")
+        }
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val calls = List(2) { executor.submit(Callable { callProtected().use { it.code } }) }
+
+            assertEquals(listOf(200, 200), calls.map { it.get(5, TimeUnit.SECONDS) })
+        } finally {
+            executor.shutdownNow()
+        }
+        // Второй запрос повторяется с уже сохранённой парой и не предъявляет отозванный R1.
+        assertEquals(1, refreshCount.get())
+        assertEquals(Tokens("new-access", "refresh-2-rotated"), storage.getTokens())
+    }
+
+    @Test
     fun lateRejectionDoesNotClearNewLogin() {
         onRefresh = {
             storage.saveTokens(NEW_LOGIN)
@@ -224,23 +291,46 @@ class TokenAuthenticatorTest {
     }
 
     @Test
-    fun logoutDuringRefreshDoesNotRestoreOldSession() {
+    fun lateReplacementDoesNotOverwriteNewLogin() {
+        acceptedAccess = setOf(NEW_LOGIN.accessToken)
         onRefresh = {
-            storage.clear()
-            refreshOk("new-access")
+            storage.saveTokens(NEW_LOGIN)
+            refreshOk("new-access", refresh = "refresh-2-rotated")
         }
 
-        callProtected().use { response -> assertEquals(401, response.code) }
+        callProtected().use { response -> assertEquals(200, response.code) }
 
-        assertNull(storage.getTokens())
+        assertEquals(NEW_LOGIN, storage.getTokens())
     }
 
-    private fun callProtected(): Response =
-        client.newCall(Request.Builder().url("http://127.0.0.1:${server.port}$PROTECTED").build()).execute()
+    @Test
+    fun logoutDuringRefreshDoesNotRestoreOldSession() {
+        listOf(refreshOk("new-access"), refreshOk("new-access", refresh = "refresh-2-rotated")).forEach { body ->
+            storage.saveTokens(OLD)
+            onRefresh = {
+                storage.clear()
+                body
+            }
 
+            callProtected().use { response -> assertEquals(401, response.code) }
+
+            assertNull(storage.getTokens())
+        }
+    }
+
+    private fun callProtected(): Response = client.newCall(protectedRequest()).execute()
+
+    private fun protectedRequest() = Request.Builder().url("http://127.0.0.1:${server.port}$PROTECTED").build()
+
+    // Ответ текущего Server без замены: поля refreshToken нет.
     private fun refreshOk(access: String) = MockResponse()
         .setHeader("Content-Type", "application/json")
         .setBody("""{"accessToken":"$access"}""")
+
+    // refresh = null передаёт поле явным null.
+    private fun refreshOk(access: String, refresh: String?) = MockResponse()
+        .setHeader("Content-Type", "application/json")
+        .setBody("""{"accessToken":"$access","refreshToken":${refresh?.let { "\"$it\"" } ?: "null"}}""")
 
     private fun errorResponse(status: Int, code: String) = MockResponse()
         .setResponseCode(status)
