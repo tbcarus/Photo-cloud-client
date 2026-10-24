@@ -32,13 +32,13 @@ class NetworkViewModel @Inject constructor(
         viewModelScope.launch {
             val ip = serverPreferences.getIp().first()
             val port = serverPreferences.getPort().first()
-            // Адрес в памяти восстанавливается тем же правилом, что и в SyncWorker.
+            // Адрес в памяти восстанавливается тем же правилом, что и в UploadWorker.
             baseUrlProvider.reload()
             if (!ip.isNullOrEmpty() && !port.isNullOrEmpty()) {
                 _uiState.update { it.copy(ip = ip, port = port) }
                 testConnection()
             }
-            // baseUrl восстановлен (или нет) — переоцениваем periodic sync от текущего состояния.
+            // baseUrl восстановлен (или нет) — переоцениваем фоновые задачи от текущего состояния.
             periodicSyncCoordinator.reconcile()
         }
     }

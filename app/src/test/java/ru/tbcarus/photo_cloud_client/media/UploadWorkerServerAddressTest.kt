@@ -34,13 +34,13 @@ import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 /**
- * SyncWorker запускается через WorkManager Test APIs в процессе без UI.
+ * UploadWorker запускается через WorkManager Test APIs в процессе без UI.
  * Обычный Application вместо App: нет Hilt-графа, MainActivity и NetworkViewModel, которые могли бы заранее
  * восстановить адрес; BaseUrlProvider в каждом тесте создаётся заново, как в холодном процессе.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
-class SyncWorkerServerAddressTest {
+class UploadWorkerServerAddressTest {
 
     private lateinit var context: Application
     private lateinit var server: MockWebServer
@@ -74,7 +74,7 @@ class SyncWorkerServerAddressTest {
 
         assertEquals("/api/v1/test", server.takeRequest(1, TimeUnit.SECONDS)?.path)
         assertEquals(serverUrl(), baseUrlProvider.baseUrl)
-        // Сервер доступен: прогон дошёл до scan, где без разрешения на фото фоновая задача завершается success.
+        // Сервер доступен: прогон дошёл до проверки разрешения, без которого фоновая задача завершается success.
         assertEquals(ListenableWorker.Result.success(), result)
     }
 
@@ -131,7 +131,7 @@ class SyncWorkerServerAddressTest {
         assertEquals(SyncStatus.SERVER_UNAVAILABLE, syncStatusStore.observe().first()?.status)
     }
 
-    private fun worker(baseUrlProvider: BaseUrlProvider): SyncWorker {
+    private fun worker(baseUrlProvider: BaseUrlProvider): UploadWorker {
         val client = OkHttpClient()
         val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
         val folderRepository = FolderRepository(apiServiceFactory)
@@ -141,11 +141,9 @@ class SyncWorkerServerAddressTest {
                 appContext: Context,
                 workerClassName: String,
                 workerParameters: WorkerParameters
-            ) = SyncWorker(
+            ) = UploadWorker(
                 appContext,
                 workerParameters,
-                MediaFileRepository(dao, MediaStoreRepository(appContext)),
-                ChecksumRepository(dao, appContext),
                 ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository),
                 FileUploadRepository(dao, apiServiceFactory, folderRepository, appContext),
                 ServerRepository(apiServiceFactory),
@@ -156,7 +154,7 @@ class SyncWorkerServerAddressTest {
                 mock(PeriodicSyncCoordinator::class.java)
             )
         }
-        return TestListenableWorkerBuilder<SyncWorker>(context).setWorkerFactory(factory).build()
+        return TestListenableWorkerBuilder<UploadWorker>(context).setWorkerFactory(factory).build()
     }
 
     private fun serverUrl() = "http://127.0.0.1:${server.port}/"

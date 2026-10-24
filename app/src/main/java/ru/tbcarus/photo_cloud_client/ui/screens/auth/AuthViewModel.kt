@@ -114,8 +114,10 @@ class AuthViewModel @Inject constructor(
             repo.login(uiState.value.email, uiState.value.password)
                 .onSuccess { tokens ->
                     repo.saveTokens(tokens)
-                    // Токены появились — включаем periodic sync (от текущего состояния).
+                    // Токены появились — включаем periodic Загрузчика (от текущего состояния)
+                    // и разово запускаем его для очереди, накопленной Поставщиком без входа.
                     periodicSyncCoordinator.reconcile()
+                    periodicSyncCoordinator.requestUpload()
                     updateStatus(ConnectionStatus.SUCCESS, "Login successful")
                 }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Ошибка входа") }
@@ -153,7 +155,8 @@ class AuthViewModel @Inject constructor(
             repo.logout()
                 .onSuccess { updateStatus(ConnectionStatus.SUCCESS, "Logged out successfully") }
                 .onFailure { updateStatus(ConnectionStatus.ERROR, it.localizedMessage ?: "Logout error") }
-            // logout() очищает токены в обоих исходах — переоцениваем periodic sync (отменяем).
+            // logout() очищает токены в обоих исходах — reconcile отменяет periodic Загрузчика;
+            // Поставщик и подготовленная очередь в Room сохраняются.
             periodicSyncCoordinator.reconcile()
         }
     }

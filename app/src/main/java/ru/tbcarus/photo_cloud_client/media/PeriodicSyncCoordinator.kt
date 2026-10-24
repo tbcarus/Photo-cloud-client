@@ -1,10 +1,6 @@
 package ru.tbcarus.photo_cloud_client.media
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
-import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import ru.tbcarus.photo_cloud_client.auth.AuthRepository
 import javax.inject.Inject
@@ -13,9 +9,10 @@ import javax.inject.Singleton
 /**
  * Держит фоновую синхронизацию в согласии с текущим состоянием приложения.
  *
- * Правило: есть токены + настроен baseUrl + выдано media permission →
- *   periodic sync включён и [MediaChangeObserver] слушает галерею;
- * иначе — periodic sync отменён и observer остановлен.
+ * Правила (A4.1):
+ *  - выдано media permission → periodic Поставщика включён и [MediaChangeObserver] слушает галерею,
+ *    независимо от входа; иначе — отменён и остановлен;
+ *  - дополнительно есть токены и настроен baseUrl → periodic Загрузчика включён; иначе — отменён.
  *
  * Вызывается от изменения состояния (старт приложения после восстановления baseUrl,
  * login, logout, grant media permission), а не «по факту login» —
@@ -36,26 +33,30 @@ class PeriodicSyncCoordinator @Inject constructor(
         authRepository.getTokens() != null && authRepository.isReady()
 
     fun reconcile() {
-        val hasTokens = authRepository.getTokens() != null
-        val hasBaseUrl = authRepository.isReady()
-        val hasMediaPermission = hasMediaPermission()
-
-        if (hasTokens && hasBaseUrl && hasMediaPermission) {
-            syncScheduler.enqueuePeriodicSync()
+        val hasMediaPermission = context.hasMediaReadPermission()
+        if (hasMediaPermission) {
+            syncScheduler.enqueueProviderPeriodic()
             mediaChangeObserver.start()
         } else {
-            syncScheduler.cancelPeriodicSync()
+            syncScheduler.cancelProviderPeriodic()
             mediaChangeObserver.stop()
+        }
+
+        if (hasMediaPermission && isAutoSyncConfigured()) {
+            syncScheduler.enqueueUploadPeriodic()
+        } else {
+            syncScheduler.cancelUploadPeriodic()
         }
     }
 
-    private fun hasMediaPermission(): Boolean {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_IMAGES
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
+    /**
+     * Разовый запуск Загрузчика: после подготовки записей Поставщиком и после login.
+     * Без пары не ставится — иначе после logout каждый прогон Поставщика завершался бы no_session.
+     * baseUrl здесь не проверяется: в процессе без UI он ещё не восстановлен, Загрузчик перечитает его сам.
+     */
+    fun requestUpload() {
+        if (authRepository.getTokens() != null) {
+            syncScheduler.enqueueUpload()
         }
-        return ContextCompat.checkSelfPermission(context, permission) ==
-            PackageManager.PERMISSION_GRANTED
     }
 }

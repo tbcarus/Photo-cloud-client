@@ -1,12 +1,10 @@
 package ru.tbcarus.photo_cloud_client.media
 
-import android.Manifest
 import android.content.ContentUris
 import android.content.Context
-import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
-import androidx.core.content.ContextCompat
-import android.content.pm.PackageManager
+import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -18,25 +16,25 @@ class MediaStoreRepository @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
 
+    private companion object {
+        const val TAG = "MediaStoreRepository"
+    }
+
     /**
      * Читает все фото из MediaStore.Images и возвращает список [MediaStoreImage].
      * Синхронизацию с Room выполняет [MediaFileRepository].
      *
-     * При отсутствии разрешения возвращает [MediaStoreScanOutcome.PermissionDenied], не кидает исключение.
-     * Строки с некорректными данными пропускаются — одна плохая запись не останавливает scan.
+     * При отсутствии полного доступа возвращает [MediaStoreScanOutcome.PermissionDenied], не кидает исключение.
+     * Строки с некорректными данными пропускаются — одна плохая запись не останавливает scan,
+     * но такой снимок помечается неполным и не доказывает удаления отсутствующих записей.
+     * Неполным считается и снимок, полученный при неподключённом основном хранилище.
      *
      * // TODO: runtime-запрос разрешений будет добавлен на UI-этапе.
      * // Сейчас repository только сообщает, что доступа к MediaStore нет.
      */
     suspend fun loadImages(): MediaStoreScanOutcome = withContext(Dispatchers.IO) {
 
-        // Нужное разрешение зависит от версии Android
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_IMAGES
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+        if (!context.hasMediaReadPermission()) {
             return@withContext MediaStoreScanOutcome.PermissionDenied
         }
 
@@ -58,13 +56,18 @@ class MediaStoreRepository @Inject constructor(
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
         val selectionArgs = arrayOf("DCIM/%")
 
-        val cursor = context.contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            null
-        ) ?: return@withContext MediaStoreScanOutcome.Error("MediaStore query вернул null cursor")
+        // Ошибка самого запроса — тоже Error, а не исключение: повторная проверка снимка обрабатывает её как сбой.
+        val cursor = try {
+            context.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )
+        } catch (e: Exception) {
+            return@withContext MediaStoreScanOutcome.Error(e.message ?: "Ошибка запроса MediaStore")
+        } ?: return@withContext MediaStoreScanOutcome.Error("MediaStore query вернул null cursor")
 
         return@withContext try {
             cursor.use { c ->
@@ -78,6 +81,7 @@ class MediaStoreRepository @Inject constructor(
                 val dateAddedCol    = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
 
                 val images = mutableListOf<MediaStoreImage>()
+                var skippedRows = 0
 
                 while (c.moveToNext()) {
                     try {
@@ -127,10 +131,15 @@ class MediaStoreRepository @Inject constructor(
                         )
                     } catch (e: Exception) {
                         // пропускаем строку с неполными или некорректными данными
+                        skippedRows++
                     }
                 }
 
-                MediaStoreScanOutcome.Success(images)
+                if (skippedRows > 0) Log.w(TAG, "Пропущено строк MediaStore: $skippedRows — снимок неполный")
+                // Пока том недоступен, MediaStore скрывает его файлы без ошибки запроса.
+                val storageMounted = Environment.getExternalStorageState() == Environment.MEDIA_MOUNTED
+                if (!storageMounted) Log.w(TAG, "Основное хранилище не подключено — снимок неполный")
+                MediaStoreScanOutcome.Success(images, isComplete = skippedRows == 0 && storageMounted)
             }
         } catch (e: Exception) {
             MediaStoreScanOutcome.Error(e.message ?: "Неизвестная ошибка при чтении MediaStore")

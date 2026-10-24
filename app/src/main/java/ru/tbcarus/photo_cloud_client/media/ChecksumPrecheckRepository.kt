@@ -9,6 +9,7 @@ import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Pre-check слой этапа 5C.
@@ -16,6 +17,7 @@ import javax.inject.Singleton
  * (правило дубля: userId + folderId + checksum) и раскладывает статусы:
  *  - existing → SYNCED (файл уже на сервере, upload не нужен);
  *  - missing  → PENDING_UPLOAD (нужен upload).
+ * Переход применяется условно: строку, которую Поставщик успел сбросить или обновить, ответ не перезаписывает.
  *
  * TODO: serverFileId для SYNCED-файлов без id будет заполнен будущим list-sync.
  * TODO: когда появится поддержка нескольких целевых папок,
@@ -32,7 +34,6 @@ class ChecksumPrecheckRepository @Inject constructor(
 
     private companion object {
         const val PRECHECK_BATCH_SIZE = 500
-        const val SQLITE_UPDATE_CHUNK_SIZE = 500
     }
 
     /** Запускает pre-check по папке CAMERA. Один прогон одновременно (Mutex). */
@@ -59,9 +60,10 @@ class ChecksumPrecheckRepository @Inject constructor(
             )
             if (batch.isEmpty()) break
 
-            val ids = batch.map { it.mediaStoreId }
-            updateStatusChunked(ids, MediaFileStatus.PENDING_UPLOAD)
-            pendingUpload += ids.size
+            val moved = moveReady(batch, MediaFileStatus.PENDING_UPLOAD)
+            pendingUpload += moved
+            // Ни одна строка не перешла — остаток обработает следующий прогон, без зацикливания.
+            if (moved == 0) break
         }
 
         return ChecksumPrecheckOutcome.Success(
@@ -87,11 +89,11 @@ class ChecksumPrecheckRepository @Inject constructor(
                 )
                 if (batch.isEmpty()) break
 
-                // checksum (lowercase) → список mediaStoreId (один checksum может быть у нескольких фото)
-                val checksumToIds: Map<String, List<Long>> = batch
-                    .groupBy({ it.checksum!!.lowercase() }, { it.mediaStoreId })
+                // checksum (lowercase) → прочитанные строки (один checksum может быть у нескольких фото)
+                val checksumToFiles: Map<String, List<MediaFile>> = batch
+                    .groupBy { it.checksum!!.lowercase() }
 
-                val checksums = checksumToIds.keys.toList() // уже дедуплицированы (ключи map)
+                val checksums = checksumToFiles.keys.toList() // уже дедуплицированы (ключи map)
                 if (checksums.isEmpty()) break // защитно: не должно случиться
 
                 val request = ChecksumExistsRequest(folderId = folderId, checksums = checksums)
@@ -107,36 +109,34 @@ class ChecksumPrecheckRepository @Inject constructor(
                 val existingSet = body.existing.mapTo(HashSet()) { it.lowercase() }
                 val missingSet  = body.missing.mapTo(HashSet()) { it.lowercase() }
 
-                val existingIds = ArrayList<Long>()
-                val missingIds  = ArrayList<Long>()
+                val existingFiles = ArrayList<MediaFile>()
+                val missingFiles  = ArrayList<MediaFile>()
                 var unchangedInBatch = 0
 
-                for ((checksum, ids) in checksumToIds) {
+                for ((checksum, files) in checksumToFiles) {
                     when {
-                        existingSet.contains(checksum) -> existingIds.addAll(ids)
-                        missingSet.contains(checksum)  -> missingIds.addAll(ids)
-                        else -> unchangedInBatch += ids.size // остаётся CHECKSUM_READY
+                        existingSet.contains(checksum) -> existingFiles.addAll(files)
+                        missingSet.contains(checksum)  -> missingFiles.addAll(files)
+                        else -> unchangedInBatch += files.size // остаётся CHECKSUM_READY
                     }
                 }
 
                 // existing → SYNCED. serverFileId намеренно НЕ заполняется (см. TODO в шапке класса).
-                if (existingIds.isNotEmpty()) {
-                    updateStatusChunked(existingIds, MediaFileStatus.SYNCED)
-                }
-                if (missingIds.isNotEmpty()) {
-                    updateStatusChunked(missingIds, MediaFileStatus.PENDING_UPLOAD)
-                }
+                val existingMoved = moveReady(existingFiles, MediaFileStatus.SYNCED)
+                val missingMoved  = moveReady(missingFiles, MediaFileStatus.PENDING_UPLOAD)
 
-                existingTotal += existingIds.size
-                pendingTotal  += missingIds.size
+                existingTotal += existingMoved
+                pendingTotal  += missingMoved
 
                 // Если ни одна запись не сменила статус, оставшиеся CHECKSUM_READY будут
                 // возвращаться снова и снова — выходим, чтобы не зациклиться.
-                if (existingIds.isEmpty() && missingIds.isEmpty()) {
+                if (existingMoved == 0 && missingMoved == 0) {
                     unchangedTotal = unchangedInBatch
                     break
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             return ChecksumPrecheckOutcome.Error(e.message ?: "Ошибка при pre-check")
         }
@@ -151,10 +151,7 @@ class ChecksumPrecheckRepository @Inject constructor(
         )
     }
 
-    /** Обновляет статус по mediaStoreId чанками — лимит bind-параметров SQLite (~999). */
-    private suspend fun updateStatusChunked(ids: List<Long>, status: MediaFileStatus) {
-        ids.chunked(SQLITE_UPDATE_CHUNK_SIZE).forEach { chunk ->
-            mediaFileDao.updateStatusByMediaStoreIds(chunk, status)
-        }
-    }
+    /** Условно переводит прочитанные CHECKSUM_READY-строки в [status]; возвращает число применённых переходов. */
+    private suspend fun moveReady(files: List<MediaFile>, status: MediaFileStatus): Int =
+        files.count { mediaFileDao.updateStatusIfUnchanged(it, MediaFileStatus.CHECKSUM_READY, status) > 0 }
 }

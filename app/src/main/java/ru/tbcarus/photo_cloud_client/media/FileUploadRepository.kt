@@ -24,6 +24,8 @@ import javax.inject.Singleton
  *  - success → markUploaded(mediaStoreId, fileItem.id) → SYNCED + serverFileId;
  *  - permanent error → FAILED;
  *  - transient error → возврат файла в PENDING_UPLOAD и остановка текущего прогона.
+ * Все переходы условные (A4.1): строку, которую Поставщик сбросил или обновил во время отправки,
+ * поздний результат не перезаписывает.
  *
  * Репозиторий не зависит от UI/lifecycle — пригоден для будущего WorkManager.
  */
@@ -73,13 +75,15 @@ class FileUploadRepository @Inject constructor(
             val batch = mediaFileDao.getByStatusOnce(MediaFileStatus.PENDING_UPLOAD, UPLOAD_BATCH_SIZE)
             if (batch.isEmpty()) break
 
+            var progressed = false
             for (file in batch) {
-                attempted++
-
                 // Защитно: на 5D грузим только фото.
                 if (!file.mimeType.startsWith("image/")) {
-                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.NOT_IMAGE, System.currentTimeMillis())
-                    failed++
+                    if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, FailureReason.NOT_IMAGE) > 0) {
+                        progressed = true
+                        attempted++
+                        failed++
+                    }
                     continue
                 }
 
@@ -87,20 +91,27 @@ class FileUploadRepository @Inject constructor(
                 // постоянную ошибку файла от сетевой ошибки во время upload.
                 val openFailure = openFailureReason(file.uri)
                 if (openFailure != null) {
-                    mediaFileDao.markFailed(file.mediaStoreId, openFailure, System.currentTimeMillis())
-                    failed++
+                    if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, openFailure) > 0) {
+                        progressed = true
+                        attempted++
+                        failed++
+                    }
                     continue
                 }
 
-                mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.UPLOADING)
+                // Строку мог сбросить Поставщик после выборки — тогда этот файл в текущем прогоне не отправляем.
+                if (mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, MediaFileStatus.UPLOADING) == 0) {
+                    continue
+                }
+                progressed = true
+                attempted++
 
                 val filePart = createFilePart(file)
                 val response = try {
                     apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
                 } catch (e: IOException) {
-                    // TODO: retry/backoff для transient upload-ошибок будет реализован в WorkManager.
-                    // Сетевая ошибка/timeout/обрыв тела → transient, возвращаем файл в очередь.
-                    mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.PENDING_UPLOAD)
+                    // Сетевая ошибка/timeout/обрыв тела → transient, возвращаем файл в очередь; повтор — WorkManager.
+                    mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                     leftPending++
                     return UploadOutcome.Error(
                         e.message ?: "Сетевая ошибка при upload",
@@ -112,11 +123,16 @@ class FileUploadRepository @Inject constructor(
                     val id = response.body()?.id
                     if (id != null && id > 0) {
                         // Идемпотентный ответ сервера (существующий FileItem) — тоже success.
-                        mediaFileDao.markUploaded(file.mediaStoreId, id)
-                        succeeded++
+                        // Если фото изменилось во время отправки, строка остаётся за Поставщиком: новая версия пройдёт заново.
+                        if (mediaFileDao.markUploadedIfUnchanged(
+                                file.mediaStoreId, id, file.checksum, file.size, file.lastModified
+                            ) > 0
+                        ) {
+                            succeeded++
+                        }
                     } else {
                         // 200, но тело пустое/без id → transient.
-                        mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.PENDING_UPLOAD)
+                        mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                         leftPending++
                         return UploadOutcome.Error(
                             "Upload вернул пустой или некорректный id",
@@ -128,13 +144,13 @@ class FileUploadRepository @Inject constructor(
                     val message = ApiErrorParser.parse(response)
                     val permanentReason = permanentHttpReason(code)
                     if (permanentReason != null) {
-                        mediaFileDao.markFailed(file.mediaStoreId, permanentReason, System.currentTimeMillis())
-                        failed++
+                        if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.UPLOADING, permanentReason) > 0) {
+                            failed++
+                        }
                         continue
                     } else {
-                        // TODO: retry/backoff для transient upload-ошибок будет реализован в WorkManager.
-                        // 401 после неудачного refresh / 404 folder / 5xx → transient.
-                        mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.PENDING_UPLOAD)
+                        // 401 после неудачного refresh / 404 folder / 5xx → transient; повтор — WorkManager.
+                        mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                         leftPending++
                         return UploadOutcome.Error(
                             message,
@@ -143,6 +159,8 @@ class FileUploadRepository @Inject constructor(
                     }
                 }
             }
+            // Ни одна строка не взята в работу (все изменились параллельно) — остаток обработает следующий прогон.
+            if (!progressed) break
         }
 
         return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, leftPending))

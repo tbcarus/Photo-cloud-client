@@ -1,14 +1,31 @@
 package ru.tbcarus.photo_cloud_client.media
 
+import android.util.Log
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.cancellation.CancellationException
 
 @Singleton
 class MediaFileRepository @Inject constructor(
     private val dao: MediaFileDao,
     private val mediaStoreRepository: MediaStoreRepository
 ) {
+
+    private companion object {
+        const val TAG = "MediaFileRepository"
+
+        // Исчезновение большой части индекса может быть временным сбоем MediaStore или тома:
+        // такое удаление подтверждается повторным полным снимком через паузу.
+        const val MASS_DELETE_MIN_ROWS = 10
+        const val MASS_DELETE_RECHECK_DELAY_MS = 5_000L
+    }
+
+    // Один scan одновременно на весь процесс: Поставщик (one-time и periodic) и UI не применяют снимки параллельно.
+    private val mutex = Mutex()
 
     /** Поток всех файлов локального индекса, отсортированных по createdAt DESC. */
     fun observeAll(): Flow<List<MediaFile>> = dao.getAll()
@@ -17,39 +34,36 @@ class MediaFileRepository @Inject constructor(
      * Сканирует фото из MediaStore и синхронизирует локальный индекс Room:
      * - добавляет новые записи;
      * - обновляет metadata существующих (не трогая checksum/status/serverFileId);
-     * - удаляет stale-записи (файлы, которых больше нет в MediaStore).
+     * - удаляет stale-записи (файлы, которых больше нет в MediaStore) — только по полному снимку;
+     *   массовое исчезновение удаляется, только если его подтверждает повторный снимок.
      *
      * // TODO: при усложнении sync-логики обернуть insert/update/delete в Room transaction.
      */
-    suspend fun scanImages(): ScanOutcome {
-        return try {
+    suspend fun scanImages(): ScanOutcome = mutex.withLock {
+        try {
             when (val outcome = mediaStoreRepository.loadImages()) {
                 is MediaStoreScanOutcome.PermissionDenied -> ScanOutcome.PermissionDenied
                 is MediaStoreScanOutcome.Error -> ScanOutcome.Error(outcome.message)
-                is MediaStoreScanOutcome.Success -> applyToRoom(outcome.images)
+                is MediaStoreScanOutcome.Success -> applyToRoom(outcome.images, outcome.isComplete)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ScanOutcome.Error(e.message ?: "Ошибка при синхронизации индекса")
         }
     }
 
-    private suspend fun applyToRoom(images: List<MediaStoreImage>): ScanOutcome.Success {
+    /** Есть ли в Room записи для Загрузчика (граница Поставщик → Загрузчик). */
+    suspend fun hasReadyForUpload(): Boolean = dao.countReadyForUpload() > 0
+
+    private suspend fun applyToRoom(images: List<MediaStoreImage>, isComplete: Boolean): ScanOutcome.Success {
         // 1. Вставляем новые записи; существующие (по mediaStoreId) игнорируются
         dao.insertAll(images.map { it.toMediaFile() })
 
-        // 2. Обновляем MediaStore-поля для всех записей.
-        // checksum, status и serverFileId не затрагиваются — это зона sync/upload этапов.
+        // 2. Обновляем MediaStore-поля для всех записей. Изменившийся файл (size/lastModified)
+        // в том же UPDATE возвращается в PENDING из любого статуса; у неизменённого статус и checksum сохраняются.
         images.forEach { image ->
-            // Сбрасываем checksum, если файл изменился с момента последнего расчёта.
-            // Вызов ДО updateLocalMetadata — иначе новые size/lastModified уже в БД и сравнение не сработает.
-            // TODO: когда появится upload/sync, уточнить откат статусов SYNCED/PENDING_UPLOAD
-            // при локальном изменении файла. Сейчас checksum сбрасывается только для локального индекса.
-            dao.resetChecksumIfFileChanged(
-                mediaStoreId = image.mediaStoreId,
-                size         = image.size,
-                lastModified = image.lastModified
-            )
-            dao.updateLocalMetadata(
+            dao.applyScannedMetadata(
                 mediaStoreId = image.mediaStoreId,
                 displayName  = image.displayName,
                 relativePath = image.relativePath,
@@ -61,10 +75,14 @@ class MediaFileRepository @Inject constructor(
             )
         }
 
-        // 3. Stale detection: удаляем из Room файлы, которых больше нет в MediaStore
-        val dbIds      = dao.getAllMediaStoreIds().toHashSet()
-        val scannedIds = images.map { it.mediaStoreId }.toHashSet()
-        val staleIds   = dbIds.filter { it !in scannedIds }
+        // 3. Stale detection: удаляем из Room файлы, которых больше нет в MediaStore.
+        // Неполный снимок не доказывает удаления — строки не трогаем. Server при этом не затрагивается.
+        val staleIds = if (isComplete) {
+            confirmedStaleIds(images)
+        } else {
+            Log.w(TAG, "Снимок MediaStore неполный — удаление отсутствующих строк пропущено")
+            emptyList()
+        }
 
         if (staleIds.isNotEmpty()) {
             // SQLite имеет лимит bind-параметров (~999), удаляем пачками
@@ -82,6 +100,31 @@ class MediaFileRepository @Inject constructor(
                 deletedStale       = staleIds.size
             )
         )
+    }
+
+    /**
+     * Строки Room, отсутствующие в полном снимке. Если снимок пуст при непустом индексе или пропала
+     * большая часть индекса, через паузу выполняется повторный снимок: удаляются только строки,
+     * отсутствующие в обоих. Неудачный или неполный повтор — ничего не удаляем до следующего scan.
+     */
+    private suspend fun confirmedStaleIds(images: List<MediaStoreImage>): List<Long> {
+        val dbIds      = dao.getAllMediaStoreIds()
+        val scannedIds = images.mapTo(HashSet()) { it.mediaStoreId }
+        val staleIds   = dbIds.filter { it !in scannedIds }
+
+        val massDisappearance = staleIds.isNotEmpty() && (images.isEmpty() ||
+            (staleIds.size >= MASS_DELETE_MIN_ROWS && staleIds.size * 2 >= dbIds.size))
+        if (!massDisappearance) return staleIds
+
+        Log.w(TAG, "Из снимка пропало ${staleIds.size} из ${dbIds.size} строк — повторная проверка")
+        delay(MASS_DELETE_RECHECK_DELAY_MS)
+        val recheck = mediaStoreRepository.loadImages()
+        if (recheck !is MediaStoreScanOutcome.Success || !recheck.isComplete) {
+            Log.w(TAG, "Повторный снимок недостоверен — удаление отсутствующих строк пропущено")
+            return emptyList()
+        }
+        val recheckIds = recheck.images.mapTo(HashSet()) { it.mediaStoreId }
+        return staleIds.filter { it !in recheckIds }
     }
 
     /** Преобразует MediaStore-снимок в новую запись локального индекса. */

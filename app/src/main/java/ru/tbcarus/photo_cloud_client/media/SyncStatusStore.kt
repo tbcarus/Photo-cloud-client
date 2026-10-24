@@ -9,7 +9,7 @@ import javax.inject.Singleton
 /**
  * Хранит итог последнего прогона авто-sync и отдаёт его как [Flow] для UI.
  * In-memory: результат не переживает перезапуск процесса — для текущего этапа этого достаточно.
- * WorkManager не умеет отдавать причину retry через WorkInfo, поэтому [SyncWorker] пишет статус сюда напрямую.
+ * WorkManager не умеет отдавать причину retry через WorkInfo, поэтому [UploadWorker] и [ProviderWorker] пишут статус сюда напрямую.
  */
 @Singleton
 class SyncStatusStore @Inject constructor() {

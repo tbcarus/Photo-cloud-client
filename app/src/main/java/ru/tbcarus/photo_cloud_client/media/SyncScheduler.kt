@@ -11,14 +11,16 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Ставит автоматический sync в очередь WorkManager и наблюдает за его состоянием.
- * Изолирует WorkManager API от ViewModel/UI.
+ * Ставит фоновые части синхронизации в очередь WorkManager и наблюдает за их состоянием (A4.1):
+ *  - Поставщик ([ProviderWorker]) — локальная обработка, без требования сети;
+ *  - Загрузчик ([UploadWorker]) — pre-check и upload, при подключённой сети.
+ * У каждой части своя разовая и своя периодическая задача. Изолирует WorkManager API от ViewModel/UI.
  */
 @Singleton
 class SyncScheduler @Inject constructor(
@@ -27,69 +29,97 @@ class SyncScheduler @Inject constructor(
 ) {
 
     companion object {
-        const val UNIQUE_SYNC_WORK_NAME = "photo_sync"
-        private const val UNIQUE_PERIODIC_SYNC_WORK_NAME = "photo_sync_periodic"
+        const val PROVIDER_WORK_NAME = "photo_provider"
+        const val PROVIDER_PERIODIC_WORK_NAME = "photo_provider_periodic"
+        const val UPLOAD_WORK_NAME = "photo_upload"
+        const val UPLOAD_PERIODIC_WORK_NAME = "photo_upload_periodic"
+
         private const val PERIODIC_INTERVAL_HOURS = 1L
     }
 
-    fun enqueueOneTimeSync() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
+    private val workManager: WorkManager get() = WorkManager.getInstance(context)
 
-        val request = OneTimeWorkRequestBuilder<SyncWorker>()
-            .setConstraints(constraints)
-            .build()
-
-        // KEEP не запускает второй sync параллельно уже выполняющемуся.
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            UNIQUE_SYNC_WORK_NAME,
-            ExistingWorkPolicy.KEEP,
-            request
-        )
+    /** Разовый прогон Поставщика. KEEP не запускает второй параллельно уже ожидающему или выполняющемуся. */
+    fun enqueueProvider() {
+        val request = OneTimeWorkRequestBuilder<ProviderWorker>().build()
+        workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, ExistingWorkPolicy.KEEP, request)
     }
 
     /**
-     * Периодический фоновый sync (тот же [SyncWorker], отдельное unique-имя).
-     * Интервал 1 час; для periodic дополнительно требуем «батарея не низкая», чтобы
-     * фоновый прогон не запускал тяжёлый pipeline при низком заряде.
+     * Периодический Поставщик: 1 час, без требования сети.
+     * «Батарея не низкая» — чтобы фоновый hash не запускался при низком заряде.
      */
-    fun enqueuePeriodicSync() {
+    fun enqueueProviderPeriodic() {
         val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
             .setRequiresBatteryNotLow(true)
             .build()
 
-        val request = PeriodicWorkRequestBuilder<SyncWorker>(
-            PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS
-        )
+        val request = PeriodicWorkRequestBuilder<ProviderWorker>(PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS)
             .setConstraints(constraints)
             .build()
 
         // UPDATE подхватывает новые параметры расписания, не сбрасывая отсчитанный период.
-        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-            UNIQUE_PERIODIC_SYNC_WORK_NAME,
+        workManager.enqueueUniquePeriodicWork(
+            PROVIDER_PERIODIC_WORK_NAME,
             ExistingPeriodicWorkPolicy.UPDATE,
             request
         )
     }
 
-    fun cancelPeriodicSync() {
-        WorkManager.getInstance(context)
-            .cancelUniqueWork(UNIQUE_PERIODIC_SYNC_WORK_NAME)
+    fun cancelProviderPeriodic() {
+        workManager.cancelUniqueWork(PROVIDER_PERIODIC_WORK_NAME)
+    }
+
+    /** Разовый прогон Загрузчика при подключённой сети; KEEP — как у Поставщика. */
+    fun enqueueUpload() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val request = OneTimeWorkRequestBuilder<UploadWorker>()
+            .setConstraints(constraints)
+            .build()
+
+        workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.KEEP, request)
     }
 
     /**
-     * true только пока worker реально выполняется (RUNNING).
+     * Периодический Загрузчик: 1 час, сеть и «батарея не низкая».
+     * Не зависит от сигнала Поставщика и от backoff разовой задачи — подхватывает очередь сам.
+     */
+    fun enqueueUploadPeriodic() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .setRequiresBatteryNotLow(true)
+            .build()
+
+        val request = PeriodicWorkRequestBuilder<UploadWorker>(PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS)
+            .setConstraints(constraints)
+            .build()
+
+        workManager.enqueueUniquePeriodicWork(
+            UPLOAD_PERIODIC_WORK_NAME,
+            ExistingPeriodicWorkPolicy.UPDATE,
+            request
+        )
+    }
+
+    fun cancelUploadPeriodic() {
+        workManager.cancelUniqueWork(UPLOAD_PERIODIC_WORK_NAME)
+    }
+
+    /**
+     * true только пока одна из разовых задач (Поставщик или Загрузчик) реально выполняется (RUNNING).
      * ENQUEUED / BLOCKED означают «запланировано / ждёт retry», а не активный прогон —
      * иначе UI показывал бы бесконечный loader между попытками retry.
      */
     fun observeIsSyncing(): Flow<Boolean> =
-        WorkManager.getInstance(context)
-            .getWorkInfosForUniqueWorkFlow(UNIQUE_SYNC_WORK_NAME)
-            .map { infos ->
-                infos.any { info -> info.state == WorkInfo.State.RUNNING }
-            }
+        combine(
+            workManager.getWorkInfosForUniqueWorkFlow(PROVIDER_WORK_NAME),
+            workManager.getWorkInfosForUniqueWorkFlow(UPLOAD_WORK_NAME)
+        ) { provider, upload ->
+            (provider + upload).any { info -> info.state == WorkInfo.State.RUNNING }
+        }
 
     /** Итог последнего завершённого прогона sync (null, если ещё не запускался в этой сессии). */
     fun observeLastSyncStatus(): Flow<SyncStatusRecord?> = syncStatusStore.observe()

@@ -37,10 +37,10 @@ import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import java.net.InetAddress
 import java.util.UUID
 
-/** SyncWorker без сохранённой пары: ни одного сетевого запроса, без retry, фон останавливается. */
+/** UploadWorker без сохранённой пары: ни одного сетевого запроса, без retry, фон Загрузчика останавливается. */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
-class SyncWorkerNoSessionTest {
+class UploadWorkerNoSessionTest {
 
     private lateinit var context: Application
     private lateinit var server: MockWebServer
@@ -69,14 +69,14 @@ class SyncWorkerNoSessionTest {
     @Test
     fun noSessionStopsBeforeAnyRequestWithoutRetry() = runBlocking {
         val coordinator = mock(PeriodicSyncCoordinator::class.java)
-        val worker = TestListenableWorkerBuilder<SyncWorker>(context)
+        val worker = TestListenableWorkerBuilder<UploadWorker>(context)
             .setWorkerFactory(factory { coordinator })
             .build()
 
         val result = worker.doWork()
 
         assertEquals(
-            ListenableWorker.Result.success(workDataOf(SyncWorker.STOP_REASON_KEY to SyncWorker.STOP_REASON_NO_SESSION)),
+            ListenableWorker.Result.success(workDataOf(UploadWorker.STOP_REASON_KEY to UploadWorker.STOP_REASON_NO_SESSION)),
             result
         )
         assertEquals(0, server.requestCount)
@@ -88,7 +88,7 @@ class SyncWorkerNoSessionTest {
     fun periodicRunWithoutSessionCancelsItsScheduleAfterFinishingRun() = runBlocking {
         val scheduler = initWorkManager()
 
-        scheduler.enqueuePeriodicSync()
+        scheduler.enqueueUploadPeriodic()
         val periodicId = singleWorkId()
         val driver = WorkManagerTestInitHelper.getTestDriver(context)!!
         driver.setAllConstraintsMet(periodicId)
@@ -108,18 +108,18 @@ class SyncWorkerNoSessionTest {
     @Test
     fun oneTimeRunWithoutSessionSucceedsAndCancelsPeriodic() = runBlocking {
         val scheduler = initWorkManager()
-        scheduler.enqueuePeriodicSync()
+        scheduler.enqueueUploadPeriodic()
         val periodicId = singleWorkId()
 
-        scheduler.enqueueOneTimeSync()
+        scheduler.enqueueUpload()
         val oneTimeInfo = WorkManager.getInstance(context)
-            .getWorkInfosForUniqueWork(SyncScheduler.UNIQUE_SYNC_WORK_NAME).get().single()
+            .getWorkInfosForUniqueWork(SyncScheduler.UPLOAD_WORK_NAME).get().single()
         WorkManagerTestInitHelper.getTestDriver(context)!!.setAllConstraintsMet(oneTimeInfo.id)
 
         val finished = awaitFinished(oneTimeInfo.id)
 
         assertEquals(WorkInfo.State.SUCCEEDED, finished.state)
-        assertEquals(SyncWorker.STOP_REASON_NO_SESSION, finished.outputData.getString(SyncWorker.STOP_REASON_KEY))
+        assertEquals(UploadWorker.STOP_REASON_NO_SESSION, finished.outputData.getString(UploadWorker.STOP_REASON_KEY))
         assertEquals(WorkInfo.State.CANCELLED, WorkManager.getInstance(context).getWorkInfoById(periodicId).get()!!.state)
         assertEquals(0, server.requestCount)
     }
@@ -128,7 +128,7 @@ class SyncWorkerNoSessionTest {
         val scheduler = SyncScheduler(context, syncStatusStore)
         val client = OkHttpClient()
         val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
-        // Настоящий координатор: без пары reconcile отменяет periodic и останавливает observer.
+        // Настоящий координатор: без пары reconcile отменяет periodic Загрузчика.
         val coordinator = PeriodicSyncCoordinator(
             context,
             AuthRepository(storage, baseUrlProvider, apiServiceFactory),
@@ -155,11 +155,9 @@ class SyncWorkerNoSessionTest {
             val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
             val folderRepository = FolderRepository(apiServiceFactory)
             val dao = db.mediaFileDao()
-            return SyncWorker(
+            return UploadWorker(
                 appContext,
                 workerParameters,
-                MediaFileRepository(dao, MediaStoreRepository(appContext)),
-                ChecksumRepository(dao, appContext),
                 ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository),
                 FileUploadRepository(dao, apiServiceFactory, folderRepository, appContext),
                 ServerRepository(apiServiceFactory),
@@ -172,7 +170,7 @@ class SyncWorkerNoSessionTest {
     }
 
     private fun singleWorkId(): UUID =
-        WorkManager.getInstance(context).getWorkInfosByTag(SyncWorker::class.java.name).get().single().id
+        WorkManager.getInstance(context).getWorkInfosByTag(UploadWorker::class.java.name).get().single().id
 
     // CoroutineWorker выполняется на Dispatchers.Default, поэтому итог ждём опросом с ограничением по времени.
     private fun awaitFinished(id: UUID): WorkInfo {

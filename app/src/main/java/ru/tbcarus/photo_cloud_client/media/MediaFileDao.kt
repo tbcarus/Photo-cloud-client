@@ -23,28 +23,54 @@ interface MediaFileDao {
 
     fun getPending(): Flow<List<MediaFile>> = getByStatus(MediaFileStatus.PENDING)
 
-    @Query("UPDATE media_files SET status = :status WHERE mediaStoreId = :mediaStoreId")
-    suspend fun updateStatus(mediaStoreId: Long, status: MediaFileStatus)
+    /**
+     * Условный переход статуса (A4.1): применяется, только если строка всё ещё в [expectedStatus]
+     * и описывает ту же версию файла (checksum, size, lastModified), что была прочитана перед операцией.
+     * Поздний результат hash/pre-check/upload не перезаписывает строку, которую scan уже сбросил или обновил.
+     * @return 1 — переход применён, 0 — строка изменилась или удалена.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = :newStatus
+        WHERE mediaStoreId = :mediaStoreId
+          AND status = :expectedStatus
+          AND checksum IS :checksum
+          AND size = :size
+          AND lastModified = :lastModified
+    """)
+    suspend fun updateStatusIfUnchanged(
+        mediaStoreId: Long,
+        expectedStatus: MediaFileStatus,
+        newStatus: MediaFileStatus,
+        checksum: String?,
+        size: Long,
+        lastModified: Long
+    ): Int
 
     // Успешный checksum — стабильное состояние, чистим failure-метаданные (Stage 5K).
+    // Применяется только к той же HASHING-строке: сброс scan во время чтения файла не перезаписывается.
     @Query("""
         UPDATE media_files
         SET checksum = :checksum,
-            status = :status,
+            status = 'CHECKSUM_READY',
             failureReason = NULL,
             retryCount = 0,
             lastFailureAt = NULL
         WHERE mediaStoreId = :mediaStoreId
+          AND status = 'HASHING'
+          AND size = :size
+          AND lastModified = :lastModified
     """)
-    suspend fun updateChecksum(
+    suspend fun updateChecksumIfUnchanged(
         mediaStoreId: Long,
         checksum: String,
-        status: MediaFileStatus = MediaFileStatus.CHECKSUM_READY
-    )
+        size: Long,
+        lastModified: Long
+    ): Int
 
     /**
-     * Атомарный перевод записи в FAILED с причиной (Stage 5K).
-     * Инкремент retryCount делается в SQL, без read-modify-write в Kotlin.
+     * Атомарный перевод записи в FAILED с причиной (Stage 5K) при тех же условиях,
+     * что и [updateStatusIfUnchanged]. Инкремент retryCount делается в SQL, без read-modify-write в Kotlin.
      */
     @Query("""
         UPDATE media_files
@@ -53,8 +79,20 @@ interface MediaFileDao {
             retryCount = retryCount + 1,
             lastFailureAt = :failureAt
         WHERE mediaStoreId = :mediaStoreId
+          AND status = :expectedStatus
+          AND checksum IS :checksum
+          AND size = :size
+          AND lastModified = :lastModified
     """)
-    suspend fun markFailed(mediaStoreId: Long, reason: FailureReason, failureAt: Long)
+    suspend fun markFailedIfUnchanged(
+        mediaStoreId: Long,
+        expectedStatus: MediaFileStatus,
+        checksum: String?,
+        size: Long,
+        lastModified: Long,
+        reason: FailureReason,
+        failureAt: Long
+    ): Int
 
     /**
      * Retryable FAILED-записи, готовые к авто-повтору: конкретная причина,
@@ -89,9 +127,29 @@ interface MediaFileDao {
     """)
     suspend fun resetFailedForRetry(mediaStoreId: Long)
 
+    /**
+     * Применяет к известной строке данные scan одним UPDATE: обновляет локальные сведения и,
+     * если изменились size или lastModified, сбрасывает обработку — PENDING, без checksum,
+     * serverFileId и failure-метаданных (Stage 5K). Выражения SET в SQLite вычисляются по прежним
+     * значениям строки, поэтому параллельный hash не видит промежуточного состояния.
+     * Неизменённая строка сохраняет статус и checksum.
+     */
+    // При изменении локального файла старый serverFileId больше не соответствует содержимому.
     @Query("""
         UPDATE media_files
-        SET displayName = :displayName,
+        SET status = CASE WHEN size != :size OR lastModified != :lastModified
+                          THEN 'PENDING' ELSE status END,
+            checksum = CASE WHEN size != :size OR lastModified != :lastModified
+                            THEN NULL ELSE checksum END,
+            serverFileId = CASE WHEN size != :size OR lastModified != :lastModified
+                                THEN NULL ELSE serverFileId END,
+            failureReason = CASE WHEN size != :size OR lastModified != :lastModified
+                                 THEN NULL ELSE failureReason END,
+            retryCount = CASE WHEN size != :size OR lastModified != :lastModified
+                              THEN 0 ELSE retryCount END,
+            lastFailureAt = CASE WHEN size != :size OR lastModified != :lastModified
+                                 THEN NULL ELSE lastFailureAt END,
+            displayName = :displayName,
             relativePath = :relativePath,
             mimeType = :mimeType,
             size = :size,
@@ -100,7 +158,7 @@ interface MediaFileDao {
             uri = :uri
         WHERE mediaStoreId = :mediaStoreId
     """)
-    suspend fun updateLocalMetadata(
+    suspend fun applyScannedMetadata(
         mediaStoreId: Long,
         displayName: String,
         relativePath: String?,
@@ -112,6 +170,7 @@ interface MediaFileDao {
     )
 
     // Успешный upload → SYNCED, чистим failure-метаданные (Stage 5K).
+    // Только для той же UPLOADING-версии: изменённая во время отправки фотография остаётся в работе Поставщика.
     @Query("""
         UPDATE media_files
         SET status = 'SYNCED',
@@ -120,8 +179,29 @@ interface MediaFileDao {
             retryCount = 0,
             lastFailureAt = NULL
         WHERE mediaStoreId = :mediaStoreId
+          AND status = 'UPLOADING'
+          AND checksum IS :checksum
+          AND size = :size
+          AND lastModified = :lastModified
     """)
-    suspend fun markUploaded(mediaStoreId: Long, serverFileId: Long)
+    suspend fun markUploadedIfUnchanged(
+        mediaStoreId: Long,
+        serverFileId: Long,
+        checksum: String?,
+        size: Long,
+        lastModified: Long
+    ): Int
+
+    /**
+     * Есть ли записи для Загрузчика: CHECKSUM_READY с checksum (pre-check), PENDING_UPLOAD (upload)
+     * и UPLOADING (восстановление прерванной отправки).
+     */
+    @Query("""
+        SELECT COUNT(*) FROM media_files
+        WHERE (status = 'CHECKSUM_READY' AND checksum IS NOT NULL)
+           OR status IN ('PENDING_UPLOAD', 'UPLOADING')
+    """)
+    suspend fun countReadyForUpload(): Int
 
     @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")
     suspend fun exists(mediaStoreId: Long): Int
@@ -146,30 +226,6 @@ interface MediaFileDao {
     @Query("UPDATE media_files SET status = :targetStatus WHERE status = :sourceStatus")
     suspend fun resetStatus(sourceStatus: MediaFileStatus, targetStatus: MediaFileStatus)
 
-    /**
-     * Сбрасывает checksum, serverFileId и статус для конкретной записи, если изменились size или lastModified.
-     * Вызывать ДО [updateLocalMetadata] — иначе новые значения уже в БД и сравнение не сработает.
-     */
-    // При изменении локального файла старый serverFileId больше не соответствует содержимому.
-    // Изменившийся файл — новая попытка с чистого состояния, поэтому чистим и failure-метаданные (Stage 5K).
-    @Query("""
-        UPDATE media_files
-        SET checksum = NULL,
-            serverFileId = NULL,
-            status = :status,
-            failureReason = NULL,
-            retryCount = 0,
-            lastFailureAt = NULL
-        WHERE mediaStoreId = :mediaStoreId
-          AND (size != :size OR lastModified != :lastModified)
-    """)
-    suspend fun resetChecksumIfFileChanged(
-        mediaStoreId: Long,
-        size: Long,
-        lastModified: Long,
-        status: MediaFileStatus = MediaFileStatus.PENDING
-    )
-
     @Query("SELECT MAX(createdAt) FROM media_files")
     suspend fun getLatestCreatedAt(): Long?
 
@@ -188,18 +244,23 @@ interface MediaFileDao {
         status: MediaFileStatus,
         limit: Int
     ): List<MediaFile>
-
-    /**
-     * Массовое обновление статуса по списку mediaStoreId.
-     * Обновляем по mediaStoreId (а не по checksum) — безопаснее для будущих multi-folder сценариев.
-     */
-    @Query("""
-        UPDATE media_files
-        SET status = :status
-        WHERE mediaStoreId IN (:mediaStoreIds)
-    """)
-    suspend fun updateStatusByMediaStoreIds(
-        mediaStoreIds: List<Long>,
-        status: MediaFileStatus
-    )
 }
+
+/** [MediaFileDao.updateStatusIfUnchanged] для версии файла из прочитанного снимка [file]. */
+suspend fun MediaFileDao.updateStatusIfUnchanged(
+    file: MediaFile,
+    expectedStatus: MediaFileStatus,
+    newStatus: MediaFileStatus
+): Int = updateStatusIfUnchanged(
+    file.mediaStoreId, expectedStatus, newStatus, file.checksum, file.size, file.lastModified
+)
+
+/** [MediaFileDao.markFailedIfUnchanged] для версии файла из прочитанного снимка [file]. */
+suspend fun MediaFileDao.markFailedIfUnchanged(
+    file: MediaFile,
+    expectedStatus: MediaFileStatus,
+    reason: FailureReason
+): Int = markFailedIfUnchanged(
+    file.mediaStoreId, expectedStatus, file.checksum, file.size, file.lastModified,
+    reason, System.currentTimeMillis()
+)

@@ -18,10 +18,10 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Наблюдает за изменениями в MediaStore Images и запускает one-time sync с debounce.
+ * Наблюдает за изменениями в MediaStore Images и запускает Поставщика с debounce.
  *
- * Изменение в галерее → debounce 3 c → [SyncScheduler.enqueueOneTimeSync].
- * Periodic sync остаётся fallback (см. [PeriodicSyncCoordinator]).
+ * Изменение в галерее → debounce 3 c → [SyncScheduler.enqueueProvider].
+ * Periodic Поставщика остаётся fallback (см. [PeriodicSyncCoordinator]).
  *
  * Жизненный цикл управляется координатором ([PeriodicSyncCoordinator]), а не напрямую из App.
  */
@@ -45,6 +45,8 @@ class MediaChangeObserver @Inject constructor(
         }
     }
 
+    // reconcile вызывается и из UI, и из фонового worker.
+    @Synchronized
     fun start() {
         if (registered) return
         context.contentResolver.registerContentObserver(
@@ -56,6 +58,7 @@ class MediaChangeObserver @Inject constructor(
         Log.i(TAG, "MediaChangeObserver зарегистрирован")
     }
 
+    @Synchronized
     fun stop() {
         if (!registered) return
         context.contentResolver.unregisterContentObserver(observer)
@@ -69,7 +72,7 @@ class MediaChangeObserver @Inject constructor(
         debounceJob?.cancel()
         debounceJob = scope.launch {
             delay(DEBOUNCE_MS)
-            syncScheduler.enqueueOneTimeSync()
+            syncScheduler.enqueueProvider()
         }
     }
 }

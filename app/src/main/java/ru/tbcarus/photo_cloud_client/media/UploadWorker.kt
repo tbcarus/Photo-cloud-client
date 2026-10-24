@@ -12,17 +12,17 @@ import dagger.assisted.AssistedInject
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Автоматический one-time sync через WorkManager.
- * Прогоняет стадии строго последовательно: scan → checksum → pre-check → upload.
+ * Загрузчик (A4.1): серверная обработка подготовленной Поставщиком очереди — pre-check → upload.
+ * Не сканирует MediaStore и не вычисляет SHA-256. При отсутствии сессии, сервера или разрешения
+ * очередь остаётся в Room без изменения статусов.
  */
 @HiltWorker
-class SyncWorker @AssistedInject constructor(
+class UploadWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
-    private val mediaFileRepository: MediaFileRepository,
-    private val checksumRepository: ChecksumRepository,
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
     private val fileUploadRepository: FileUploadRepository,
     private val serverRepository: ServerRepository,
@@ -33,7 +33,7 @@ class SyncWorker @AssistedInject constructor(
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
-        private const val TAG = "SyncWorker"
+        private const val TAG = "UploadWorker"
         /** Ключ outputData с причиной остановки без синхронизации. */
         const val STOP_REASON_KEY = "stop_reason"
         const val STOP_REASON_NO_SESSION = "no_session"
@@ -41,21 +41,24 @@ class SyncWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result {
         return try {
-            runSync()
+            runUpload()
+        } catch (e: CancellationException) {
+            // Остановка worker системой: UPLOADING вернётся в PENDING_UPLOAD при следующем прогоне.
+            throw e
         } catch (e: Exception) {
             // Не пробрасываем исключение наружу — даём WorkManager шанс повторить.
-            Log.e(TAG, "Sync завершился исключением", e)
+            Log.e(TAG, "Загрузка завершилась исключением", e)
             syncStatusStore.record(SyncStatus.ERROR)
             Result.retry()
         }
     }
 
-    private suspend fun runSync(): Result {
+    private suspend fun runUpload(): Result {
         // Без пары авторизованные стадии гарантированно получат 401: до сетевых запросов останавливаем фон и не просим retry.
         if (tokenStorage.getTokens() == null) {
-            Log.w(TAG, "Нет сессии — фоновая синхронизация остановлена до входа")
+            Log.w(TAG, "Нет сессии — фоновая загрузка остановлена до входа")
             syncStatusStore.record(SyncStatus.ERROR)
-            // Последнее действие прогона: reconcile без пары только отменяет periodic и observer и ничего не планирует.
+            // Последнее действие прогона: reconcile без пары отменяет periodic Загрузчика; Поставщик продолжает работу.
             // Если это сам periodic, WorkManager остановит уже завершающийся прогон — повтора не будет.
             periodicSyncCoordinator.reconcile()
             return Result.success(workDataOf(STOP_REASON_KEY to STOP_REASON_NO_SESSION))
@@ -65,63 +68,41 @@ class SyncWorker @AssistedInject constructor(
         // а пользователь — сменить адрес после прошлого прогона.
         val baseUrl = baseUrlProvider.reload()
         // Быстрая проверка доступности сервера через существующую тестовую ручку (GET /api/v1/test).
-        // Если сервер недоступен — не гоняем весь pipeline впустую в timeout, а сразу просим повтор.
+        // Если сервер недоступен — не гоняем pre-check и upload впустую в timeout, а сразу просим повтор.
         if (baseUrl.isBlank() || serverRepository.testConnection(baseUrl).isFailure) {
-            Log.w(TAG, "Сервер недоступен — откладываем sync")
+            Log.w(TAG, "Сервер недоступен — откладываем загрузку")
             syncStatusStore.record(SyncStatus.SERVER_UNAVAILABLE)
             return Result.retry()
         }
 
-        var sync = SyncResult()
-
-        // 0. Auto-retry (Stage 5K): до обычного pipeline возвращаем в очередь
-        // временно упавшие (CHECKSUM_IO) записи, у которых прошёл cooldown и не исчерпан лимит попыток.
-        // Восстанавливаем один раз за проход — повторно упавшие записи в этом же прогоне не выбираются.
-        val restored = checksumRepository.restoreRetryableFailed()
-        if (restored > 0) Log.i(TAG, "Auto-retry: восстановлено retryable FAILED = $restored")
-
-        // 1. Scan
-        when (val outcome = mediaFileRepository.scanImages()) {
-            is ScanOutcome.Success -> sync = sync.copy(scan = outcome.result)
-            // Фоновый worker не может запросить runtime-разрешение — это не crash и не retry.
-            is ScanOutcome.PermissionDenied -> return Result.success()
-            is ScanOutcome.Error -> {
-                syncStatusStore.record(SyncStatus.ERROR)
-                return Result.retry()
-            }
+        // Upload читает исходные файлы: без общего доступа каждая строка ушла бы в постоянный FAILED(PERMISSION).
+        // Фоновый worker не может запросить разрешение — очередь не трогаем, без retry.
+        if (!applicationContext.hasMediaReadPermission()) {
+            Log.w(TAG, "Нет полного доступа к фото — загрузка пропущена, очередь сохранена")
+            return Result.success()
         }
 
-        // 2. Checksum (обязательная стадия — без неё pipeline стоит)
-        when (val outcome = checksumRepository.computePendingChecksums()) {
-            is ChecksumOutcome.Success -> sync = sync.copy(checksum = outcome.result)
-            is ChecksumOutcome.PermissionDenied -> return Result.success()
-            is ChecksumOutcome.Error -> {
-                syncStatusStore.record(SyncStatus.ERROR)
-                return Result.retry()
-            }
-        }
-
-        // 3. Pre-check
-        when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
-            is ChecksumPrecheckOutcome.Success -> sync = sync.copy(precheck = outcome.result)
+        // Pre-check: CHECKSUM_READY → SYNCED (existing) или PENDING_UPLOAD (missing).
+        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
+            is ChecksumPrecheckOutcome.Success -> outcome.result
             is ChecksumPrecheckOutcome.Error -> {
                 syncStatusStore.record(SyncStatus.ERROR)
                 return Result.retry()
             }
         }
 
-        // 4. Upload
+        // Upload: UPLOADING → PENDING_UPLOAD восстанавливается в начале стадии.
         // FAILED-записи считаем терминальными для текущего этапа.
-        // Их повторный запуск будет отдельной задачей.
+        val upload: UploadResult?
         val retryNeeded: Boolean
         when (val outcome = fileUploadRepository.uploadPendingCameraFiles()) {
             is UploadOutcome.Success -> {
-                sync = sync.copy(upload = outcome.result)
+                upload = outcome.result
                 // Осталась очередь из-за transient-ошибки → просим повтор.
                 retryNeeded = outcome.result.leftPending > 0
             }
             is UploadOutcome.Error -> {
-                sync = sync.copy(upload = outcome.result)
+                upload = outcome.result
                 // Прогон upload оборвался на transient-ошибке → повтор.
                 retryNeeded = true
             }
@@ -133,18 +114,16 @@ class SyncWorker @AssistedInject constructor(
             Result.retry()
         } else {
             syncStatusStore.record(SyncStatus.SUCCESS)
-            Result.success(buildOutput(sync))
+            Result.success(buildOutput(precheck, upload))
         }
     }
 
     /** Минимальная сводка по стадиям — для логов/диагностики через outputData. */
-    private fun buildOutput(sync: SyncResult): Data = workDataOf(
-        "scan_scanned" to (sync.scan?.scanned ?: 0),
-        "checksum_processed" to (sync.checksum?.processed ?: 0),
-        "precheck_checked" to (sync.precheck?.checked ?: 0),
-        "upload_attempted" to (sync.upload?.attempted ?: 0),
-        "upload_succeeded" to (sync.upload?.succeeded ?: 0),
-        "upload_failed" to (sync.upload?.failed ?: 0),
-        "upload_left_pending" to (sync.upload?.leftPending ?: 0)
+    private fun buildOutput(precheck: ChecksumPrecheckResult, upload: UploadResult?): Data = workDataOf(
+        "precheck_checked" to precheck.checked,
+        "upload_attempted" to (upload?.attempted ?: 0),
+        "upload_succeeded" to (upload?.succeeded ?: 0),
+        "upload_failed" to (upload?.failed ?: 0),
+        "upload_left_pending" to (upload?.leftPending ?: 0)
     )
 }

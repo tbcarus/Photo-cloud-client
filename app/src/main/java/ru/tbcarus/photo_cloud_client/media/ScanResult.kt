@@ -20,7 +20,8 @@ sealed interface ScanOutcome {
 
 /** Результат MediaStoreRepository.loadImages() — только чтение из MediaStore. */
 sealed interface MediaStoreScanOutcome {
-    data class Success(val images: List<MediaStoreImage>) : MediaStoreScanOutcome
+    /** [isComplete] = false — часть строк не прочитана, отсутствие записи в снимке не означает удаления. */
+    data class Success(val images: List<MediaStoreImage>, val isComplete: Boolean) : MediaStoreScanOutcome
     data object PermissionDenied : MediaStoreScanOutcome
     data class Error(val message: String) : MediaStoreScanOutcome
 }

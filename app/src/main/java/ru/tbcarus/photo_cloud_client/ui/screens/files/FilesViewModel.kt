@@ -32,7 +32,7 @@ class FilesViewModel @Inject constructor(
             }
         }
 
-        // Отражаем состояние WorkManager-sync в UI (для disable кнопок и LoadingDialog).
+        // Отражаем состояние разовых задач Поставщика и Загрузчика в UI (немодальный индикатор).
         viewModelScope.launch {
             syncScheduler.observeIsSyncing().collect { syncing ->
                 _uiState.update { it.copy(isSyncing = syncing) }
@@ -97,7 +97,7 @@ class FilesViewModel @Inject constructor(
 
     /**
      * Вызывать при входе на экран, когда media permission уже выдано.
-     * Поднимает автосинк (observer + periodic) без scan — просто гарантирует, что он запущен.
+     * Поднимает автосинк (observer + periodic задачи) без scan — просто гарантирует, что он запущен.
      */
     fun ensureAutoSyncStarted() {
         periodicSyncCoordinator.reconcile()
@@ -105,10 +105,13 @@ class FilesViewModel @Inject constructor(
 
     /**
      * Вызывать после выдачи runtime-разрешения на фото.
-     * Переоцениваем автосинк (включаем periodic + observer), затем — scan для немедленного индекса.
+     * Переоцениваем автосинк (включаем periodic задачи + observer), разово запускаем Поставщика,
+     * чтобы hash не ждал периода, и делаем scan для немедленного индекса.
+     * Scan разделяет mutex с Поставщиком, поэтому не применяется параллельно фоновому.
      */
     fun onMediaPermissionGranted() {
         periodicSyncCoordinator.reconcile()
+        syncScheduler.enqueueProvider()
         scanPhotos()
     }
 

@@ -1,21 +1,22 @@
 package ru.tbcarus.photo_cloud_client.ui.screens
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,14 +29,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
 import ru.tbcarus.photo_cloud_client.media.SyncStatus
 import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
-import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
+import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
+import ru.tbcarus.photo_cloud_client.media.mediaPermissionRequest
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 
 @Composable
@@ -43,47 +44,36 @@ fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
-    // Разрешение зависит от версии Android: с Android 13 (TIRAMISU) — точечное READ_MEDIA_IMAGES.
-    val mediaPermission = remember {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_IMAGES
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-    }
+    // Разрешения зависят от версии Android: с Android 13 — READ_MEDIA_IMAGES,
+    // с Android 14 — вместе с READ_MEDIA_VISUAL_USER_SELECTED (частичный доступ).
+    val mediaPermissions = remember { mediaPermissionRequest }
 
-    // Если разрешили — включаем автосинк и делаем scan; если отказали — scanImages вернёт
-    // PermissionDenied и отобразится существующая card.
+    // Если выдан полный доступ — включаем автосинк и делаем scan; при отказе или частичном доступе
+    // («выбранные фото») scanImages вернёт PermissionDenied и отобразится существующая card.
     // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            // Доступ выдан — включаем автосинк (periodic + observer) и запускаем scan.
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        if (context.hasMediaReadPermission()) {
+            // Доступ выдан — включаем автосинк (periodic + observer), запускаем Поставщика и scan.
             viewModel.onMediaPermissionGranted()
         } else {
-            // Отказ — прежнее поведение: scan вернёт PermissionDenied и покажет card.
+            // Отказ или частичный доступ — scan вернёт PermissionDenied и покажет card, Room не очищается.
             viewModel.scanPhotos()
         }
     }
 
     // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan):
     // если пользователь залогинен и baseUrl настроен — запрашиваем разрешение (или,
-    // если оно уже есть, просто поднимаем observer + periodic через reconcile()).
+    // если оно уже есть, просто поднимаем observer + periodic задачи через reconcile()).
     LaunchedEffect(Unit) {
         if (viewModel.isAutoSyncConfigured()) {
-            val granted = ContextCompat.checkSelfPermission(context, mediaPermission) ==
-                PackageManager.PERMISSION_GRANTED
-            if (granted) {
+            if (context.hasMediaReadPermission()) {
                 viewModel.ensureAutoSyncStarted()
             } else {
-                permissionLauncher.launch(mediaPermission)
+                permissionLauncher.launch(mediaPermissions)
             }
         }
-    }
-
-    if (state.isScanning || state.isSyncing) {
-        LoadingDialog()
     }
 
     Column(
@@ -93,7 +83,13 @@ fun FilesScreen(viewModel: FilesViewModel) {
     ) {
         // Экран — монитор состояния автосинхронизации. Ручные debug-кнопки удалены (Stage 5J.2);
         // permission/bootstrap автосинка выполняются в LaunchedEffect выше, синхронизацию ведут
-        // MediaChangeObserver + periodic WorkManager.
+        // MediaChangeObserver + Поставщик и Загрузчик WorkManager.
+
+        // Немодальный индикатор: scan и фоновая синхронизация не блокируют экран и навигацию.
+        if (state.isScanning || state.isSyncing) {
+            ProgressRow(if (state.isScanning) "Сканирование фото…" else "Синхронизация выполняется…")
+            Spacer(Modifier.height(8.dp))
+        }
 
         // Итог последнего прогона sync
         state.lastSyncStatus?.let { status ->
@@ -157,6 +153,19 @@ fun FilesScreen(viewModel: FilesViewModel) {
 }
 
 @Composable
+private fun ProgressRow(text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
 private fun PermissionDeniedCard() {
     Card(
         colors = CardDefaults.cardColors(
@@ -166,12 +175,12 @@ private fun PermissionDeniedCard() {
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                text = "Нет доступа к фотографиям.",
+                text = "Нет доступа ко всем фотографиям.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
             Text(
-                text = "Разрешение будет запрошено на следующем этапе.",
+                text = "Резервное копирование работает только при доступе ко всем фото.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )

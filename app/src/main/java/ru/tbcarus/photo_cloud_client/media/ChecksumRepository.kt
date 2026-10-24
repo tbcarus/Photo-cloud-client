@@ -1,12 +1,8 @@
 package ru.tbcarus.photo_cloud_client.media
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.util.Log
-import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -16,6 +12,7 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.cancellation.CancellationException
 
 @Singleton
 class ChecksumRepository @Inject constructor(
@@ -62,13 +59,7 @@ class ChecksumRepository @Inject constructor(
      * Прогресс не публикуется; per-file ошибки фиксируются статусом FAILED в БД.
      */
     suspend fun computePendingChecksums(): ChecksumOutcome {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Manifest.permission.READ_MEDIA_IMAGES
-        } else {
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-        // TODO: runtime-запрос разрешений будет добавлен на UI-этапе.
-        if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+        if (!context.hasMediaReadPermission()) {
             return ChecksumOutcome.PermissionDenied
         }
 
@@ -78,6 +69,9 @@ class ChecksumRepository @Inject constructor(
                     runPipeline()
                 }
             }
+        } catch (e: CancellationException) {
+            // Остановка worker — не ошибка стадии; HASHING вернётся в PENDING при следующем прогоне.
+            throw e
         } catch (e: Exception) {
             ChecksumOutcome.Error(e.message ?: "Ошибка при вычислении checksum")
         }
@@ -98,43 +92,54 @@ class ChecksumRepository @Inject constructor(
             val batch = mediaFileDao.getByStatusOnce(MediaFileStatus.PENDING, CHECKSUM_BATCH_SIZE)
             if (batch.isEmpty()) break
 
+            var progressed = false
             for (file in batch) {
-                mediaFileDao.updateStatus(file.mediaStoreId, MediaFileStatus.HASHING)
+                // Строку мог изменить или удалить параллельный scan — она вернётся в следующей выборке.
+                if (mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.PENDING, MediaFileStatus.HASHING) == 0) {
+                    continue
+                }
+                progressed = true
                 processed++
 
-                try {
+                // Результат применяется только к той же HASHING-версии; сброшенная scan строка снова станет PENDING.
+                val failure: FailureReason? = try {
                     val stream = context.contentResolver.openInputStream(Uri.parse(file.uri))
                     if (stream == null) {
                         Log.w(TAG, "openInputStream вернул null, mediaStoreId=${file.mediaStoreId}")
-                        mediaFileDao.markFailed(file.mediaStoreId, FailureReason.FILE_NOT_FOUND, System.currentTimeMillis())
-                        failed++
-                        continue
+                        FailureReason.FILE_NOT_FOUND
+                    } else {
+                        val checksum = stream.use { ChecksumUtil.sha256(it) }
+                        if (mediaFileDao.updateChecksumIfUnchanged(file.mediaStoreId, checksum, file.size, file.lastModified) > 0) {
+                            succeeded++
+                        }
+                        null
                     }
-
-                    val checksum = stream.use { ChecksumUtil.sha256(it) }
-                    mediaFileDao.updateChecksum(file.mediaStoreId, checksum, MediaFileStatus.CHECKSUM_READY)
-                    succeeded++
-
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: SecurityException) {
                     // TODO: позже различать per-file ошибки доступа и общий отзыв permission.
                     Log.w(TAG, "Ошибка доступа, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.PERMISSION, System.currentTimeMillis())
-                    failed++
+                    FailureReason.PERMISSION
                 } catch (e: FileNotFoundException) {
                     Log.w(TAG, "Файл не найден, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.FILE_NOT_FOUND, System.currentTimeMillis())
-                    failed++
+                    FailureReason.FILE_NOT_FOUND
                 } catch (e: IOException) {
                     // Временная IO-ошибка чтения — единственная retryable причина.
                     Log.w(TAG, "IO-ошибка checksum, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.CHECKSUM_IO, System.currentTimeMillis())
-                    failed++
+                    FailureReason.CHECKSUM_IO
                 } catch (e: Exception) {
                     Log.w(TAG, "Неизвестная ошибка checksum, mediaStoreId=${file.mediaStoreId}: ${e.message}")
-                    mediaFileDao.markFailed(file.mediaStoreId, FailureReason.UNKNOWN, System.currentTimeMillis())
+                    FailureReason.UNKNOWN
+                }
+
+                if (failure != null &&
+                    mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.HASHING, failure) > 0
+                ) {
                     failed++
                 }
             }
+            // Ни одна строка не взята в работу (все изменились параллельно) — остаток обработает следующий прогон.
+            if (!progressed) break
         }
 
         return ChecksumOutcome.Success(
