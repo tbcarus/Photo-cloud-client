@@ -10,8 +10,8 @@ import javax.inject.Singleton
  * Держит фоновую синхронизацию в согласии с текущим состоянием приложения.
  *
  * Правила (A4.1):
- *  - выдано media permission → periodic Поставщика включён и [MediaChangeObserver] слушает галерею,
- *    независимо от входа; иначе — отменён и остановлен;
+ *  - выдано media permission → periodic Поставщика, наблюдатель MediaStore ([MediaTriggerWorker])
+ *    и [MediaChangeObserver] включены независимо от входа; иначе — отменены и остановлены;
  *  - дополнительно есть токены и настроен baseUrl → periodic Загрузчика включён; иначе — отменён.
  *
  * Вызывается от изменения состояния (старт приложения после восстановления baseUrl,
@@ -36,9 +36,11 @@ class PeriodicSyncCoordinator @Inject constructor(
         val hasMediaPermission = context.hasMediaReadPermission()
         if (hasMediaPermission) {
             syncScheduler.enqueueProviderPeriodic()
+            syncScheduler.enqueueMediaTrigger()
             mediaChangeObserver.start()
         } else {
             syncScheduler.cancelProviderPeriodic()
+            syncScheduler.cancelMediaTrigger()
             mediaChangeObserver.stop()
         }
 
@@ -46,6 +48,16 @@ class PeriodicSyncCoordinator @Inject constructor(
             syncScheduler.enqueueUploadPeriodic()
         } else {
             syncScheduler.cancelUploadPeriodic()
+        }
+    }
+
+    /**
+     * Восстанавливает наблюдатель MediaStore, если его задания нет (сбой, прерывание, разрешение выдано в настройках).
+     * Вызывается Поставщиком, в том числе periodic, — отдельного механизма восстановления нет.
+     */
+    fun ensureMediaTrigger() {
+        if (context.hasMediaReadPermission()) {
+            syncScheduler.enqueueMediaTrigger()
         }
     }
 

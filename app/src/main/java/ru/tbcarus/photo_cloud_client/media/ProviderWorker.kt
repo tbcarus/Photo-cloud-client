@@ -51,6 +51,9 @@ class ProviderWorker @AssistedInject constructor(
             return Result.success()
         }
 
+        // Наблюдатель MediaStore мог пропасть после сбоя — periodic Поставщика восстанавливает его.
+        periodicSyncCoordinator.ensureMediaTrigger()
+
         // Auto-retry (Stage 5K): возвращаем в очередь временно упавшие (CHECKSUM_IO) записи,
         // у которых прошёл cooldown и не исчерпан лимит попыток. Один раз за прогон.
         val restored = checksumRepository.restoreRetryableFailed()
