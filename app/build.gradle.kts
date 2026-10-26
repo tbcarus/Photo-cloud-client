@@ -14,8 +14,10 @@ android {
         applicationId = "ru.tbcarus.photo_cloud_client"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Сборка: versionName = A<этап>.<номер сборки в этапе>, versionCode — сквозной номер, растёт с каждой сборкой.
+        // Показывается на экране Network.
+        versionCode = 2
+        versionName = "A4.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

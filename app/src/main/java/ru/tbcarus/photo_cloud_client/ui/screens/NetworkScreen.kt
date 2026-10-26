@@ -13,10 +13,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import ru.tbcarus.photo_cloud_client.BuildConfig
 import ru.tbcarus.photo_cloud_client.ui.components.ConnectionStatus
 import ru.tbcarus.photo_cloud_client.ui.components.LoadingDialog
 import ru.tbcarus.photo_cloud_client.ui.components.showDialog
@@ -52,6 +54,13 @@ fun NetworkScreen(viewModel: NetworkViewModel = hiltViewModel()) {
                 Text("Test")
             }
         }
+
+        Text(
+            text = "Сборка ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+        )
 
         if (uiState.isLoading) {
             LoadingDialog()
