@@ -18,6 +18,13 @@ class MediaStoreRepository @Inject constructor(
 
     private companion object {
         const val TAG = "MediaStoreRepository"
+
+        /**
+         * Каталоги сканирования по RELATIVE_PATH, вместе с вложенными, — единственное место их задания.
+         * DCIM/ — снимки камеры: имя подпапки камеры у вендоров разное, поэтому берётся весь DCIM/.
+         */
+        // TODO A4.3: удалить Pictures/ после испытаний на эмуляторе
+        val SCAN_DIRECTORIES = listOf("DCIM/", "Pictures/")
     }
 
     /**
@@ -49,12 +56,11 @@ class MediaStoreRepository @Inject constructor(
             MediaStore.Images.Media.DATE_ADDED
         )
 
-        // Сканируем только папку DCIM/ (снимки/видео устройства), исключая Download, Pictures,
-        // Pictures/Screenshots и т.п. Широкий фильтр DCIM/% переносим между вендорами (имя подпапки
-        // камеры отличается). Фильтр применяется в запросе MediaStore, а не пост-фильтром.
-        // TODO: При необходимости уточнить фильтр до конкретных подпапок камеры, если DCIM/ будет захватывать лишнее.
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("DCIM/%")
+        // Только каталоги [SCAN_DIRECTORIES]; Download, Movies и прочие пути не читаются.
+        // Один запрос по всем каталогам даёт один общий снимок: каждая строка MediaStore (_ID) входит в него
+        // один раз. Фильтр применяется в запросе MediaStore, а не пост-фильтром.
+        val selection = SCAN_DIRECTORIES.joinToString(" OR ") { "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?" }
+        val selectionArgs = SCAN_DIRECTORIES.map { "$it%" }.toTypedArray()
 
         // Ошибка самого запроса — тоже Error, а не исключение: повторная проверка снимка обрабатывает её как сбой.
         val cursor = try {

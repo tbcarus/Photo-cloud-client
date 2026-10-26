@@ -113,8 +113,12 @@ class FakeMediaStore private constructor(
                 check(!failQuery) { "MediaStore недоступен" }
                 val columns = requireNotNull(projection)
                 val cursor = MatrixCursor(columns)
-                // Фильтр DCIM/% из запроса MediaStoreRepository.
-                images.filter { it.relativePath.startsWith("DCIM/") }.forEach { image ->
+                // Фильтр запроса MediaStoreRepository: RELATIVE_PATH LIKE 'каталог/%' [OR ...].
+                // LIKE в SQLite не различает регистр ASCII; без аргументов отдаётся вся коллекция.
+                val prefixes = selectionArgs.orEmpty().map { it.removeSuffix("%") }
+                images.filter { image ->
+                    prefixes.isEmpty() || prefixes.any { image.relativePath.startsWith(it, ignoreCase = true) }
+                }.forEach { image ->
                     cursor.addRow(columns.map { column -> value(image, column) })
                 }
                 repeat(brokenRows) {
