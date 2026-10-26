@@ -37,7 +37,7 @@ class SyncScheduler @Inject constructor(
         const val UPLOAD_PERIODIC_WORK_NAME = "photo_upload_periodic"
         const val MEDIA_TRIGGER_WORK_NAME = "photo_media_trigger"
 
-        private const val PERIODIC_INTERVAL_HOURS = 1L
+        private const val PERIODIC_INTERVAL_MINUTES = 30L
 
         // Серия событий одной съёмки объединяется: запуск после 3 с тишины, но не позже 30 с от первого.
         private const val TRIGGER_UPDATE_DELAY_SECONDS = 3L
@@ -61,7 +61,7 @@ class SyncScheduler @Inject constructor(
             .setRequiresBatteryNotLow(true)
             .build()
 
-        val request = PeriodicWorkRequestBuilder<ProviderWorker>(PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS)
+        val request = PeriodicWorkRequestBuilder<ProviderWorker>(PERIODIC_INTERVAL_MINUTES, TimeUnit.MINUTES)
             .setConstraints(constraints)
             .build()
 
@@ -100,7 +100,7 @@ class SyncScheduler @Inject constructor(
             .setRequiresBatteryNotLow(true)
             .build()
 
-        val request = PeriodicWorkRequestBuilder<UploadWorker>(PERIODIC_INTERVAL_HOURS, TimeUnit.HOURS)
+        val request = PeriodicWorkRequestBuilder<UploadWorker>(PERIODIC_INTERVAL_MINUTES, TimeUnit.MINUTES)
             .setConstraints(constraints)
             .build()
 
