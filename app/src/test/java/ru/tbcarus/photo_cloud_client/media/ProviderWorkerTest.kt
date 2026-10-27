@@ -243,7 +243,7 @@ class ProviderWorkerTest {
         grantFullAccess()
         media.add(image(1, "photo-1"))
         media.queryDelayMs = 200
-        // Одинаковый экземпляр, как @Singleton в приложении: и Поставщик, и UI вызывают его scanImages.
+        // Одинаковый экземпляр, как @Singleton в приложении: прогоны Поставщика вызывают его scanImages.
         val repository = MediaFileRepository(dao, MediaStoreRepository(context))
 
         listOf(

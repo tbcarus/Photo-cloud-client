@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
-import ru.tbcarus.photo_cloud_client.media.ScanOutcome
 import ru.tbcarus.photo_cloud_client.media.SyncScheduler
 import javax.inject.Inject
 
@@ -47,51 +46,6 @@ class FilesViewModel @Inject constructor(
         }
     }
 
-    fun scanPhotos() {
-        if (_uiState.value.isScanning) return
-
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isScanning     = true,
-                    permissionDenied = false,
-                    errorMessage   = null,
-                    lastScanResult = null
-                )
-            }
-            try {
-                when (val outcome = mediaFileRepository.scanImages()) {
-                    is ScanOutcome.Success -> _uiState.update {
-                        it.copy(
-                            lastScanResult   = outcome.result,
-                            permissionDenied = false,
-                            errorMessage     = null
-                        )
-                    }
-                    is ScanOutcome.PermissionDenied -> {
-                        // TODO: runtime-запрос разрешений будет добавлен отдельным UI-этапом.
-                        _uiState.update {
-                            it.copy(
-                                permissionDenied = true,
-                                lastScanResult   = null,
-                                errorMessage     = null
-                            )
-                        }
-                    }
-                    is ScanOutcome.Error -> _uiState.update {
-                        it.copy(
-                            errorMessage     = outcome.message,
-                            lastScanResult   = null,
-                            permissionDenied = false
-                        )
-                    }
-                }
-            } finally {
-                _uiState.update { it.copy(isScanning = false) }
-            }
-        }
-    }
-
     /** true, если автосинк настроен (есть токены и baseUrl) — можно запрашивать media permission. */
     fun isAutoSyncConfigured(): Boolean = periodicSyncCoordinator.isAutoSyncConfigured()
 
@@ -101,27 +55,5 @@ class FilesViewModel @Inject constructor(
      */
     fun ensureAutoSyncStarted() {
         periodicSyncCoordinator.reconcile()
-    }
-
-    /**
-     * Вызывать после выдачи runtime-разрешения на фото.
-     * Переоцениваем автосинк (включаем periodic задачи + observer), разово запускаем Поставщика,
-     * чтобы hash не ждал периода, и делаем scan для немедленного индекса.
-     * Scan разделяет mutex с Поставщиком, поэтому не применяется параллельно фоновому.
-     */
-    fun onMediaPermissionGranted() {
-        periodicSyncCoordinator.reconcile()
-        syncScheduler.enqueueProvider()
-        scanPhotos()
-    }
-
-    fun clearMessages() {
-        _uiState.update {
-            it.copy(
-                lastScanResult   = null,
-                errorMessage     = null,
-                permissionDenied = false
-            )
-        }
     }
 }

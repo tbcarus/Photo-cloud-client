@@ -44,7 +44,7 @@ import ru.tbcarus.photo_cloud_client.core.storage.InMemoryTokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.media.FakeMediaStore.Companion.sha256
-import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
+import ru.tbcarus.photo_cloud_client.ui.screens.settings.SettingsViewModel
 import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -240,10 +240,10 @@ class ProviderUploadEndToEndTest {
     }
 
     @Test
-    fun permissionGrantStartsProviderWithoutWaitingForPeriodic() = runBlocking {
+    fun permissionGrantInSettingsStartsProviderWithoutWaitingForPeriodic() = runBlocking {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         val image = media.add(image(1, "photo-1"))
-        val viewModel = FilesViewModel(mediaFileRepository, scheduler, coordinator)
+        val viewModel = SettingsViewModel(coordinator, scheduler)
 
         viewModel.onMediaPermissionGranted()
 

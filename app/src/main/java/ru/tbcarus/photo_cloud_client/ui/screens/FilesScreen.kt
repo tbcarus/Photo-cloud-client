@@ -1,8 +1,5 @@
 package ru.tbcarus.photo_cloud_client.ui.screens
 
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,14 +32,11 @@ import androidx.compose.ui.unit.dp
 import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
-import ru.tbcarus.photo_cloud_client.media.ScanResult
 import ru.tbcarus.photo_cloud_client.media.SyncStatus
 import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
 import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
 import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
-import ru.tbcarus.photo_cloud_client.media.isMediaLocationRequested
-import ru.tbcarus.photo_cloud_client.media.markMediaLocationRequested
-import ru.tbcarus.photo_cloud_client.media.mediaPermissionsToRequest
+import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 
 @Composable
@@ -50,47 +44,20 @@ fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
-    // Необязательный доступ к геоданным: без него backup идёт, но координаты в копию могут не попасть.
+    // Разрешения запрашиваются только на Settings; здесь — их фактическое состояние для пояснений.
+    // Перечитывается при каждом возврате на экран, в том числе из Settings и настроек Android.
+    var hasMediaRead by remember { mutableStateOf(context.hasMediaReadPermission()) }
     var hasMediaLocation by remember { mutableStateOf(context.hasMediaLocationPermission()) }
-
-    // Если выдан полный доступ — включаем автосинк и делаем scan; при отказе или частичном доступе
-    // («выбранные фото») scanImages вернёт PermissionDenied и отобразится существующая card.
-    // Отказ в геоданных на это не влияет.
-    // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    OnResumeEffect {
+        hasMediaRead = context.hasMediaReadPermission()
         hasMediaLocation = context.hasMediaLocationPermission()
-        if (context.hasMediaReadPermission()) {
-            // Доступ выдан — включаем автосинк (periodic + observer), запускаем Поставщика и scan.
-            viewModel.onMediaPermissionGranted()
-        } else {
-            // Отказ или частичный доступ — scan вернёт PermissionDenied и покажет card, Room не очищается.
-            viewModel.scanPhotos()
-        }
     }
 
-    // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan):
-    // если пользователь залогинен и baseUrl настроен — запрашиваем разрешение (или,
-    // если оно уже есть, просто поднимаем observer + periodic задачи через reconcile()).
-    // Геоданные при выданном доступе к фото запрашиваются однократно, автосинк их не ждёт.
+    // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan): при полном доступе к фото
+    // поднимаем observer + periodic задачи через reconcile(). Системных запросов разрешений здесь нет.
     LaunchedEffect(Unit) {
-        if (viewModel.isAutoSyncConfigured()) {
-            val hasMediaRead = context.hasMediaReadPermission()
-            if (hasMediaRead) {
-                viewModel.ensureAutoSyncStarted()
-            }
-            val permissions = mediaPermissionsToRequest(
-                hasMediaRead = hasMediaRead,
-                hasMediaLocation = context.hasMediaLocationPermission(),
-                mediaLocationRequested = context.isMediaLocationRequested()
-            )
-            if (permissions.isNotEmpty()) {
-                if (Manifest.permission.ACCESS_MEDIA_LOCATION in permissions) {
-                    context.markMediaLocationRequested()
-                }
-                permissionLauncher.launch(permissions)
-            }
+        if (viewModel.isAutoSyncConfigured() && context.hasMediaReadPermission()) {
+            viewModel.ensureAutoSyncStarted()
         }
     }
 
@@ -100,12 +67,12 @@ fun FilesScreen(viewModel: FilesViewModel) {
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
         // Экран — монитор состояния автосинхронизации. Ручные debug-кнопки удалены (Stage 5J.2);
-        // permission/bootstrap автосинка выполняются в LaunchedEffect выше, синхронизацию ведут
+        // bootstrap автосинка выполняется в LaunchedEffect выше, разрешения — на Settings, синхронизацию ведут
         // MediaChangeObserver + Поставщик и Загрузчик WorkManager.
 
-        // Немодальный индикатор: scan и фоновая синхронизация не блокируют экран и навигацию.
-        if (state.isScanning || state.isSyncing) {
-            ProgressRow(if (state.isScanning) "Сканирование фото…" else "Синхронизация выполняется…")
+        // Немодальный индикатор: фоновая синхронизация не блокирует экран и навигацию.
+        if (state.isSyncing) {
+            ProgressRow("Синхронизация выполняется…")
             Spacer(Modifier.height(8.dp))
         }
 
@@ -115,36 +82,16 @@ fun FilesScreen(viewModel: FilesViewModel) {
             Spacer(Modifier.height(8.dp))
         }
 
-        // Предупреждение об отсутствии разрешения
-        if (state.permissionDenied) {
-            // TODO: добавить runtime permission request и переход в настройки приложения отдельным этапом.
+        // Предупреждение об отсутствии полного доступа к фото; запрос — на Settings.
+        if (!hasMediaRead) {
             PermissionDeniedCard()
             Spacer(Modifier.height(8.dp))
         }
 
         // Пояснение о геоданных — только при работающем доступе к фото, иначе важнее карточка выше.
-        if (!hasMediaLocation && !state.permissionDenied && context.hasMediaReadPermission()) {
+        if (!hasMediaLocation && hasMediaRead) {
             MediaLocationHintCard()
             Spacer(Modifier.height(8.dp))
-        }
-
-        // Ошибка прогона (не per-file)
-        state.errorMessage?.let { msg ->
-            Text(
-                text = msg,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        // Результат последнего scan
-        state.lastScanResult?.let { result ->
-            Text(
-                text = formatScanResult(result),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(4.dp))
         }
 
         // Счётчики по статусам — производные от files, не хранятся в UiState
@@ -156,7 +103,7 @@ fun FilesScreen(viewModel: FilesViewModel) {
         Spacer(Modifier.height(4.dp))
 
         // Список локальных фото
-        if (state.files.isEmpty() && !state.isScanning) {
+        if (state.files.isEmpty()) {
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -204,7 +151,8 @@ private fun PermissionDeniedCard() {
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
             Text(
-                text = "Резервное копирование работает только при доступе ко всем фото.",
+                text = "Синхронизация невозможна: резервное копирование работает только при доступе ко всем фото. " +
+                    "Разрешение предоставляется на экране Settings.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
@@ -228,7 +176,7 @@ private fun MediaLocationHintCard() {
             )
             Text(
                 text = "Резервное копирование продолжается, но координаты съёмки могут не сохраниться в копии. " +
-                    "Доступ можно выдать в настройках приложения.",
+                    "Доступ можно выдать на экране Settings.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
@@ -350,6 +298,3 @@ private fun formatStatus(status: MediaFileStatus): String = when (status) {
     MediaFileStatus.FAILED         -> "Failed"
     MediaFileStatus.LOCAL_DELETED  -> "Deleted"
 }
-
-private fun formatScanResult(result: ScanResult): String =
-    "Scan result: scanned = ${result.scanned}, inserted/updated = ${result.insertedOrUpdated}, deleted stale = ${result.deletedStale}"
