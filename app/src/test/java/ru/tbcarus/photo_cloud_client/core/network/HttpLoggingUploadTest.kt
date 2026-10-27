@@ -26,6 +26,7 @@ import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.di.NetworkModule
 import ru.tbcarus.photo_cloud_client.media.ContentUriRequestBody
+import ru.tbcarus.photo_cloud_client.media.MediaStreamOpener
 import java.io.ByteArrayInputStream
 import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
@@ -87,7 +88,7 @@ class HttpLoggingUploadTest {
         }
         server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"id":7}"""))
         val part = MultipartBody.Part.createFormData(
-            "file", "photo.jpg", ContentUriRequestBody(context, uri, "image/jpeg", fileBytes.size.toLong())
+            "file", "photo.jpg", ContentUriRequestBody(MediaStreamOpener(context), uri, "image/jpeg", fileBytes.size.toLong())
         )
 
         val response = apiServiceFactory.authFileService().uploadFile(part, null).execute()

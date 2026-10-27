@@ -1,8 +1,6 @@
 package ru.tbcarus.photo_cloud_client.media
 
-import android.content.Context
 import android.net.Uri
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,7 +32,7 @@ class FileUploadRepository @Inject constructor(
     private val mediaFileDao: MediaFileDao,
     private val apiServiceFactory: ApiServiceFactory,
     private val folderRepository: FolderRepository,
-    @ApplicationContext private val context: Context
+    private val streamOpener: MediaStreamOpener
 ) {
 
     private val mutex = Mutex()
@@ -171,7 +169,7 @@ class FileUploadRepository @Inject constructor(
      * Различаем отсутствие файла и отзыв доступа для дальнейшего показа в UI.
      */
     private fun openFailureReason(uriString: String): FailureReason? = try {
-        val opened = context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } ?: false
+        val opened = streamOpener.open(Uri.parse(uriString))?.use { true } ?: false
         if (opened) null else FailureReason.FILE_NOT_FOUND
     } catch (e: FileNotFoundException) {
         FailureReason.FILE_NOT_FOUND
@@ -181,7 +179,7 @@ class FileUploadRepository @Inject constructor(
 
     private fun createFilePart(file: MediaFile): MultipartBody.Part {
         val uri = Uri.parse(file.uri)
-        val body = ContentUriRequestBody(context, uri, file.mimeType, file.size)
+        val body = ContentUriRequestBody(streamOpener, uri, file.mimeType, file.size)
         val filename = file.displayName.ifBlank { "file_${file.mediaStoreId}" }
         return MultipartBody.Part.createFormData("file", filename, body)
     }

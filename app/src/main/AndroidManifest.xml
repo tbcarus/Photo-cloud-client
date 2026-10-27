@@ -10,6 +10,8 @@
     <!-- Объявлено, чтобы на Android 14+ частичный доступ («выбранные фото») не выдавался как READ_MEDIA_IMAGES
          в режиме совместимости: неполная выборка не должна удалять строки локальной очереди. -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Необязательное: без него Android 10+ отдаёт фото с затёртыми геоданными, backup продолжается без них. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
     <application
         android:name=".App"
         android:allowBackup="true"

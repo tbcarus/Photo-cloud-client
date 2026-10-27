@@ -60,7 +60,7 @@ class ProcessStartSyncTest {
         val client = OkHttpClient()
         val syncStatusStore = SyncStatusStore()
         val mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
-        val checksumRepository = ChecksumRepository(dao, context)
+        val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
         scheduler = SyncScheduler(context, syncStatusStore)
         coordinator = PeriodicSyncCoordinator(
             context,

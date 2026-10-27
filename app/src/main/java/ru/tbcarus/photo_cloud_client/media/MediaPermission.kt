@@ -33,3 +33,40 @@ val mediaPermissionRequest: Array<String>
  */
 fun Context.hasMediaReadPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, mediaReadPermission) == PackageManager.PERMISSION_GRANTED
+
+/**
+ * Необязательный доступ к геоданным фото: с ним [MediaStreamOpener] читает оригинал вместе с EXIF/GPS.
+ * Отказ не останавливает backup — отправляется доступная Android версия без геоданных.
+ */
+fun Context.hasMediaLocationPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+/**
+ * Разрешения для запроса при входе на экран; пустой массив — запрос не нужен.
+ * Без доступа к фото запрос прежний, геоданные добавляются к нему же — отдельного диалога это не создаёт.
+ * При выданном доступе к фото геоданные запрашиваются отдельно один раз: [mediaLocationRequested]
+ * хранит факт запроса, чтобы не показывать системный диалог при каждом открытии экрана.
+ */
+fun mediaPermissionsToRequest(
+    hasMediaRead: Boolean,
+    hasMediaLocation: Boolean,
+    mediaLocationRequested: Boolean
+): Array<String> = when {
+    !hasMediaRead && !hasMediaLocation -> mediaPermissionRequest + Manifest.permission.ACCESS_MEDIA_LOCATION
+    !hasMediaRead -> mediaPermissionRequest
+    !hasMediaLocation && !mediaLocationRequested -> arrayOf(Manifest.permission.ACCESS_MEDIA_LOCATION)
+    else -> emptyArray()
+}
+
+private const val PERMISSION_PREFS = "media_permissions"
+private const val KEY_MEDIA_LOCATION_REQUESTED = "media_location_requested"
+
+/** Запрашивалось ли уже ACCESS_MEDIA_LOCATION; сбрасывается только вместе с данными приложения. */
+fun Context.isMediaLocationRequested(): Boolean =
+    getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MEDIA_LOCATION_REQUESTED, false)
+
+fun Context.markMediaLocationRequested() {
+    getSharedPreferences(PERMISSION_PREFS, Context.MODE_PRIVATE).edit()
+        .putBoolean(KEY_MEDIA_LOCATION_REQUESTED, true)
+        .apply()
+}

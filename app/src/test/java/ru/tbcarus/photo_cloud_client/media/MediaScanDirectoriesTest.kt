@@ -86,7 +86,7 @@ class MediaScanDirectoriesTest {
         val picture = media.add(image(1, "Pictures/Screenshots/"))
 
         repository.scanImages()
-        ChecksumRepository(dao, context).computePendingChecksums()
+        ChecksumRepository(dao, MediaStreamOpener(context), context).computePendingChecksums()
 
         val row = dao.single(picture.id)
         assertEquals(MediaFileStatus.CHECKSUM_READY, row.status)

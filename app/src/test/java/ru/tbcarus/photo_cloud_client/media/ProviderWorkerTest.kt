@@ -283,7 +283,7 @@ class ProviderWorkerTest {
                 appContext,
                 workerParameters,
                 MediaFileRepository(dao, MediaStoreRepository(appContext)),
-                ChecksumRepository(dao, appContext),
+                ChecksumRepository(dao, MediaStreamOpener(appContext), appContext),
                 syncStatusStore,
                 coordinator
             )

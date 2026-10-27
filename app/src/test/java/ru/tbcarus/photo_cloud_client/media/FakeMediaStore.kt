@@ -8,11 +8,14 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import org.robolectric.Robolectric
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowEnvironment
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileNotFoundException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -20,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Тестовый MediaStore для Robolectric: Images-запросы отдаются из [images],
  * содержимое файлов — через ShadowContentResolver с подсчётом открытий потока.
+ * Оригинал (URI с setRequireOriginal) отдаётся provider через openFile, как дескриптор настоящего файла.
  */
 class FakeMediaStore private constructor(
     private val context: Context,
@@ -31,8 +35,13 @@ class FakeMediaStore private constructor(
         @Volatile var bytes: ByteArray,
         @Volatile var dateModifiedSec: Long,
         val relativePath: String = "DCIM/Camera/",
-        val mimeType: String = "image/jpeg"
+        val mimeType: String = "image/jpeg",
+        /** Байты оригинала; null — совпадают с [bytes]. Обычный поток отдаёт [bytes], как Android с затёртыми геоданными. */
+        @Volatile var originalBytes: ByteArray? = null
     ) {
+        /** Ошибка обычного открытия потока (например, отозван доступ к фото). */
+        @Volatile var openFailure: (() -> Exception)? = null
+
         val uri: Uri get() = uriOf(id)
         val size: Long get() = bytes.size.toLong()
         val lastModifiedMs: Long get() = dateModifiedSec * 1000L
@@ -58,6 +67,11 @@ class FakeMediaStore private constructor(
         get() = provider.beforeQuery
         set(value) { provider.beforeQuery = value }
 
+    /** Ошибка открытия оригинала: так Android отвечает на setRequireOriginal без ACCESS_MEDIA_LOCATION. */
+    var originalFailure: (() -> Exception)?
+        get() = provider.originalFailure
+        set(value) { provider.originalFailure = value }
+
     /** Состояние основного хранилища (Environment.getExternalStorageState). */
     fun setStorageState(state: String) = ShadowEnvironment.setExternalStorageState(state)
 
@@ -74,6 +88,7 @@ class FakeMediaStore private constructor(
         shadowOf(context.contentResolver).registerInputStreamSupplier(image.uri) {
             opens.computeIfAbsent(image.id) { AtomicInteger() }.incrementAndGet()
             onOpen(image.id)
+            image.openFailure?.let { throw it() }
             ByteArrayInputStream(image.bytes)
         }
         return image
@@ -83,8 +98,11 @@ class FakeMediaStore private constructor(
         provider.images.removeIf { it.id == id }
     }
 
-    /** Сколько раз открывался поток файла (hash, проверка доступа перед upload, отправка). */
+    /** Сколько раз открывался обычный поток файла (hash, проверка доступа перед upload, отправка). */
     fun openCount(id: Long): Int = opens[id]?.get() ?: 0
+
+    /** Сколько раз запрашивался оригинал через setRequireOriginal. */
+    fun originalOpenCount(id: Long): Int = provider.originalOpens[id]?.get() ?: 0
 
     class Provider : ContentProvider() {
         val images = CopyOnWriteArrayList<Image>()
@@ -92,6 +110,8 @@ class FakeMediaStore private constructor(
         @Volatile var brokenRows = 0
         @Volatile var queryDelayMs = 0L
         @Volatile var beforeQuery: (Int) -> Unit = {}
+        @Volatile var originalFailure: (() -> Exception)? = null
+        val originalOpens = ConcurrentHashMap<Long, AtomicInteger>()
         val queryCount = AtomicInteger()
         val maxConcurrent = AtomicInteger()
         private val active = AtomicInteger()
@@ -140,6 +160,20 @@ class FakeMediaStore private constructor(
             MediaStore.Images.Media.DATE_MODIFIED -> image.dateModifiedSec
             MediaStore.Images.Media.DATE_ADDED -> image.dateModifiedSec
             else -> null
+        }
+
+        override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
+            // Обычный поток отдаёт ShadowContentResolver; сюда приходит только запрос оригинала.
+            check(MediaStore.getRequireOriginal(uri)) { "Ожидался запрос оригинала: $uri" }
+            val id = ContentUris.parseId(uri)
+            originalOpens.computeIfAbsent(id) { AtomicInteger() }.incrementAndGet()
+            originalFailure?.let { throw it() }
+            val image = images.firstOrNull { it.id == id } ?: throw FileNotFoundException("Нет файла: $uri")
+            val file = File.createTempFile("original-$id-", ".jpg").apply {
+                deleteOnExit()
+                writeBytes(image.originalBytes ?: image.bytes)
+            }
+            return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         }
 
         override fun getType(uri: Uri): String? = null

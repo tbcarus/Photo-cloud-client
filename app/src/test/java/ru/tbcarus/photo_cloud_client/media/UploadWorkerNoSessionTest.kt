@@ -159,7 +159,7 @@ class UploadWorkerNoSessionTest {
                 appContext,
                 workerParameters,
                 ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository),
-                FileUploadRepository(dao, apiServiceFactory, folderRepository, appContext),
+                FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(appContext)),
                 ServerRepository(apiServiceFactory),
                 baseUrlProvider,
                 syncStatusStore,

@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.ui.screens
 
+import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
@@ -24,7 +25,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -35,8 +38,11 @@ import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.ScanResult
 import ru.tbcarus.photo_cloud_client.media.SyncStatus
 import ru.tbcarus.photo_cloud_client.media.SyncStatusRecord
+import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
 import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
-import ru.tbcarus.photo_cloud_client.media.mediaPermissionRequest
+import ru.tbcarus.photo_cloud_client.media.isMediaLocationRequested
+import ru.tbcarus.photo_cloud_client.media.markMediaLocationRequested
+import ru.tbcarus.photo_cloud_client.media.mediaPermissionsToRequest
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 
 @Composable
@@ -44,16 +50,17 @@ fun FilesScreen(viewModel: FilesViewModel) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
-    // Разрешения зависят от версии Android: с Android 13 — READ_MEDIA_IMAGES,
-    // с Android 14 — вместе с READ_MEDIA_VISUAL_USER_SELECTED (частичный доступ).
-    val mediaPermissions = remember { mediaPermissionRequest }
+    // Необязательный доступ к геоданным: без него backup идёт, но координаты в копию могут не попасть.
+    var hasMediaLocation by remember { mutableStateOf(context.hasMediaLocationPermission()) }
 
     // Если выдан полный доступ — включаем автосинк и делаем scan; при отказе или частичном доступе
     // («выбранные фото») scanImages вернёт PermissionDenied и отобразится существующая card.
+    // Отказ в геоданных на это не влияет.
     // TODO: Добавить переход в настройки приложения, если пользователь окончательно запретил доступ к фото.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        hasMediaLocation = context.hasMediaLocationPermission()
         if (context.hasMediaReadPermission()) {
             // Доступ выдан — включаем автосинк (periodic + observer), запускаем Поставщика и scan.
             viewModel.onMediaPermissionGranted()
@@ -66,12 +73,23 @@ fun FilesScreen(viewModel: FilesViewModel) {
     // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan):
     // если пользователь залогинен и baseUrl настроен — запрашиваем разрешение (или,
     // если оно уже есть, просто поднимаем observer + periodic задачи через reconcile()).
+    // Геоданные при выданном доступе к фото запрашиваются однократно, автосинк их не ждёт.
     LaunchedEffect(Unit) {
         if (viewModel.isAutoSyncConfigured()) {
-            if (context.hasMediaReadPermission()) {
+            val hasMediaRead = context.hasMediaReadPermission()
+            if (hasMediaRead) {
                 viewModel.ensureAutoSyncStarted()
-            } else {
-                permissionLauncher.launch(mediaPermissions)
+            }
+            val permissions = mediaPermissionsToRequest(
+                hasMediaRead = hasMediaRead,
+                hasMediaLocation = context.hasMediaLocationPermission(),
+                mediaLocationRequested = context.isMediaLocationRequested()
+            )
+            if (permissions.isNotEmpty()) {
+                if (Manifest.permission.ACCESS_MEDIA_LOCATION in permissions) {
+                    context.markMediaLocationRequested()
+                }
+                permissionLauncher.launch(permissions)
             }
         }
     }
@@ -101,6 +119,12 @@ fun FilesScreen(viewModel: FilesViewModel) {
         if (state.permissionDenied) {
             // TODO: добавить runtime permission request и переход в настройки приложения отдельным этапом.
             PermissionDeniedCard()
+            Spacer(Modifier.height(8.dp))
+        }
+
+        // Пояснение о геоданных — только при работающем доступе к фото, иначе важнее карточка выше.
+        if (!hasMediaLocation && !state.permissionDenied && context.hasMediaReadPermission()) {
+            MediaLocationHintCard()
             Spacer(Modifier.height(8.dp))
         }
 
@@ -183,6 +207,30 @@ private fun PermissionDeniedCard() {
                 text = "Резервное копирование работает только при доступе ко всем фото.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onErrorContainer
+            )
+        }
+    }
+}
+
+@Composable
+private fun MediaLocationHintCard() {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Нет доступа к геоданным фото.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Text(
+                text = "Резервное копирование продолжается, но координаты съёмки могут не сохраниться в копии. " +
+                    "Доступ можно выдать в настройках приложения.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
             )
         }
     }

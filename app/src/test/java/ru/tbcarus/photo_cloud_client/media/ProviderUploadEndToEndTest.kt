@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.media
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
 import androidx.room.Room
@@ -62,6 +63,8 @@ class ProviderUploadEndToEndTest {
     private companion object {
         const val ROOT_ID = 1L
         const val CAMERA_ID = 2L
+        val GPS_ORIGINAL = "JPEG|GPS:55.7558N,37.6173E|pixels".toByteArray()
+        val GPS_REDACTED = "JPEG|GPS:00.0000\u0000,00.0000\u0000|pixels".toByteArray()
     }
 
     private lateinit var context: Application
@@ -79,6 +82,7 @@ class ProviderUploadEndToEndTest {
     private val nextFileId = AtomicLong(100)
     private val paths = CopyOnWriteArrayList<String>()
     private val requestedChecksums = CopyOnWriteArrayList<String>()
+    private val uploadedBodies = CopyOnWriteArrayList<ByteArray>()
 
     // Статусы строки в моменты, когда её видят MediaStore-поток и Server.
     private val trace = CopyOnWriteArrayList<MediaFileStatus>()
@@ -106,9 +110,9 @@ class ProviderUploadEndToEndTest {
         val syncStatusStore = SyncStatusStore()
         // Общие экземпляры, как @Singleton в приложении: Mutex стадий действуют на все задачи.
         mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
-        val checksumRepository = ChecksumRepository(dao, context)
+        val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
         val precheckRepository = ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository)
-        val uploadRepository = FileUploadRepository(dao, apiServiceFactory, folderRepository, context)
+        val uploadRepository = FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(context))
         val serverRepository = ServerRepository(apiServiceFactory)
         scheduler = SyncScheduler(context, syncStatusStore)
         coordinator = PeriodicSyncCoordinator(
@@ -253,6 +257,79 @@ class ProviderUploadEndToEndTest {
         assertEquals(0, periodic.runAttemptCount)
     }
 
+    @Test
+    @Config(sdk = [34]) // MediaStore.setRequireOriginal — API 29+
+    fun withMediaLocationChecksumAndUploadUseOriginalBytes() = runBlocking {
+        shadowOf(context).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        val image = media.add(imageWithGps(1))
+        mediaFileRepository.scanImages()
+
+        syncAll()
+
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256(GPS_ORIGINAL), synced.checksum)
+        assertEquals(listOf(sha256(GPS_ORIGINAL)), requestedChecksums.toList())
+        // Server получает ровно оригинал: его SHA-256 совпадает с локальным checksum.
+        assertEquals(GPS_ORIGINAL.toString(Charsets.ISO_8859_1), uploadedFilePart())
+        assertEquals(0, media.openCount(image.id))
+        // hash, проверка доступа и отправка — три чтения оригинала.
+        assertEquals(3, media.originalOpenCount(image.id))
+    }
+
+    @Test
+    @Config(sdk = [34]) // MediaStore.setRequireOriginal — API 29+
+    fun withoutMediaLocationBackupContinuesWithAvailableVersion() = runBlocking {
+        shadowOf(context).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        val image = media.add(imageWithGps(1))
+        mediaFileRepository.scanImages()
+
+        syncAll()
+
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256(image.bytes), synced.checksum)
+        assertEquals(image.bytes.toString(Charsets.ISO_8859_1), uploadedFilePart())
+        assertEquals(0, media.originalOpenCount(image.id))
+    }
+
+    @Test
+    @Config(sdk = [34]) // MediaStore.setRequireOriginal — API 29+
+    fun refusedOriginalDoesNotFailWorkers() = runBlocking {
+        shadowOf(context).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        media.originalFailure = { UnsupportedOperationException("Caller must hold ACCESS_MEDIA_LOCATION") }
+        val image = media.add(imageWithGps(1))
+        mediaFileRepository.scanImages()
+
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        assertEquals(WorkInfo.State.SUCCEEDED, runProvider().state)
+        assertEquals(WorkInfo.State.SUCCEEDED, runSignalledUpload(uploadsBefore).state)
+
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertNull(synced.failureReason)
+        assertEquals(sha256(image.bytes), synced.checksum)
+        assertEquals(image.bytes.toString(Charsets.ISO_8859_1), uploadedFilePart())
+    }
+
+    @Test
+    @Config(sdk = [34]) // MediaStore.setRequireOriginal — API 29+
+    fun locationRevokedBetweenChecksumAndUploadDoesNotFailUpload() = runBlocking {
+        shadowOf(context).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        val image = media.add(imageWithGps(1))
+        mediaFileRepository.scanImages()
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        runProvider()
+        assertEquals(sha256(GPS_ORIGINAL), dao.single(image.id).checksum)
+
+        shadowOf(context).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
+        assertEquals(WorkInfo.State.SUCCEEDED, runSignalledUpload(uploadsBefore).state)
+
+        // Отправлена доступная версия; расхождение с checksum — известное ограничение смены разрешения между чтениями.
+        assertEquals(MediaFileStatus.SYNCED, dao.single(image.id).status)
+        assertEquals(image.bytes.toString(Charsets.ISO_8859_1), uploadedFilePart())
+    }
+
     /** Полный цикл Поставщик → Загрузчик для всех фото библиотеки. */
     private fun syncAll() {
         val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
@@ -323,7 +400,10 @@ class ProviderUploadEndToEndTest {
                 requestedChecksums += requested
                 json("""{"existing":[],"missing":${requested.joinToString(",", "[", "]") { "\"$it\"" }}}""")
             }
-            "/api/v1/files/upload" -> json("""{"id":${nextFileId.getAndIncrement()}}""")
+            "/api/v1/files/upload" -> {
+                uploadedBodies += request.body.readByteArray()
+                json("""{"id":${nextFileId.getAndIncrement()}}""")
+            }
             else -> MockResponse().setResponseCode(404)
         }
     }
@@ -332,6 +412,21 @@ class ProviderUploadEndToEndTest {
 
     private fun image(id: Long, content: String) =
         FakeMediaStore.Image(id = id, bytes = content.toByteArray(), dateModifiedSec = 1_700_000_000L + id)
+
+    // Обычный поток MediaStore без ACCESS_MEDIA_LOCATION: те же размер и структура, координаты затёрты.
+    private fun imageWithGps(id: Long) = FakeMediaStore.Image(
+        id = id,
+        bytes = GPS_REDACTED,
+        dateModifiedSec = 1_700_000_000L + id,
+        originalBytes = GPS_ORIGINAL
+    )
+
+    /** Содержимое part «file» единственного upload: байты между заголовками part и закрывающим boundary. */
+    private fun uploadedFilePart(): String {
+        val body = uploadedBodies.single().toString(Charsets.ISO_8859_1)
+        val start = body.indexOf("\r\n\r\n", body.indexOf("name=\"file\"")) + 4
+        return body.substring(start, body.indexOf("\r\n--", start))
+    }
 
     private fun <T> List<T>.distinctConsecutive(): List<T> =
         fold(mutableListOf()) { acc, item -> if (acc.lastOrNull() != item) acc += item; acc }

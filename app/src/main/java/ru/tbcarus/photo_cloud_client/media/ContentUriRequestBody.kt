@@ -1,6 +1,5 @@
 package ru.tbcarus.photo_cloud_client.media
 
-import android.content.Context
 import android.net.Uri
 import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -11,10 +10,10 @@ import java.io.IOException
 
 /**
  * RequestBody, стримящий содержимое content://uri напрямую в сетевой sink,
- * не загружая файл целиком в память.
+ * не загружая файл целиком в память. Поток выбирается тем же [MediaStreamOpener], что и для checksum.
  */
 class ContentUriRequestBody(
-    private val context: Context,
+    private val streamOpener: MediaStreamOpener,
     private val uri: Uri,
     private val mimeType: String,
     private val size: Long
@@ -28,7 +27,7 @@ class ContentUriRequestBody(
     override fun writeTo(sink: BufferedSink) {
         // Поток открываем внутри writeTo, потому OkHttp может повторно отправить тело
         // после refresh token, и writeTo будет вызван больше одного раза.
-        val inputStream = context.contentResolver.openInputStream(uri)
+        val inputStream = streamOpener.open(uri)
             ?: throw IOException("Не удалось открыть поток для uri: $uri")
         inputStream.use { stream ->
             sink.writeAll(stream.source())

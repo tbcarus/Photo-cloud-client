@@ -17,6 +17,7 @@ import kotlin.coroutines.cancellation.CancellationException
 @Singleton
 class ChecksumRepository @Inject constructor(
     private val mediaFileDao: MediaFileDao,
+    private val streamOpener: MediaStreamOpener,
     @ApplicationContext private val context: Context
 ) {
 
@@ -103,9 +104,9 @@ class ChecksumRepository @Inject constructor(
 
                 // Результат применяется только к той же HASHING-версии; сброшенная scan строка снова станет PENDING.
                 val failure: FailureReason? = try {
-                    val stream = context.contentResolver.openInputStream(Uri.parse(file.uri))
+                    val stream = streamOpener.open(Uri.parse(file.uri))
                     if (stream == null) {
-                        Log.w(TAG, "openInputStream вернул null, mediaStoreId=${file.mediaStoreId}")
+                        Log.w(TAG, "Поток не открыт (null), mediaStoreId=${file.mediaStoreId}")
                         FailureReason.FILE_NOT_FOUND
                     } else {
                         val checksum = stream.use { ChecksumUtil.sha256(it) }
