@@ -12,12 +12,15 @@ import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -50,6 +53,7 @@ import java.util.concurrent.atomic.AtomicLong
  * Загрузчик с большой очередью (A8.2): pre-check и upload партиями FIFO по mediaStoreId в пределах бюджета,
  * продолжение следующим прогоном через WorkManager. Время управляемое: запросы тестового Server
  * «занимают» [precheckCostMs] и [uploadCostMs]; прогоны запускаются по одному через TestDriver.
+ * Единичный обрыв ответа upload (A8.3.2) моделируется ответом без последнего байта и закрытием соединения.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
@@ -66,6 +70,8 @@ class UploadBatchContinuationTest {
     private lateinit var media: FakeMediaStore
     private lateinit var server: MockWebServer
     private lateinit var scheduler: SyncScheduler
+    private lateinit var uploadRepository: FileUploadRepository
+    private lateinit var baseUrlProvider: BaseUrlProvider
     private val dao get() = db.mediaFileDao()
     private val workManager get() = WorkManager.getInstance(context)
     private val clock = AtomicLong()
@@ -77,6 +83,11 @@ class UploadBatchContinuationTest {
     @Volatile private var isExisting: (Long) -> Boolean = { false }
     @Volatile private var onUpload: (Long) -> Unit = {}
     private val uploadCodes = ConcurrentHashMap<Long, Int>()
+    /** Сколько ближайших ответов upload для файла оборвать; файл при этом уже сохранён Server. */
+    private val lostResponses = ConcurrentHashMap<Long, Int>()
+    /** Server идемпотентен по checksum: повторная отправка того же файла получает тот же FileItem. */
+    private val serverIds = ConcurrentHashMap<Long, Long>()
+    private val uploadedContents = CopyOnWriteArrayList<Pair<Long, String>>()
     private val idByChecksum = ConcurrentHashMap<String, Long>()
     private val precheckRequests = CopyOnWriteArrayList<List<Long>>()
     private val uploads = CopyOnWriteArrayList<Long>()
@@ -99,13 +110,13 @@ class UploadBatchContinuationTest {
 
         val syncStatusStore = SyncStatusStore()
         scheduler = SyncScheduler(context, syncStatusStore)
-        val baseUrlProvider = BaseUrlProvider(serverPreferences)
+        baseUrlProvider = BaseUrlProvider(serverPreferences)
         val client = OkHttpClient()
         val api = ApiServiceFactory(baseUrlProvider, client, client, client)
         val folderRepository = FolderRepository(api)
         // Общие экземпляры, как @Singleton в приложении.
         val precheckRepository = ChecksumPrecheckRepository(dao, api, folderRepository)
-        val uploadRepository = FileUploadRepository(dao, api, folderRepository, MediaStreamOpener(context))
+        uploadRepository = FileUploadRepository(dao, api, folderRepository, MediaStreamOpener(context))
         val factory = object : WorkerFactory() {
             override fun createWorker(
                 appContext: Context,
@@ -220,21 +231,118 @@ class UploadBatchContinuationTest {
         assertEquals(MediaFileStatus.SYNCED, dao.single(2).status)
         assertEquals(MediaFileStatus.PENDING_UPLOAD, dao.single(3).status)
         assertEquals(28, dao.countByStatus(MediaFileStatus.PENDING_UPLOAD))
+        // HTTP-ошибка немедленно не повторяется.
+        assertEquals(listOf(1L, 2L, 3L), uploads.toList())
     }
 
     @Test
     fun permanentErrorOfOneFileDoesNotStopOthers() = runBlocking {
         (1L..5L).forEach { pendingUpload(it) }
+        uploadCodes[2] = 400
         uploadCodes[3] = 409
+        uploadCodes[4] = 413
 
         scheduler.enqueueUpload()
         val run = runNextUploader()
 
         assertEquals(WorkInfo.State.SUCCEEDED, run.state)
-        assertEquals(MediaFileStatus.FAILED, dao.single(3).status)
+        assertEquals(FailureReason.HTTP_400, dao.single(2).failureReason)
         assertEquals(FailureReason.HTTP_409, dao.single(3).failureReason)
-        assertEquals(4, dao.countByStatus(MediaFileStatus.SYNCED))
+        assertEquals(FailureReason.HTTP_413, dao.single(4).failureReason)
+        assertEquals(3, dao.countByStatus(MediaFileStatus.FAILED))
+        assertEquals(2, dao.countByStatus(MediaFileStatus.SYNCED))
+        // Каждый файл отправлен ровно один раз: ни успех, ни HTTP-ошибка не повторяются.
+        assertEquals((1L..5L).toList(), uploads.toList())
         assertEquals(1, uploaderRuns().size)
+    }
+
+    @Test
+    fun singleLostResponseIsResentImmediatelyWithoutWorkManagerRetry() = runBlocking {
+        (1L..5L).forEach { pendingUpload(it) }
+        lostResponses[3] = 1
+
+        scheduler.enqueueUpload()
+        val run = runNextUploader()
+
+        assertEquals(WorkInfo.State.SUCCEEDED, run.state)
+        assertEquals(1, uploaderRuns().size)
+        assertEquals(5, dao.countByStatus(MediaFileStatus.SYNCED))
+        assertEquals(listOf(1L, 2L, 3L, 3L, 4L, 5L), uploads.toList())
+    }
+
+    @Test
+    fun resendAfterLostResponseIsRecognizedAsAlreadyStoredFile() = runBlocking {
+        pendingUpload(1)
+        lostResponses[1] = 1
+
+        scheduler.enqueueUpload()
+        runNextUploader()
+
+        // Первая отправка уже сохранила файл; повтор получил тот же FileItem, второй файл не создан.
+        assertEquals(1, serverIds.size)
+        assertEquals(serverIds[1L], dao.single(1).serverFileId)
+        assertEquals(MediaFileStatus.SYNCED, dao.single(1).status)
+        // Тело повтора заново прочитано из content://uri целиком.
+        assertEquals(listOf(1L to "photo-1", 1L to "photo-1"), uploadedContents.toList())
+    }
+
+    @Test
+    fun secondLostResponseKeepsRetryPolicy() = runBlocking {
+        (1L..5L).forEach { pendingUpload(it) }
+        lostResponses[3] = 2
+
+        scheduler.enqueueUpload()
+        val run = runNextUploader(expectFinished = false)
+
+        // Повтор только один; дальше прежний Result.retry() без продолжения.
+        assertEquals(WorkInfo.State.ENQUEUED, run.state)
+        assertEquals(1, run.runAttemptCount)
+        assertEquals(listOf(run.id), uploaderRuns().map { it.id })
+        assertEquals(listOf(1L, 2L, 3L, 3L), uploads.toList())
+        assertEquals(MediaFileStatus.PENDING_UPLOAD, dao.single(3).status)
+        assertEquals(2, dao.countByStatus(MediaFileStatus.SYNCED))
+    }
+
+    @Test
+    fun exhaustedBudgetDoesNotStartResend() = runBlocking {
+        (1L..2L).forEach { pendingUpload(it) }
+        lostResponses[1] = 1
+        onUpload = { id -> if (id == 1L) clock.addAndGet(BUDGET) }
+
+        scheduler.enqueueUpload()
+        val run = runNextUploader(expectFinished = false)
+
+        assertEquals(WorkInfo.State.ENQUEUED, run.state)
+        assertEquals(listOf(1L), uploads.toList())
+        assertEquals(2, dao.countByStatus(MediaFileStatus.PENDING_UPLOAD))
+    }
+
+    @Test
+    fun stoppedWorkDoesNotStartResend() = runBlocking {
+        (1L..2L).forEach { pendingUpload(it) }
+        lostResponses[1] = 1
+        val sending = CountDownLatch(1)
+        val stopped = CountDownLatch(1)
+        onUpload = { id ->
+            if (id == 1L) {
+                sending.countDown()
+                stopped.await(10, TimeUnit.SECONDS)
+            }
+        }
+
+        baseUrlProvider.reload()
+        // Остановка Worker отменяет корутину прогона, пока первая отправка ещё ждёт ответа.
+        val run = launch(Dispatchers.Default) { uploadRepository.uploadPendingCameraFiles() }
+        assertTrue(sending.await(10, TimeUnit.SECONDS))
+        run.cancel()
+        stopped.countDown()
+        run.join()
+
+        assertTrue(run.isCancelled)
+        assertEquals(listOf(1L), uploads.toList())
+        // Строку вернёт в очередь начало следующего прогона upload.
+        assertEquals(MediaFileStatus.UPLOADING, dao.single(1).status)
+        assertEquals(MediaFileStatus.PENDING_UPLOAD, dao.single(2).status)
     }
 
     @Test
@@ -374,16 +482,33 @@ class UploadBatchContinuationTest {
                 json("""{"existing":${existing.toJson()},"missing":${missing.toJson()}}""")
             }
             "/api/v1/files/upload" -> {
-                val id = Regex("IMG_(\\d+)\\.jpg").find(request.body.readUtf8())!!.groupValues[1].toLong()
+                val body = request.body.readUtf8()
+                val id = Regex("IMG_(\\d+)\\.jpg").find(body)!!.groupValues[1].toLong()
                 uploads += id
+                uploadedContents += id to filePartContent(body)
                 onUpload(id)
                 clock.addAndGet(uploadCostMs)
                 val code = uploadCodes[id]
-                if (code != null) MockResponse().setResponseCode(code)
-                else json("""{"id":${nextServerId.getAndIncrement()}}""")
+                if (code != null) return MockResponse().setResponseCode(code)
+                val serverId = serverIds.computeIfAbsent(id) { nextServerId.getAndIncrement().toLong() }
+                val response = """{"id":$serverId}"""
+                if (lostResponses.computeIfPresent(id) { _, left -> left - 1 }?.let { it >= 0 } == true) {
+                    // Файл сохранён, но клиент не получает последний байт ответа: соединение закрыто раньше.
+                    json(response.dropLast(1))
+                        .setHeader("Content-Length", response.length)
+                        .setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
+                } else json(response)
             }
             else -> MockResponse().setResponseCode(404)
         }
+    }
+
+    /** Содержимое части file multipart-запроса. */
+    private fun filePartContent(body: String): String {
+        val headers = Regex("filename=\"[^\"]+\"\r\nContent-Type: [^\r]+\r\nContent-Length: (\\d+)\r\n\r\n")
+        val match = headers.find(body)!!
+        val start = match.range.last + 1
+        return body.substring(start, start + match.groupValues[1].toInt())
     }
 
     private fun List<String>.toJson() = joinToString(",", "[", "]") { "\"$it\"" }

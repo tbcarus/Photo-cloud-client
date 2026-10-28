@@ -1,7 +1,10 @@
 package ru.tbcarus.photo_cloud_client.media
 
 import android.net.Uri
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -9,6 +12,8 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import retrofit2.Response
+import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import java.io.FileNotFoundException
@@ -36,6 +41,10 @@ class FileUploadRepository @Inject constructor(
 ) {
 
     private val mutex = Mutex()
+
+    private companion object {
+        const val TAG = "FileUploadRepository"
+    }
 
     /**
      * Грузит PENDING_UPLOAD-фото в CAMERA партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
@@ -113,11 +122,11 @@ class FileUploadRepository @Inject constructor(
                 progressed = true
                 attempted++
 
-                val filePart = createFilePart(file)
                 val response = try {
-                    apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
+                    sendWithSingleRetry(file, folderIdPart, budget)
                 } catch (e: IOException) {
-                    // Сетевая ошибка/timeout/обрыв тела → transient, возвращаем файл в очередь; повтор — WorkManager.
+                    // Повтор не удался или не начат → transient, возвращаем файл в очередь; повтор — WorkManager.
+                    Log.w(TAG, "Сетевая ошибка upload, файл возвращён в очередь, mediaStoreId=${file.mediaStoreId}", e)
                     mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                     leftPending++
                     return UploadOutcome.Error(
@@ -171,6 +180,29 @@ class FileUploadRepository @Inject constructor(
         }
 
         return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, leftPending))
+    }
+
+    /**
+     * Отправка файла с одной немедленной повторной попыткой при IOException: ответ мог потеряться уже после того,
+     * как Server сохранил файл (обрыв при штатном закрытии соединения). Повтор безопасен — Server идемпотентен
+     * по checksum, тело заново читается из content://uri. HTTP-ответы не повторяются. Повтор не начинается,
+     * если Worker остановлен или бюджет исчерпан; второй IOException уходит вызывающему.
+     */
+    private suspend fun sendWithSingleRetry(
+        file: MediaFile,
+        folderIdPart: RequestBody?,
+        budget: WorkBudget
+    ): Response<FileItemDto> {
+        val filePart = createFilePart(file)
+        try {
+            return apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
+        } catch (e: IOException) {
+            Log.w(TAG, "Сетевая ошибка upload, mediaStoreId=${file.mediaStoreId}: ${e.javaClass.name}: ${e.message}")
+            currentCoroutineContext().ensureActive()
+            if (budget.isExhausted()) throw e
+        }
+        // Retrofit Call одноразовый — для повтора нужен новый.
+        return apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
     }
 
     /**
