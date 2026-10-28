@@ -7,6 +7,7 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -37,6 +38,9 @@ class SyncScheduler @Inject constructor(
         const val UPLOAD_PERIODIC_WORK_NAME = "photo_upload_periodic"
         const val MEDIA_TRIGGER_WORK_NAME = "photo_media_trigger"
 
+        /** Тег разовых запросов: по нему Worker отличает разовый прогон от периодического. */
+        const val ONE_TIME_TAG = "one_time"
+
         private const val PERIODIC_INTERVAL_MINUTES = 30L
 
         // Серия событий одной съёмки объединяется: запуск после 3 с тишины, но не позже 30 с от первого.
@@ -48,9 +52,26 @@ class SyncScheduler @Inject constructor(
 
     /** Разовый прогон Поставщика. KEEP не запускает второй параллельно уже ожидающему или выполняющемуся. */
     fun enqueueProvider() {
-        val request = OneTimeWorkRequestBuilder<ProviderWorker>().build()
-        workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, ExistingWorkPolicy.KEEP, providerRequest())
     }
+
+    /**
+     * Продолжение Поставщика после прогона, остановленного бюджетом времени (A8.1).
+     *
+     * Из разового прогона — APPEND_OR_REPLACE к той же цепочке: следующий запуск зависит от текущего
+     * и начнётся только после его успешного завершения; текущий не отменяется. Внешние KEEP-сигналы
+     * в это время видят RUNNING/ENQUEUED и ничего не добавляют.
+     * Из периодического — обычный KEEP: идущая разовая цепочка продолжит себя сама, иначе ставится новая.
+     * Возвращённая [Operation] подтверждает запись в базу WorkManager, не немедленный запуск.
+     */
+    fun continueProvider(fromOneTimeRun: Boolean): Operation {
+        val policy = if (fromOneTimeRun) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP
+        return workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, policy, providerRequest())
+    }
+
+    private fun providerRequest() = OneTimeWorkRequestBuilder<ProviderWorker>()
+        .addTag(ONE_TIME_TAG)
+        .build()
 
     /**
      * Периодический Поставщик: 30 минут, без требования сети.

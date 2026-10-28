@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import androidx.work.await
 import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -12,7 +13,8 @@ import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Поставщик (A4.1): вся локальная обработка — restore CHECKSUM_IO → scan DCIM → SHA-256.
- * Доводит записи до CHECKSUM_READY или FAILED и сигналит Загрузчику, если в Room есть работа для него.
+ * Доводит записи до CHECKSUM_READY или FAILED и сигналит Загрузчику после каждой готовой партии.
+ * Хеширование ограничено бюджетом времени прогона; остаток очереди продолжает следующий прогон (A8.1).
  *
  * Не зависит от сети, адреса Server, токенов и состояния Загрузчика; продолжает работать после logout.
  */
@@ -23,16 +25,27 @@ class ProviderWorker @AssistedInject constructor(
     private val mediaFileRepository: MediaFileRepository,
     private val checksumRepository: ChecksumRepository,
     private val syncStatusStore: SyncStatusStore,
-    private val periodicSyncCoordinator: PeriodicSyncCoordinator
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator,
+    private val syncScheduler: SyncScheduler,
+    private val clock: SyncClock
 ) : CoroutineWorker(appContext, params) {
 
     private companion object {
         const val TAG = "ProviderWorker"
     }
 
+    /** KEEP: работающий или ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room. */
+    private suspend fun signalUploader() {
+        if (mediaFileRepository.hasReadyForUpload()) {
+            periodicSyncCoordinator.requestUpload()
+        }
+    }
+
     override suspend fun doWork(): Result {
+        // Бюджет отсчитывается от начала прогона: scan тоже его расходует.
+        val budget = WorkBudget(clock)
         return try {
-            runProvider()
+            runProvider(budget)
         } catch (e: CancellationException) {
             // Остановка worker системой: промежуточные результаты уже в Room, прерванное восстановит следующий прогон.
             throw e
@@ -44,7 +57,7 @@ class ProviderWorker @AssistedInject constructor(
         }
     }
 
-    private suspend fun runProvider(): Result {
+    private suspend fun runProvider(budget: WorkBudget): Result {
         // Фоновый worker не может запросить runtime-разрешение — это не crash и не retry.
         if (!applicationContext.hasMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — локальная обработка пропущена")
@@ -69,7 +82,7 @@ class ProviderWorker @AssistedInject constructor(
         }
 
         // HASHING → PENDING восстанавливается в начале стадии; хэшируются только PENDING-записи.
-        val checksum = when (val outcome = checksumRepository.computePendingChecksums()) {
+        val checksum = when (val outcome = checksumRepository.computePendingChecksums(budget) { signalUploader() }) {
             is ChecksumOutcome.Success -> outcome.result
             is ChecksumOutcome.PermissionDenied -> return Result.success()
             is ChecksumOutcome.Error -> {
@@ -79,8 +92,14 @@ class ProviderWorker @AssistedInject constructor(
         }
 
         // Сигнал по состоянию Room, а не по «новым в этом прогоне»: потерянный ранее сигнал восстанавливается.
-        if (mediaFileRepository.hasReadyForUpload()) {
-            periodicSyncCoordinator.requestUpload()
+        signalUploader()
+
+        // Бюджет исчерпан, а очередь осталась — следующий прогон продолжит её по состоянию Room.
+        // Без прогресса продолжение не ставится: остаток подхватят события и periodic, бесконечной цепочки нет.
+        // Регистрация подтверждается записью в базу WorkManager до возврата success; её сбой — ошибка прогона (retry).
+        if (checksum.processed > 0 && checksumRepository.hasPending()) {
+            syncScheduler.continueProvider(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
+            Log.i(TAG, "Очередь хеширования не исчерпана — зарегистрировано продолжение Поставщика")
         }
 
         return Result.success(

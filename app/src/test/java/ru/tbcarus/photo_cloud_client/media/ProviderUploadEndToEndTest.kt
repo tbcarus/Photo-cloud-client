@@ -128,7 +128,8 @@ class ProviderUploadEndToEndTest {
                 workerParameters: WorkerParameters
             ): ListenableWorker? = when (workerClassName) {
                 ProviderWorker::class.java.name -> ProviderWorker(
-                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator
+                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator,
+                    scheduler, SyncClock.SYSTEM
                 )
                 UploadWorker::class.java.name -> UploadWorker(
                     appContext, workerParameters, precheckRepository, uploadRepository, serverRepository,

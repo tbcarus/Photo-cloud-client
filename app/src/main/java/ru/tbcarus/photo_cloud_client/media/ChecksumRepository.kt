@@ -24,7 +24,6 @@ class ChecksumRepository @Inject constructor(
     private val mutex = Mutex()
 
     private companion object {
-        const val CHECKSUM_BATCH_SIZE = 100
         const val TAG = "ChecksumRepository"
 
         // Stage 5K: ограниченный auto-retry для временных (CHECKSUM_IO) ошибок.
@@ -55,11 +54,16 @@ class ChecksumRepository @Inject constructor(
     }
 
     /**
-     * Вычисляет SHA-256 для всех записей со статусом PENDING.
+     * Вычисляет SHA-256 записей со статусом PENDING партиями FIFO по mediaStoreId (A8.1).
      * Запускает весь прогон под Mutex — исключает два параллельных запуска.
-     * Прогресс не публикуется; per-file ошибки фиксируются статусом FAILED в БД.
+     * Перед каждым файлом проверяет [budget]: исчерпан — следующий файл не начинается, начатый дочитывается.
+     * После партии, давшей хотя бы один CHECKSUM_READY, вызывает [onBatchReady] — сигнал Загрузчику
+     * без ожидания всей очереди. Per-file ошибки фиксируются статусом FAILED в БД.
      */
-    suspend fun computePendingChecksums(): ChecksumOutcome {
+    suspend fun computePendingChecksums(
+        budget: WorkBudget = WorkBudget.UNLIMITED,
+        onBatchReady: suspend () -> Unit = {}
+    ): ChecksumOutcome {
         if (!context.hasMediaReadPermission()) {
             return ChecksumOutcome.PermissionDenied
         }
@@ -67,7 +71,7 @@ class ChecksumRepository @Inject constructor(
         return try {
             withContext(Dispatchers.IO) {
                 mutex.withLock {
-                    runPipeline()
+                    runPipeline(budget, onBatchReady)
                 }
             }
         } catch (e: CancellationException) {
@@ -78,7 +82,10 @@ class ChecksumRepository @Inject constructor(
         }
     }
 
-    private suspend fun runPipeline(): ChecksumOutcome.Success {
+    /** Остались ли записи для хеширования — основание продолжить работу следующим прогоном. */
+    suspend fun hasPending(): Boolean = mediaFileDao.countByStatus(MediaFileStatus.PENDING) > 0
+
+    private suspend fun runPipeline(budget: WorkBudget, onBatchReady: suspend () -> Unit): ChecksumOutcome.Success {
         // Возвращаем зависшие HASHING-записи после возможного падения приложения.
         mediaFileDao.resetStatus(
             sourceStatus = MediaFileStatus.HASHING,
@@ -89,12 +96,18 @@ class ChecksumRepository @Inject constructor(
         var succeeded = 0
         var failed    = 0
 
-        while (true) {
-            val batch = mediaFileDao.getByStatusOnce(MediaFileStatus.PENDING, CHECKSUM_BATCH_SIZE)
+        var budgetExhausted = false
+        while (!budgetExhausted) {
+            val batch = mediaFileDao.getByStatusInIdOrder(MediaFileStatus.PENDING, SyncConfig.PROVIDER_BATCH_SIZE)
             if (batch.isEmpty()) break
 
             var progressed = false
+            val succeededBefore = succeeded
             for (file in batch) {
+                if (budget.isExhausted()) {
+                    budgetExhausted = true
+                    break
+                }
                 // Строку мог изменить или удалить параллельный scan — она вернётся в следующей выборке.
                 if (mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.PENDING, MediaFileStatus.HASHING) == 0) {
                     continue
@@ -139,6 +152,8 @@ class ChecksumRepository @Inject constructor(
                     failed++
                 }
             }
+            // Готовые записи уже в Room — Загрузчик может начинать, пока хешируются следующие.
+            if (succeeded > succeededBefore) onBatchReady()
             // Ни одна строка не взята в работу (все изменились параллельно) — остаток обработает следующий прогон.
             if (!progressed) break
         }

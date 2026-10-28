@@ -37,7 +37,8 @@ class MediaFileRepository @Inject constructor(
      * - удаляет stale-записи (файлы, которых больше нет в MediaStore) — только по полному снимку;
      *   массовое исчезновение удаляется, только если его подтверждает повторный снимок.
      *
-     * // TODO: при усложнении sync-логики обернуть insert/update/delete в Room transaction.
+     * Снимок применяется порциями по [SyncConfig.SCAN_WRITE_BATCH_SIZE] — каждая одной транзакцией, без общей
+     * транзакции на весь архив. Удаление выполняется только после применения всех порций.
      */
     suspend fun scanImages(): ScanOutcome = mutex.withLock {
         try {
@@ -57,22 +58,12 @@ class MediaFileRepository @Inject constructor(
     suspend fun hasReadyForUpload(): Boolean = dao.countReadyForUpload() > 0
 
     private suspend fun applyToRoom(images: List<MediaStoreImage>, isComplete: Boolean): ScanOutcome.Success {
-        // 1. Вставляем новые записи; существующие (по mediaStoreId) игнорируются
-        dao.insertAll(images.map { it.toMediaFile() })
-
-        // 2. Обновляем MediaStore-поля для всех записей. Изменившийся файл (size/lastModified)
-        // в том же UPDATE возвращается в PENDING из любого статуса; у неизменённого статус и checksum сохраняются.
-        images.forEach { image ->
-            dao.applyScannedMetadata(
-                mediaStoreId = image.mediaStoreId,
-                displayName  = image.displayName,
-                relativePath = image.relativePath,
-                mimeType     = image.mimeType,
-                size         = image.size,
-                createdAt    = image.createdAt,
-                lastModified = image.lastModified,
-                uri          = image.uri
-            )
+        // 1–2. Порция за порцией: новые записи вставляются (существующие по mediaStoreId игнорируются),
+        // у всех обновляются MediaStore-поля. Изменившийся файл (size/lastModified) в том же UPDATE
+        // возвращается в PENDING из любого статуса; у неизменённого статус и checksum сохраняются.
+        // Ошибка порции прерывает scan до удаления — отсутствующие строки не трогаются.
+        images.chunked(SyncConfig.SCAN_WRITE_BATCH_SIZE).forEach { chunk ->
+            dao.applyScanBatch(chunk.map { it.toMediaFile() })
         }
 
         // 3. Stale detection: удаляем из Room файлы, которых больше нет в MediaStore.

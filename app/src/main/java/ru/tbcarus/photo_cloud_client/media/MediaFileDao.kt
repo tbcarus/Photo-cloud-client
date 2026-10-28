@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -169,6 +170,28 @@ interface MediaFileDao {
         uri: String
     )
 
+    /**
+     * Применяет одну порцию снимка MediaStore одной транзакцией (A8.1): новые строки вставляются,
+     * у известных обновляются сведения по правилам [applyScannedMetadata]. Каждая строка самодостаточна,
+     * поэтому прерывание между порциями оставляет согласованный индекс, а следующий scan дописывает остальное.
+     */
+    @Transaction
+    suspend fun applyScanBatch(files: List<MediaFile>) {
+        insertAll(files)
+        files.forEach { file ->
+            applyScannedMetadata(
+                mediaStoreId = file.mediaStoreId,
+                displayName  = file.displayName,
+                relativePath = file.relativePath,
+                mimeType     = file.mimeType,
+                size         = file.size,
+                createdAt    = file.createdAt,
+                lastModified = file.lastModified,
+                uri          = file.uri
+            )
+        }
+    }
+
     // Успешный upload → SYNCED, чистим failure-метаданные (Stage 5K).
     // Только для той же UPLOADING-версии: изменённая во время отправки фотография остаётся в работе Поставщика.
     @Query("""
@@ -218,6 +241,16 @@ interface MediaFileDao {
      */
     @Query("SELECT * FROM media_files WHERE status = :status ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getByStatusOnce(status: MediaFileStatus, limit: Int): List<MediaFile>
+
+    /**
+     * Партия строк с заданным статусом в порядке FIFO по первичному ключу (A8.1). Выборка идёт по ключу
+     * и останавливается на [limit], без сортировки всей таблицы; порядок устойчив между прогонами.
+     */
+    @Query("SELECT * FROM media_files WHERE status = :status ORDER BY mediaStoreId ASC LIMIT :limit")
+    suspend fun getByStatusInIdOrder(status: MediaFileStatus, limit: Int): List<MediaFile>
+
+    @Query("SELECT COUNT(*) FROM media_files WHERE status = :status")
+    suspend fun countByStatus(status: MediaFileStatus): Int
 
     /**
      * Массово переводит все записи из [sourceStatus] в [targetStatus].

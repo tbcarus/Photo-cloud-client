@@ -285,7 +285,9 @@ class ProviderWorkerTest {
                 MediaFileRepository(dao, MediaStoreRepository(appContext)),
                 ChecksumRepository(dao, MediaStreamOpener(appContext), appContext),
                 syncStatusStore,
-                coordinator
+                coordinator,
+                scheduler,
+                SyncClock.SYSTEM
             )
         }
         return TestListenableWorkerBuilder<ProviderWorker>(context).setWorkerFactory(factory).build().doWork()

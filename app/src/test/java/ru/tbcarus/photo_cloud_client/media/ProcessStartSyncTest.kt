@@ -76,7 +76,8 @@ class ProcessStartSyncTest {
                 workerParameters: WorkerParameters
             ): ListenableWorker? = when (workerClassName) {
                 ProviderWorker::class.java.name -> ProviderWorker(
-                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator
+                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator,
+                    scheduler, SyncClock.SYSTEM
                 )
                 else -> null // Наблюдатель и Загрузчик здесь не выполняются: их constraints не выполнены.
             }

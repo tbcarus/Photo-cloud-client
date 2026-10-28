@@ -88,7 +88,8 @@ class MediaTriggerWorkerTest {
             ): ListenableWorker? = when (workerClassName) {
                 MediaTriggerWorker::class.java.name -> MediaTriggerWorker(appContext, workerParameters, scheduler)
                 ProviderWorker::class.java.name -> ProviderWorker(
-                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator
+                    appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator,
+                    scheduler, SyncClock.SYSTEM
                 )
                 else -> null // Загрузчик здесь не выполняется: без пары он и не ставится.
             }
