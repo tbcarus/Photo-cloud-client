@@ -37,18 +37,22 @@ class FileUploadRepository @Inject constructor(
 
     private val mutex = Mutex()
 
-    private companion object {
-        const val UPLOAD_BATCH_SIZE = 20
-    }
-
-    /** Грузит все PENDING_UPLOAD-фото в CAMERA. Один прогон одновременно (Mutex). */
-    suspend fun uploadPendingCameraFiles(): UploadOutcome = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            runUpload()
+    /**
+     * Грузит PENDING_UPLOAD-фото в CAMERA партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
+     * Перед каждым файлом проверяет [budget]: исчерпан — новый файл не начинается, начатая отправка
+     * не прерывается; остаток очереди отправит следующий прогон.
+     */
+    suspend fun uploadPendingCameraFiles(budget: WorkBudget = WorkBudget.UNLIMITED): UploadOutcome =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                runUpload(budget)
+            }
         }
-    }
 
-    private suspend fun runUpload(): UploadOutcome {
+    /** Есть ли работа для Загрузчика: CHECKSUM_READY с checksum, PENDING_UPLOAD или UPLOADING. */
+    suspend fun hasQueuedWork(): Boolean = mediaFileDao.countReadyForUpload() > 0
+
+    private suspend fun runUpload(budget: WorkBudget): UploadOutcome {
         // Возвращаем зависшие UPLOADING-записи после возможного падения приложения.
         mediaFileDao.resetStatus(
             sourceStatus = MediaFileStatus.UPLOADING,
@@ -69,12 +73,17 @@ class FileUploadRepository @Inject constructor(
         var failed = 0
         var leftPending = 0
 
-        while (true) {
-            val batch = mediaFileDao.getByStatusOnce(MediaFileStatus.PENDING_UPLOAD, UPLOAD_BATCH_SIZE)
+        var budgetExhausted = false
+        while (!budgetExhausted) {
+            val batch = mediaFileDao.getByStatusInIdOrder(MediaFileStatus.PENDING_UPLOAD, SyncConfig.UPLOAD_BATCH_SIZE)
             if (batch.isEmpty()) break
 
             var progressed = false
             for (file in batch) {
+                if (budget.isExhausted()) {
+                    budgetExhausted = true
+                    break
+                }
                 // Защитно: на 5D грузим только фото.
                 if (!file.mimeType.startsWith("image/")) {
                     if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, FailureReason.NOT_IMAGE) > 0) {

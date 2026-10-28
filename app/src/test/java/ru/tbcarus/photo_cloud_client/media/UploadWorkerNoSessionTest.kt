@@ -164,7 +164,9 @@ class UploadWorkerNoSessionTest {
                 baseUrlProvider,
                 syncStatusStore,
                 storage,
-                coordinator()
+                coordinator(),
+                SyncScheduler(appContext, SyncStatusStore()),
+                SyncClock.SYSTEM
             )
         }
     }

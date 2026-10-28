@@ -100,16 +100,27 @@ class SyncScheduler @Inject constructor(
 
     /** Разовый прогон Загрузчика при подключённой сети; KEEP — как у Поставщика. */
     fun enqueueUpload() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
-        val request = OneTimeWorkRequestBuilder<UploadWorker>()
-            .setConstraints(constraints)
-            .build()
-
-        workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+        workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.KEEP, uploadRequest())
     }
+
+    /**
+     * Продолжение Загрузчика после прогона, остановленного бюджетом времени (A8.2), — по тем же правилам,
+     * что [continueProvider]: из разового прогона APPEND_OR_REPLACE к своей цепочке, из периодического — KEEP.
+     * Продолжению, как и любому разовому Загрузчику, нужна подключённая сеть.
+     */
+    fun continueUpload(fromOneTimeRun: Boolean): Operation {
+        val policy = if (fromOneTimeRun) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP
+        return workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, policy, uploadRequest())
+    }
+
+    private fun uploadRequest() = OneTimeWorkRequestBuilder<UploadWorker>()
+        .setConstraints(
+            Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
+        )
+        .addTag(ONE_TIME_TAG)
+        .build()
 
     /**
      * Периодический Загрузчик: 30 минут, сеть и «батарея не низкая».

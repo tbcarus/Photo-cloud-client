@@ -32,20 +32,21 @@ class ChecksumPrecheckRepository @Inject constructor(
 
     private val mutex = Mutex()
 
-    private companion object {
-        const val PRECHECK_BATCH_SIZE = 500
-    }
-
-    /** Запускает pre-check по папке CAMERA. Один прогон одновременно (Mutex). */
-    suspend fun runCameraPrecheck(): ChecksumPrecheckOutcome = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            when (val folder = folderRepository.resolveCameraFolderId()) {
-                is CameraFolderOutcome.Error -> ChecksumPrecheckOutcome.Error(folder.message)
-                is CameraFolderOutcome.NotCreatedYet -> moveAllReadyToPendingUpload()
-                is CameraFolderOutcome.Success -> runPrecheckForFolder(folder.folderId)
+    /**
+     * Запускает pre-check по папке CAMERA партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
+     * Перед каждым запросом проверяет [budget]: исчерпан — новый запрос не начинается,
+     * оставшиеся CHECKSUM_READY проверит следующий прогон.
+     */
+    suspend fun runCameraPrecheck(budget: WorkBudget = WorkBudget.UNLIMITED): ChecksumPrecheckOutcome =
+        withContext(Dispatchers.IO) {
+            mutex.withLock {
+                when (val folder = folderRepository.resolveCameraFolderId()) {
+                    is CameraFolderOutcome.Error -> ChecksumPrecheckOutcome.Error(folder.message)
+                    is CameraFolderOutcome.NotCreatedYet -> moveAllReadyToPendingUpload()
+                    is CameraFolderOutcome.Success -> runPrecheckForFolder(folder.folderId, budget)
+                }
             }
         }
-    }
 
     /**
      * CAMERA ещё не создана на сервере, значит в целевой папке нет файлов.
@@ -56,7 +57,7 @@ class ChecksumPrecheckRepository @Inject constructor(
         while (true) {
             val batch = mediaFileDao.getByStatusWithChecksumOnce(
                 MediaFileStatus.CHECKSUM_READY,
-                PRECHECK_BATCH_SIZE
+                SyncConfig.PRECHECK_BATCH_SIZE
             )
             if (batch.isEmpty()) break
 
@@ -76,16 +77,16 @@ class ChecksumPrecheckRepository @Inject constructor(
         )
     }
 
-    private suspend fun runPrecheckForFolder(folderId: Long): ChecksumPrecheckOutcome {
+    private suspend fun runPrecheckForFolder(folderId: Long, budget: WorkBudget): ChecksumPrecheckOutcome {
         var existingTotal = 0
         var pendingTotal  = 0
         var unchangedTotal = 0
 
         try {
-            while (true) {
+            while (!budget.isExhausted()) {
                 val batch = mediaFileDao.getByStatusWithChecksumOnce(
                     MediaFileStatus.CHECKSUM_READY,
-                    PRECHECK_BATCH_SIZE
+                    SyncConfig.PRECHECK_BATCH_SIZE
                 )
                 if (batch.isEmpty()) break
 

@@ -109,9 +109,14 @@ class ProviderContinuationMechanismTest {
     @Test
     fun externalKeepSignalsDoNotTouchTheChain() = runBlocking {
         val release = CompletableDeferred<Unit>()
+        val releaseContinuation = CompletableDeferred<Unit>()
         steps += Step {
             registerContinuation()
             release.await()
+            WorkResult.success()
+        }
+        steps += Step {
+            releaseContinuation.await()
             WorkResult.success()
         }
         scheduler.enqueueProvider()
@@ -122,8 +127,12 @@ class ProviderContinuationMechanismTest {
         assertEquals(listOf(WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED), states())
 
         release.complete(Unit)
-        // Пока продолжение ENQUEUED/RUNNING, KEEP тоже ничего не добавляет.
+        // Пока продолжение выполняется, KEEP тоже ничего не добавляет.
+        awaitUntil { states() == listOf(WorkInfo.State.SUCCEEDED, WorkInfo.State.RUNNING) }
         repeat(3) { scheduler.enqueueProvider() }
+        assertEquals(listOf(WorkInfo.State.SUCCEEDED, WorkInfo.State.RUNNING), states())
+
+        releaseContinuation.complete(Unit)
         awaitUntil { allFinished() }
 
         assertEquals(2, runs.size)

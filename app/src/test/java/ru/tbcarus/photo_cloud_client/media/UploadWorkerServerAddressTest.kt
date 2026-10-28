@@ -151,7 +151,9 @@ class UploadWorkerServerAddressTest {
                 syncStatusStore,
                 // Сессия есть: эти тесты проверяют адрес, а не остановку фона без токенов.
                 InMemoryTokenStorage(Tokens("access", "refresh")),
-                mock(PeriodicSyncCoordinator::class.java)
+                mock(PeriodicSyncCoordinator::class.java),
+                SyncScheduler(appContext, SyncStatusStore()),
+                SyncClock.SYSTEM
             )
         }
         return TestListenableWorkerBuilder<UploadWorker>(context).setWorkerFactory(factory).build()

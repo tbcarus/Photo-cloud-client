@@ -133,7 +133,7 @@ class ProviderUploadEndToEndTest {
                 )
                 UploadWorker::class.java.name -> UploadWorker(
                     appContext, workerParameters, precheckRepository, uploadRepository, serverRepository,
-                    baseUrlProvider, syncStatusStore, storage, coordinator
+                    baseUrlProvider, syncStatusStore, storage, coordinator, scheduler, SyncClock.SYSTEM
                 )
                 else -> null
             }

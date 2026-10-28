@@ -236,14 +236,8 @@ interface MediaFileDao {
     suspend fun deleteByMediaStoreIds(ids: List<Long>)
 
     /**
-     * Разовый snapshot записей с заданным статусом (не Flow).
-     * Используется для batch-обработки checksum без загрузки всей библиотеки в память.
-     */
-    @Query("SELECT * FROM media_files WHERE status = :status ORDER BY createdAt DESC LIMIT :limit")
-    suspend fun getByStatusOnce(status: MediaFileStatus, limit: Int): List<MediaFile>
-
-    /**
-     * Партия строк с заданным статусом в порядке FIFO по первичному ключу (A8.1). Выборка идёт по ключу
+     * Партия строк с заданным статусом в порядке FIFO по первичному ключу (A8.1): очереди хеширования
+     * и upload. Выборка идёт по ключу
      * и останавливается на [limit], без сортировки всей таблицы; порядок устойчив между прогонами.
      */
     @Query("SELECT * FROM media_files WHERE status = :status ORDER BY mediaStoreId ASC LIMIT :limit")
@@ -263,14 +257,14 @@ interface MediaFileDao {
     suspend fun getLatestCreatedAt(): Long?
 
     /**
-     * Snapshot записей с заданным статусом и непустым checksum.
+     * Snapshot записей с заданным статусом и непустым checksum, FIFO по mediaStoreId (A8.2).
      * Используется для batch pre-check: берём только готовые к запросу на сервер.
      */
     @Query("""
         SELECT * FROM media_files
         WHERE status = :status
           AND checksum IS NOT NULL
-        ORDER BY createdAt DESC
+        ORDER BY mediaStoreId ASC
         LIMIT :limit
     """)
     suspend fun getByStatusWithChecksumOnce(

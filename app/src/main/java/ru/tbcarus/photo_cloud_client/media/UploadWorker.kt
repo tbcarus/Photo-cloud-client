@@ -6,6 +6,7 @@ import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.WorkerParameters
+import androidx.work.await
 import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -16,6 +17,7 @@ import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Загрузчик (A4.1): серверная обработка подготовленной Поставщиком очереди — pre-check → upload.
+ * Прогон ограничен бюджетом времени; остаток очереди продолжает следующий прогон (A8.2).
  * Не сканирует MediaStore и не вычисляет SHA-256. При отсутствии сессии, сервера или разрешения
  * очередь остаётся в Room без изменения статусов.
  */
@@ -29,7 +31,9 @@ class UploadWorker @AssistedInject constructor(
     private val baseUrlProvider: BaseUrlProvider,
     private val syncStatusStore: SyncStatusStore,
     private val tokenStorage: TokenStorage,
-    private val periodicSyncCoordinator: PeriodicSyncCoordinator
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator,
+    private val syncScheduler: SyncScheduler,
+    private val clock: SyncClock
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -40,8 +44,10 @@ class UploadWorker @AssistedInject constructor(
     }
 
     override suspend fun doWork(): Result {
+        // Бюджет отсчитывается от начала прогона: ping, pre-check и upload расходуют его вместе.
+        val budget = WorkBudget(clock)
         return try {
-            runUpload()
+            runUpload(budget)
         } catch (e: CancellationException) {
             // Остановка worker системой: UPLOADING вернётся в PENDING_UPLOAD при следующем прогоне.
             throw e
@@ -53,7 +59,7 @@ class UploadWorker @AssistedInject constructor(
         }
     }
 
-    private suspend fun runUpload(): Result {
+    private suspend fun runUpload(budget: WorkBudget): Result {
         // Без пары авторизованные стадии гарантированно получат 401: до сетевых запросов останавливаем фон и не просим retry.
         if (tokenStorage.getTokens() == null) {
             Log.w(TAG, "Нет сессии — фоновая загрузка остановлена до входа")
@@ -83,7 +89,7 @@ class UploadWorker @AssistedInject constructor(
         }
 
         // Pre-check: CHECKSUM_READY → SYNCED (existing) или PENDING_UPLOAD (missing).
-        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck()) {
+        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(budget)) {
             is ChecksumPrecheckOutcome.Success -> outcome.result
             is ChecksumPrecheckOutcome.Error -> {
                 syncStatusStore.record(SyncStatus.ERROR)
@@ -93,9 +99,13 @@ class UploadWorker @AssistedInject constructor(
 
         // Upload: UPLOADING → PENDING_UPLOAD восстанавливается в начале стадии.
         // FAILED-записи считаем терминальными для текущего этапа.
+        // Бюджет исчерпан на pre-check — upload в этом прогоне не начинается: стадии не чередуются.
         val upload: UploadResult?
         val retryNeeded: Boolean
-        when (val outcome = fileUploadRepository.uploadPendingCameraFiles()) {
+        if (budget.isExhausted()) {
+            upload = null
+            retryNeeded = false
+        } else when (val outcome = fileUploadRepository.uploadPendingCameraFiles(budget)) {
             is UploadOutcome.Success -> {
                 upload = outcome.result
                 // Осталась очередь из-за transient-ошибки → просим повтор.
@@ -108,14 +118,23 @@ class UploadWorker @AssistedInject constructor(
             }
         }
 
-        return if (retryNeeded) {
+        if (retryNeeded) {
             // Осталась очередь / transient error на upload — WorkManager повторит.
+            // Политика ошибок важнее продолжения: штатное продолжение здесь не регистрируется.
             syncStatusStore.record(SyncStatus.RETRY_SCHEDULED)
-            Result.retry()
-        } else {
-            syncStatusStore.record(SyncStatus.SUCCESS)
-            Result.success(buildOutput(precheck, upload))
+            return Result.retry()
         }
+
+        // Очередь осталась (бюджет исчерпан или Поставщик добавил строки) — следующий прогон продолжит её
+        // по состоянию Room. Без прогресса продолжение не ставится: остаток подхватят сигналы и periodic.
+        // Регистрация подтверждается записью в базу WorkManager до возврата success; её сбой — ошибка прогона (retry).
+        val progress = precheck.existing + precheck.pendingUpload + (upload?.attempted ?: 0)
+        if (progress > 0 && fileUploadRepository.hasQueuedWork()) {
+            syncScheduler.continueUpload(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
+            Log.i(TAG, "Очередь Загрузчика не исчерпана — зарегистрировано продолжение")
+        }
+        syncStatusStore.record(SyncStatus.SUCCESS)
+        return Result.success(buildOutput(precheck, upload))
     }
 
     /** Минимальная сводка по стадиям — для логов/диагностики через outputData. */

@@ -240,7 +240,9 @@ class UploadWorkerQueueTest {
                 baseUrlProvider,
                 syncStatusStore,
                 InMemoryTokenStorage(Tokens("access", "refresh")),
-                mock(PeriodicSyncCoordinator::class.java)
+                mock(PeriodicSyncCoordinator::class.java),
+                SyncScheduler(appContext, SyncStatusStore()),
+                SyncClock.SYSTEM
             )
         }
         return TestListenableWorkerBuilder<UploadWorker>(context).setWorkerFactory(factory).build().doWork()
