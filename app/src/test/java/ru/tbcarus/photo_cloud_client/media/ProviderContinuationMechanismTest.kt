@@ -82,7 +82,7 @@ class ProviderContinuationMechanismTest {
             context,
             Configuration.Builder().setExecutor(SynchronousExecutor()).setWorkerFactory(factory).build()
         )
-        scheduler = SyncScheduler(context, SyncStatusStore())
+        scheduler = SyncScheduler(context)
     }
 
     @Test

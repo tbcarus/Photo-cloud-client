@@ -107,14 +107,14 @@ class ProviderUploadEndToEndTest {
         val client = OkHttpClient()
         val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
         val folderRepository = FolderRepository(apiServiceFactory)
-        val syncStatusStore = SyncStatusStore()
+        val syncStatusStore = testSyncStatusStore()
         // Общие экземпляры, как @Singleton в приложении: Mutex стадий действуют на все задачи.
         mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
         val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
         val precheckRepository = ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository)
         val uploadRepository = FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(context))
         val serverRepository = ServerRepository(apiServiceFactory)
-        scheduler = SyncScheduler(context, syncStatusStore)
+        scheduler = SyncScheduler(context)
         coordinator = PeriodicSyncCoordinator(
             context,
             AuthRepository(storage, baseUrlProvider, apiServiceFactory),

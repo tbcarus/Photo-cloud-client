@@ -13,6 +13,7 @@ import androidx.work.WorkerParameters
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -23,6 +24,8 @@ import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -72,6 +75,7 @@ class UploadBatchContinuationTest {
     private lateinit var scheduler: SyncScheduler
     private lateinit var uploadRepository: FileUploadRepository
     private lateinit var baseUrlProvider: BaseUrlProvider
+    private lateinit var syncStatusStore: SyncStatusStore
     private val dao get() = db.mediaFileDao()
     private val workManager get() = WorkManager.getInstance(context)
     private val clock = AtomicLong()
@@ -108,8 +112,8 @@ class UploadBatchContinuationTest {
         val serverPreferences = ServerPreferences(context)
         runBlocking { serverPreferences.saveConnection("127.0.0.1", server.port.toString()) }
 
-        val syncStatusStore = SyncStatusStore()
-        scheduler = SyncScheduler(context, syncStatusStore)
+        syncStatusStore = testSyncStatusStore()
+        scheduler = SyncScheduler(context)
         baseUrlProvider = BaseUrlProvider(serverPreferences)
         val client = OkHttpClient()
         val api = ApiServiceFactory(baseUrlProvider, client, client, client)
@@ -180,6 +184,17 @@ class UploadBatchContinuationTest {
         assertEquals(2, dao.countByStatus(MediaFileStatus.PENDING_UPLOAD))
         assertEquals(500, dao.countByStatus(MediaFileStatus.CHECKSUM_READY))
         assertEquals(1, pendingUploaderRuns().size)
+        // Worker завершился успешно, но очередь осталась: это ожидание, а не «всё сохранено».
+        val results = syncStatusStore.observeRunResults().first()
+        assertNull(results.uploaderProblem)
+        // Pre-check без upload — файлы не передавались, время отправки не записано.
+        assertNull(results.lastUploadAt)
+        val state = backupStateOf(
+            dao.observeCounters().first(), SyncActivity(), hasMediaAccess = true, isSignedIn = true,
+            hasServerAddress = true, results = results
+        )
+        assertEquals(BackupPhase.WAITING, state.phase)
+        assertEquals(502, state.counters.toUpload)
 
         val second = runNextUploader()
 
@@ -202,6 +217,8 @@ class UploadBatchContinuationTest {
         while (true) {
             runNextUploader()
             syncedAfterRun += dao.countByStatus(MediaFileStatus.SYNCED)
+            // Прогон, остановленный бюджетом после отправок, фиксирует время отправки.
+            assertNotNull(syncStatusStore.observeRunResults().first().lastUploadAt)
             maxUnfinished = maxOf(maxUnfinished, uploaderRuns().count { !it.state.isFinished })
             if (pendingUploaderRuns().isEmpty()) break
         }
@@ -233,6 +250,23 @@ class UploadBatchContinuationTest {
         assertEquals(28, dao.countByStatus(MediaFileStatus.PENDING_UPLOAD))
         // HTTP-ошибка немедленно не повторяется.
         assertEquals(listOf(1L, 2L, 3L), uploads.toList())
+        // Файлы 1 и 2 переданы до ошибки: время отправки фиксируется вместе с проблемой прогона.
+        val results = syncStatusStore.observeRunResults().first()
+        assertEquals(SyncStatus.RETRY_SCHEDULED, results.uploaderProblem?.status)
+        assertNotNull(results.lastUploadAt)
+    }
+
+    @Test
+    fun transientErrorOnFirstFileDoesNotRecordUploadTime() = runBlocking {
+        (1L..3L).forEach { pendingUpload(it) }
+        uploadCodes[1] = 503
+
+        scheduler.enqueueUpload()
+        runNextUploader(expectFinished = false)
+
+        val results = syncStatusStore.observeRunResults().first()
+        assertEquals(SyncStatus.RETRY_SCHEDULED, results.uploaderProblem?.status)
+        assertNull(results.lastUploadAt)
     }
 
     @Test

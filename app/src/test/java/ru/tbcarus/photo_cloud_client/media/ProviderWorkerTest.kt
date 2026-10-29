@@ -16,6 +16,7 @@ import androidx.work.testing.WorkManagerTestInitHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.After
@@ -51,7 +52,7 @@ class ProviderWorkerTest {
     private lateinit var db: AppDatabase
     private lateinit var media: FakeMediaStore
     private val storage = InMemoryTokenStorage()
-    private val syncStatusStore = SyncStatusStore()
+    private val syncStatusStore = testSyncStatusStore()
 
     private val dao get() = db.mediaFileDao()
 
@@ -178,6 +179,33 @@ class ProviderWorkerTest {
         assertEquals(ListenableWorker.Result.success(), result)
         assertEquals(0, media.queryCount)
         assertEquals(MediaFileStatus.SYNCED, dao.single(existing.id).status)
+        // Отсутствие разрешения UI проверяет на месте: сохраняемый итог не пишется.
+        assertEquals(SyncRunResults(), syncStatusStore.observeRunResults().first())
+    }
+
+    @Test
+    fun scanErrorIsRecordedForProviderAndClearedByNextSuccessfulRun() = runBlocking {
+        grantFullAccess()
+        media.add(image(1, "photo-1"))
+        syncStatusStore.recordUploaderRun(problem = SyncStatus.SERVER_UNAVAILABLE, filesUploaded = true)
+        val uploader = syncStatusStore.observeRunResults().first()
+        media.failQuery = true
+
+        assertEquals(ListenableWorker.Result.retry(), runProvider())
+
+        val failed = syncStatusStore.observeRunResults().first()
+        assertEquals(SyncStatus.ERROR, failed.providerProblem?.status)
+        assertNull(failed.lastScanAt)
+
+        media.failQuery = false
+        assertTrue(runProvider() is ListenableWorker.Result.Success)
+
+        val recovered = syncStatusStore.observeRunResults().first()
+        assertNull(recovered.providerProblem)
+        assertNotNull(recovered.lastScanAt)
+        // Итоги Загрузчика прогоны Поставщика не меняют.
+        assertEquals(uploader.uploaderProblem, recovered.uploaderProblem)
+        assertEquals(uploader.lastUploadAt, recovered.lastUploadAt)
     }
 
     @Test
@@ -266,7 +294,7 @@ class ProviderWorkerTest {
     private suspend fun runProvider(): ListenableWorker.Result {
         val baseUrlProvider = BaseUrlProvider(ServerPreferences(context))
         val client = OkHttpClient()
-        val scheduler = SyncScheduler(context, syncStatusStore)
+        val scheduler = SyncScheduler(context)
         // Настоящий координатор: сигнал Загрузчику зависит только от наличия пары.
         val coordinator = PeriodicSyncCoordinator(
             context,

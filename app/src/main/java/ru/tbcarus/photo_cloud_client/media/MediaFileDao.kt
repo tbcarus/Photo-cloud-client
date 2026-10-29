@@ -16,8 +16,28 @@ interface MediaFileDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(files: List<MediaFile>)
 
+    // Большой индекс читается несколькими окнами CursorWindow, каждое дочитывается повторным запросом:
+    // без общей транзакции удаление строк scan между окнами обрывает чтение (IllegalStateException).
+    @Transaction
     @Query("SELECT * FROM media_files ORDER BY createdAt DESC")
     fun getAll(): Flow<List<MediaFile>>
+
+    /**
+     * Счётчики индекса одной агрегирующей выборкой (A7.1), без загрузки строк. Room Flow выдаёт новое значение
+     * после каждого изменения таблицы. LOCAL_DELETED активным путём не записывается и в счётчики не входит,
+     * поэтому total равен сумме групп.
+     */
+    @Query("""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(CASE WHEN status = 'SYNCED' THEN 1 END) AS synced,
+            COUNT(CASE WHEN status IN ('PENDING', 'HASHING') THEN 1 END) AS preparing,
+            COUNT(CASE WHEN status IN ('CHECKSUM_READY', 'PENDING_UPLOAD', 'UPLOADING') THEN 1 END) AS toUpload,
+            COUNT(CASE WHEN status = 'FAILED' THEN 1 END) AS failed
+        FROM media_files
+        WHERE status != 'LOCAL_DELETED'
+    """)
+    fun observeCounters(): Flow<MediaFileCounters>
 
     @Query("SELECT * FROM media_files WHERE status = :status ORDER BY createdAt DESC")
     fun getByStatus(status: MediaFileStatus): Flow<List<MediaFile>>

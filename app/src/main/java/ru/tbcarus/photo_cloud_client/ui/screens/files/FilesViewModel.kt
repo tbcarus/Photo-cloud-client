@@ -6,22 +6,27 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import ru.tbcarus.photo_cloud_client.media.BackupStateMonitor
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
-import ru.tbcarus.photo_cloud_client.media.SyncScheduler
 import javax.inject.Inject
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
-    private val syncScheduler: SyncScheduler,
+    backupStateMonitor: BackupStateMonitor,
     private val periodicSyncCoordinator: PeriodicSyncCoordinator
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
     val uiState: StateFlow<FilesUiState> = _uiState.asStateFlow()
+
+    // Полный доступ к фото: Android об изменении не уведомляет, экран сообщает его при каждом возврате.
+    // До первой проверки состояние backup не строится, чтобы не показать неверную причину.
+    private val hasMediaAccess = MutableStateFlow<Boolean?>(null)
 
     init {
         // Подписываемся на Room; список обновляется автоматически при изменениях индекса
@@ -31,19 +36,17 @@ class FilesViewModel @Inject constructor(
             }
         }
 
-        // Отражаем состояние разовых задач Поставщика и Загрузчика в UI (немодальный индикатор).
+        // Единственный источник состояния резервного копирования для карточки Files.
         viewModelScope.launch {
-            syncScheduler.observeIsSyncing().collect { syncing ->
-                _uiState.update { it.copy(isSyncing = syncing) }
+            backupStateMonitor.observe(hasMediaAccess.filterNotNull()).collect { state ->
+                _uiState.update { it.copy(backupState = state) }
             }
         }
+    }
 
-        // Итог последнего прогона sync — для card под кнопками.
-        viewModelScope.launch {
-            syncScheduler.observeLastSyncStatus().collect { status ->
-                _uiState.update { it.copy(lastSyncStatus = status) }
-            }
-        }
+    /** Фактический полный доступ к фото, перечитанный экраном при открытии и возврате в приложение. */
+    fun onMediaAccessChecked(granted: Boolean) {
+        hasMediaAccess.value = granted
     }
 
     /** true, если автосинк настроен (есть токены и baseUrl) — можно запрашивать media permission. */

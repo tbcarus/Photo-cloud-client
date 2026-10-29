@@ -14,6 +14,8 @@ import androidx.work.WorkManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -27,8 +29,7 @@ import javax.inject.Singleton
  */
 @Singleton
 class SyncScheduler @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val syncStatusStore: SyncStatusStore
+    @ApplicationContext private val context: Context
 ) {
 
     companion object {
@@ -179,18 +180,29 @@ class SyncScheduler @Inject constructor(
         .build()
 
     /**
-     * true только пока одна из разовых задач (Поставщик или Загрузчик) реально выполняется (RUNNING).
-     * ENQUEUED / BLOCKED означают «запланировано / ждёт retry», а не активный прогон —
-     * иначе UI показывал бы бесконечный loader между попытками retry.
+     * Выполняющиеся прогоны частей (A7.1): RUNNING разовой задачи или periodic. Источник — база WorkManager,
+     * поэтому после гибели процесса «выполняется» не залипает: WorkManager сам возвращает прерванную работу в очередь.
      */
-    fun observeIsSyncing(): Flow<Boolean> =
+    fun observeActivity(): Flow<SyncActivity> =
         combine(
-            workManager.getWorkInfosForUniqueWorkFlow(PROVIDER_WORK_NAME),
-            workManager.getWorkInfosForUniqueWorkFlow(UPLOAD_WORK_NAME)
-        ) { provider, upload ->
-            (provider + upload).any { info -> info.state == WorkInfo.State.RUNNING }
-        }
+            isRunning(PROVIDER_WORK_NAME),
+            isRunning(PROVIDER_PERIODIC_WORK_NAME),
+            isRunning(UPLOAD_WORK_NAME),
+            isRunning(UPLOAD_PERIODIC_WORK_NAME)
+        ) { provider, providerPeriodic, upload, uploadPeriodic ->
+            SyncActivity(
+                providerRunning = provider || providerPeriodic,
+                uploaderRunning = upload || uploadPeriodic
+            )
+        }.distinctUntilChanged()
 
-    /** Итог последнего завершённого прогона sync (null, если ещё не запускался в этой сессии). */
-    fun observeLastSyncStatus(): Flow<SyncStatusRecord?> = syncStatusStore.observe()
+    private fun isRunning(uniqueWorkName: String): Flow<Boolean> =
+        workManager.getWorkInfosForUniqueWorkFlow(uniqueWorkName)
+            .map { infos -> infos.any { it.state == WorkInfo.State.RUNNING } }
 }
+
+/** Выполняется ли сейчас прогон Поставщика и Загрузчика — разовый или periodic. */
+data class SyncActivity(
+    val providerRunning: Boolean = false,
+    val uploaderRunning: Boolean = false
+)

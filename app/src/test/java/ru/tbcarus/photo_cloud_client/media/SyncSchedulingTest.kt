@@ -51,7 +51,7 @@ class SyncSchedulingTest {
             baseUrl = "http://127.0.0.1:8080/"
         }
         val client = OkHttpClient()
-        scheduler = SyncScheduler(context, SyncStatusStore())
+        scheduler = SyncScheduler(context)
         coordinator = PeriodicSyncCoordinator(
             context,
             AuthRepository(storage, baseUrlProvider, ApiServiceFactory(baseUrlProvider, client, client, client)),

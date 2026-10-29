@@ -43,6 +43,9 @@ class UploadWorker @AssistedInject constructor(
         const val STOP_REASON_NO_SESSION = "no_session"
     }
 
+    /** Server подтвердил отправленный файл в этом прогоне — для сохраняемого итога (A7.1), в том числе при ошибке. */
+    private var filesUploaded = false
+
     override suspend fun doWork(): Result {
         // Бюджет отсчитывается от начала прогона: ping, pre-check и upload расходуют его вместе.
         val budget = WorkBudget(clock)
@@ -54,16 +57,21 @@ class UploadWorker @AssistedInject constructor(
         } catch (e: Exception) {
             // Не пробрасываем исключение наружу — даём WorkManager шанс повторить.
             Log.e(TAG, "Загрузка завершилась исключением", e)
-            syncStatusStore.record(SyncStatus.ERROR)
-            Result.retry()
+            retryWith(SyncStatus.ERROR)
         }
+    }
+
+    /** Временная проблема прогона: итог Загрузчика для Files и повтор WorkManager. */
+    private suspend fun retryWith(problem: SyncStatus): Result {
+        syncStatusStore.recordUploaderRun(problem, filesUploaded)
+        return Result.retry()
     }
 
     private suspend fun runUpload(budget: WorkBudget): Result {
         // Без пары авторизованные стадии гарантированно получат 401: до сетевых запросов останавливаем фон и не просим retry.
         if (tokenStorage.getTokens() == null) {
             Log.w(TAG, "Нет сессии — фоновая загрузка остановлена до входа")
-            syncStatusStore.record(SyncStatus.ERROR)
+            // Отсутствие входа UI проверяет по актуальной паре — итог прогона не пишется.
             // Последнее действие прогона: reconcile без пары отменяет periodic Загрузчика; Поставщик продолжает работу.
             // Если это сам periodic, WorkManager остановит уже завершающийся прогон — повтора не будет.
             periodicSyncCoordinator.reconcile()
@@ -73,12 +81,16 @@ class UploadWorker @AssistedInject constructor(
         // Адрес берём из сохранённых настроек, а не из памяти: процесс мог быть запущен WorkManager без UI,
         // а пользователь — сменить адрес после прошлого прогона.
         val baseUrl = baseUrlProvider.reload()
+        if (baseUrl.isBlank()) {
+            Log.w(TAG, "Адрес сервера не задан — откладываем загрузку")
+            // Отсутствие адреса UI проверяет по сохранённым настройкам: это не недоступность Server, итог не пишется.
+            return Result.retry()
+        }
         // Быстрая проверка доступности сервера через существующую тестовую ручку (GET /api/v1/test).
         // Если сервер недоступен — не гоняем pre-check и upload впустую в timeout, а сразу просим повтор.
-        if (baseUrl.isBlank() || serverRepository.testConnection(baseUrl).isFailure) {
+        if (serverRepository.testConnection(baseUrl).isFailure) {
             Log.w(TAG, "Сервер недоступен — откладываем загрузку")
-            syncStatusStore.record(SyncStatus.SERVER_UNAVAILABLE)
-            return Result.retry()
+            return retryWith(SyncStatus.SERVER_UNAVAILABLE)
         }
 
         // Upload читает исходные файлы: без общего доступа каждая строка ушла бы в постоянный FAILED(PERMISSION).
@@ -91,10 +103,7 @@ class UploadWorker @AssistedInject constructor(
         // Pre-check: CHECKSUM_READY → SYNCED (existing) или PENDING_UPLOAD (missing).
         val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(budget)) {
             is ChecksumPrecheckOutcome.Success -> outcome.result
-            is ChecksumPrecheckOutcome.Error -> {
-                syncStatusStore.record(SyncStatus.ERROR)
-                return Result.retry()
-            }
+            is ChecksumPrecheckOutcome.Error -> return retryWith(SyncStatus.ERROR)
         }
 
         // Upload: UPLOADING → PENDING_UPLOAD восстанавливается в начале стадии.
@@ -118,11 +127,13 @@ class UploadWorker @AssistedInject constructor(
             }
         }
 
+        // Время отправки фиксируется один раз за прогон: existing pre-check — не передача файла.
+        filesUploaded = (upload?.succeeded ?: 0) > 0
+
         if (retryNeeded) {
             // Осталась очередь / transient error на upload — WorkManager повторит.
             // Политика ошибок важнее продолжения: штатное продолжение здесь не регистрируется.
-            syncStatusStore.record(SyncStatus.RETRY_SCHEDULED)
-            return Result.retry()
+            return retryWith(SyncStatus.RETRY_SCHEDULED)
         }
 
         // Очередь осталась (бюджет исчерпан или Поставщик добавил строки) — следующий прогон продолжит её
@@ -133,7 +144,8 @@ class UploadWorker @AssistedInject constructor(
             syncScheduler.continueUpload(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
             Log.i(TAG, "Очередь Загрузчика не исчерпана — зарегистрировано продолжение")
         }
-        syncStatusStore.record(SyncStatus.SUCCESS)
+        // Успех прогона снимает проблему Загрузчика, но не означает пустой очереди: её показывают счётчики Room.
+        syncStatusStore.recordUploaderRun(problem = null, filesUploaded = filesUploaded)
         return Result.success(buildOutput(precheck, upload))
     }
 

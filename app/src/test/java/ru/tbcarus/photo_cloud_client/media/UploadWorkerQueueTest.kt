@@ -17,6 +17,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -54,7 +55,7 @@ class UploadWorkerQueueTest {
     private lateinit var db: AppDatabase
     private lateinit var media: FakeMediaStore
     private lateinit var serverPreferences: ServerPreferences
-    private val syncStatusStore = SyncStatusStore()
+    private val syncStatusStore = testSyncStatusStore()
 
     private val dao get() = db.mediaFileDao()
 
@@ -103,7 +104,7 @@ class UploadWorkerQueueTest {
         val file = dao.single(image.id)
         assertEquals(MediaFileStatus.SYNCED, file.status)
         assertEquals(SERVER_FILE_ID, file.serverFileId)
-        assertEquals(SyncStatus.SUCCESS, syncStatusStore.lastStatus())
+        assertNull(syncStatusStore.observeRunResults().first().uploaderProblem)
     }
 
     @Test
@@ -117,6 +118,34 @@ class UploadWorkerQueueTest {
 
         assertEquals(MediaFileStatus.SYNCED, dao.single(image.id).status)
         assertTrue(paths.none { it.endsWith("/files/upload") })
+        // Existing — не передача файла: время отправки не записывается.
+        assertNull(syncStatusStore.observeRunResults().first().lastUploadAt)
+    }
+
+    @Test
+    fun uploaderResultsAreRecordedSeparatelyFromProvider() = runBlocking {
+        grantFullAccess()
+        val image = media.add(image(1, "photo-1"))
+        dao.insert(row(image, MediaFileStatus.CHECKSUM_READY, checksum = sha256(image.bytes)))
+        syncStatusStore.recordProviderRun(scanned = true, problem = SyncStatus.ERROR)
+        val provider = syncStatusStore.observeRunResults().first()
+        serverAvailable = false
+
+        runUploader()
+
+        val unavailable = syncStatusStore.observeRunResults().first()
+        assertEquals(SyncStatus.SERVER_UNAVAILABLE, unavailable.uploaderProblem?.status)
+        assertNull(unavailable.lastUploadAt)
+
+        serverAvailable = true
+        runUploader()
+
+        val uploaded = syncStatusStore.observeRunResults().first()
+        assertNull(uploaded.uploaderProblem)
+        assertNotNull(uploaded.lastUploadAt)
+        // Успех Загрузчика не снимает проблему Поставщика.
+        assertEquals(provider.providerProblem, uploaded.providerProblem)
+        assertEquals(provider.lastScanAt, uploaded.lastScanAt)
     }
 
     @Test
@@ -241,12 +270,10 @@ class UploadWorkerQueueTest {
                 syncStatusStore,
                 InMemoryTokenStorage(Tokens("access", "refresh")),
                 mock(PeriodicSyncCoordinator::class.java),
-                SyncScheduler(appContext, SyncStatusStore()),
+                SyncScheduler(appContext),
                 SyncClock.SYSTEM
             )
         }
         return TestListenableWorkerBuilder<UploadWorker>(context).setWorkerFactory(factory).build().doWork()
     }
-
-    private suspend fun SyncStatusStore.lastStatus(): SyncStatus? = observe().first()?.status
 }

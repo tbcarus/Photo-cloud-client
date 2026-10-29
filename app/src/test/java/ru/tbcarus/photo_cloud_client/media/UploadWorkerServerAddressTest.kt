@@ -16,6 +16,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,7 +47,7 @@ class UploadWorkerServerAddressTest {
     private lateinit var server: MockWebServer
     private lateinit var db: AppDatabase
     private lateinit var serverPreferences: ServerPreferences
-    private val syncStatusStore = SyncStatusStore()
+    private val syncStatusStore = testSyncStatusStore()
 
     @Before
     fun setUp() {
@@ -102,7 +103,8 @@ class UploadWorkerServerAddressTest {
         assertEquals(0, server.requestCount)
         assertEquals("", baseUrlProvider.baseUrl)
         assertEquals(ListenableWorker.Result.retry(), result)
-        assertEquals(SyncStatus.SERVER_UNAVAILABLE, syncStatusStore.observe().first()?.status)
+        // Некорректный адрес — то же, что незаданный: итог прогона не пишется.
+        assertNull(syncStatusStore.observeRunResults().first().uploaderProblem)
     }
 
     @Test
@@ -116,7 +118,8 @@ class UploadWorkerServerAddressTest {
 
         assertEquals(0, server.requestCount)
         assertEquals(ListenableWorker.Result.retry(), result)
-        assertEquals(SyncStatus.SERVER_UNAVAILABLE, syncStatusStore.observe().first()?.status)
+        // Отсутствие адреса — не недоступность Server: UI проверяет его по настройкам, итог не сохраняется.
+        assertNull(syncStatusStore.observeRunResults().first().uploaderProblem)
     }
 
     @Test
@@ -128,7 +131,7 @@ class UploadWorkerServerAddressTest {
 
         assertEquals(1, server.requestCount)
         assertEquals(ListenableWorker.Result.retry(), result)
-        assertEquals(SyncStatus.SERVER_UNAVAILABLE, syncStatusStore.observe().first()?.status)
+        assertEquals(SyncStatus.SERVER_UNAVAILABLE, syncStatusStore.observeRunResults().first().uploaderProblem?.status)
     }
 
     private fun worker(baseUrlProvider: BaseUrlProvider): UploadWorker {
@@ -152,7 +155,7 @@ class UploadWorkerServerAddressTest {
                 // Сессия есть: эти тесты проверяют адрес, а не остановку фона без токенов.
                 InMemoryTokenStorage(Tokens("access", "refresh")),
                 mock(PeriodicSyncCoordinator::class.java),
-                SyncScheduler(appContext, SyncStatusStore()),
+                SyncScheduler(appContext),
                 SyncClock.SYSTEM
             )
         }

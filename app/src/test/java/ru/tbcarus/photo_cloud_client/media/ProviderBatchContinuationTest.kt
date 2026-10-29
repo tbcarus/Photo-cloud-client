@@ -87,8 +87,8 @@ class ProviderBatchContinuationTest {
         }
         shadowOf(context).grantPermissions(mediaReadPermission)
 
-        val syncStatusStore = SyncStatusStore()
-        scheduler = SyncScheduler(context, syncStatusStore)
+        val syncStatusStore = testSyncStatusStore()
+        scheduler = SyncScheduler(context)
         val baseUrlProvider = BaseUrlProvider(ServerPreferences(context))
         val client = OkHttpClient()
         // Пара есть — Поставщик ставит Загрузчика; тот ждёт сети и в этих тестах не выполняется.

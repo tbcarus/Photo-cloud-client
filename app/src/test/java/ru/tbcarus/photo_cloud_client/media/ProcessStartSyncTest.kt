@@ -58,10 +58,10 @@ class ProcessStartSyncTest {
 
         val baseUrlProvider = BaseUrlProvider(ServerPreferences(context)).apply { baseUrl = "http://127.0.0.1:8080/" }
         val client = OkHttpClient()
-        val syncStatusStore = SyncStatusStore()
+        val syncStatusStore = testSyncStatusStore()
         val mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
         val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
-        scheduler = SyncScheduler(context, syncStatusStore)
+        scheduler = SyncScheduler(context)
         coordinator = PeriodicSyncCoordinator(
             context,
             AuthRepository(storage, baseUrlProvider, ApiServiceFactory(baseUrlProvider, client, client, client)),

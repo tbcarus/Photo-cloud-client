@@ -20,6 +20,7 @@ import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -47,7 +48,7 @@ class UploadWorkerNoSessionTest {
     private lateinit var db: AppDatabase
     private lateinit var baseUrlProvider: BaseUrlProvider
     private val storage = InMemoryTokenStorage()
-    private val syncStatusStore = SyncStatusStore()
+    private val syncStatusStore = testSyncStatusStore()
 
     @Before
     fun setUp() {
@@ -80,7 +81,8 @@ class UploadWorkerNoSessionTest {
             result
         )
         assertEquals(0, server.requestCount)
-        assertEquals(SyncStatus.ERROR, syncStatusStore.observe().first()?.status)
+        // Отсутствие входа UI проверяет по актуальной паре: итог прогона не пишется.
+        assertEquals(SyncRunResults(), syncStatusStore.observeRunResults().first())
         verify(coordinator).reconcile()
     }
 
@@ -102,7 +104,7 @@ class UploadWorkerNoSessionTest {
         assertEquals(1, info.runAttemptCount)
         assertEquals(0, server.requestCount)
         // Прогон дошёл до конца: статус записан до отмены расписания.
-        assertEquals(SyncStatus.ERROR, syncStatusStore.observe().first()?.status)
+        assertEquals(SyncRunResults(), syncStatusStore.observeRunResults().first())
     }
 
     @Test
@@ -125,7 +127,7 @@ class UploadWorkerNoSessionTest {
     }
 
     private fun initWorkManager(): SyncScheduler {
-        val scheduler = SyncScheduler(context, syncStatusStore)
+        val scheduler = SyncScheduler(context)
         val client = OkHttpClient()
         val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
         // Настоящий координатор: без пары reconcile отменяет periodic Загрузчика.
@@ -165,7 +167,7 @@ class UploadWorkerNoSessionTest {
                 syncStatusStore,
                 storage,
                 coordinator(),
-                SyncScheduler(appContext, SyncStatusStore()),
+                SyncScheduler(appContext),
                 SyncClock.SYSTEM
             )
         }

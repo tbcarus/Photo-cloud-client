@@ -1,24 +1,13 @@
 package ru.tbcarus.photo_cloud_client.media
 
-/**
- * Итог последнего прогона авто-sync — для отображения в UI.
- * Хранится в памяти (см. [SyncStatusStore]); после перезапуска приложения сбрасывается.
- */
-data class SyncStatusRecord(
-    val status: SyncStatus,
-    val timestamp: Long
-)
-
+/** Проблема прогона части синхронизации; сохраняется в [SyncStatusStore], успешный прогон её снимает. */
 enum class SyncStatus {
-    /** Прогон завершился успешно, очередь пуста. */
-    SUCCESS,
-
-    /** Сервер недоступен (пустой baseUrl или ping failed) — WorkManager повторит позже. */
+    /** Сервер не ответил на ping — WorkManager повторит позже. */
     SERVER_UNAVAILABLE,
 
-    /** Одна из стадий оборвалась на transient-ошибке — WorkManager повторит позже. */
+    /** Одна из стадий оборвалась на transient-ошибке или исключении — WorkManager повторит позже. */
     ERROR,
 
-    /** Прогон отработал, но осталась очередь на upload — запланирован повтор. */
+    /** Upload остановлен временной ошибкой — запланирован повтор. */
     RETRY_SCHEDULED
 }

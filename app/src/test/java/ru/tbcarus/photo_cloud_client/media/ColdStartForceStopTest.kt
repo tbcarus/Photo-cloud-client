@@ -96,7 +96,7 @@ class ColdStartForceStopTest {
         val database = WorkDatabase.create(context, workTaskExecutor.serialTaskExecutor, configuration.clock, true)
         WorkManagerImpl.setDelegate(WorkManagerImpl(context, configuration, workTaskExecutor, database))
         // Как в App.onCreate(): постановка сразу после инициализации, без ожидания.
-        ProcessStartSync(context, SyncScheduler(context, SyncStatusStore())).onProcessStart()
+        ProcessStartSync(context, SyncScheduler(context)).onProcessStart()
 
         taskExecutor.drain()
 

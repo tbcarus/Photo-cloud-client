@@ -34,6 +34,15 @@ class ProviderWorker @AssistedInject constructor(
         const val TAG = "ProviderWorker"
     }
 
+    /** Scan этого прогона выполнен успешно — для сохраняемого итога (A7.1), в том числе при последующей ошибке. */
+    private var scanned = false
+
+    /** Ошибка прогона: итог Поставщика для Files и повтор WorkManager. */
+    private suspend fun fail(): Result {
+        syncStatusStore.recordProviderRun(scanned, SyncStatus.ERROR)
+        return Result.retry()
+    }
+
     /** KEEP: работающий или ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room. */
     private suspend fun signalUploader() {
         if (mediaFileRepository.hasReadyForUpload()) {
@@ -52,8 +61,7 @@ class ProviderWorker @AssistedInject constructor(
         } catch (e: Exception) {
             // Не пробрасываем исключение наружу — даём WorkManager шанс повторить.
             Log.e(TAG, "Локальная обработка завершилась исключением", e)
-            syncStatusStore.record(SyncStatus.ERROR)
-            Result.retry()
+            fail()
         }
     }
 
@@ -75,20 +83,15 @@ class ProviderWorker @AssistedInject constructor(
         val scan = when (val outcome = mediaFileRepository.scanImages()) {
             is ScanOutcome.Success -> outcome.result
             is ScanOutcome.PermissionDenied -> return Result.success()
-            is ScanOutcome.Error -> {
-                syncStatusStore.record(SyncStatus.ERROR)
-                return Result.retry()
-            }
+            is ScanOutcome.Error -> return fail()
         }
+        scanned = true
 
         // HASHING → PENDING восстанавливается в начале стадии; хэшируются только PENDING-записи.
         val checksum = when (val outcome = checksumRepository.computePendingChecksums(budget) { signalUploader() }) {
             is ChecksumOutcome.Success -> outcome.result
             is ChecksumOutcome.PermissionDenied -> return Result.success()
-            is ChecksumOutcome.Error -> {
-                syncStatusStore.record(SyncStatus.ERROR)
-                return Result.retry()
-            }
+            is ChecksumOutcome.Error -> return fail()
         }
 
         // Сигнал по состоянию Room, а не по «новым в этом прогоне»: потерянный ранее сигнал восстанавливается.
@@ -101,6 +104,9 @@ class ProviderWorker @AssistedInject constructor(
             syncScheduler.continueProvider(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
             Log.i(TAG, "Очередь хеширования не исчерпана — зарегистрировано продолжение Поставщика")
         }
+
+        // Прогон без ошибки снимает прежнюю проблему Поставщика; без разрешения итог не пишется — это проверяется на месте.
+        syncStatusStore.recordProviderRun(scanned = true, problem = null)
 
         return Result.success(
             workDataOf(

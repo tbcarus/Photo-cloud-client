@@ -3,6 +3,7 @@ package ru.tbcarus.photo_cloud_client.media
 import android.util.Log
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
@@ -29,6 +30,9 @@ class MediaFileRepository @Inject constructor(
 
     /** Поток всех файлов локального индекса, отсортированных по createdAt DESC. */
     fun observeAll(): Flow<List<MediaFile>> = dao.getAll()
+
+    /** Счётчики индекса по группам состояний; повторы одинакового значения отбрасываются. */
+    fun observeCounters(): Flow<MediaFileCounters> = dao.observeCounters().distinctUntilChanged()
 
     /**
      * Сканирует фото из MediaStore и синхронизирует локальный индекс Room:
