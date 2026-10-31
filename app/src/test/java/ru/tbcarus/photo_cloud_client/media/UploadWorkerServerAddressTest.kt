@@ -147,8 +147,9 @@ class UploadWorkerServerAddressTest {
             ) = UploadWorker(
                 appContext,
                 workerParameters,
-                ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository),
-                FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(appContext)),
+                folderRepository,
+                ChecksumPrecheckRepository(dao, apiServiceFactory),
+                FileUploadRepository(dao, apiServiceFactory, MediaStreamOpener(appContext)),
                 ServerRepository(apiServiceFactory),
                 baseUrlProvider,
                 syncStatusStore,

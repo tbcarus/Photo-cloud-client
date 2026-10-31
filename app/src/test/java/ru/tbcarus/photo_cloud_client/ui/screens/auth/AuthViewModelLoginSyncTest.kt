@@ -18,6 +18,7 @@ import org.junit.Test
 import org.mockito.Mockito.inOrder
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
+import org.mockito.Mockito.timeout
 import org.mockito.Mockito.verify
 import ru.tbcarus.photo_cloud_client.auth.AuthRepository
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
@@ -74,7 +75,8 @@ class AuthViewModelLoginSyncTest {
         viewModel.logout()
         withTimeout(5_000) { viewModel.uiState.first { it.status == ConnectionStatus.SUCCESS } }
 
-        verify(coordinator).reconcile()
+        // reconcile() вызывается после публикации SUCCESS в той же корутине.
+        verify(coordinator, timeout(5_000)).reconcile()
         verify(coordinator, never()).requestUpload()
     }
 

@@ -196,9 +196,7 @@ class ProviderBatchContinuationTest {
         val server = MockWebServer().apply {
             dispatcher = object : Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse = when (request.path) {
-                    "/api/v1/folders/root" -> json("""{"id":$ROOT_ID,"parentId":null,"name":"root","folderType":"ROOT"}""")
-                    "/api/v1/folders/$ROOT_ID/children" ->
-                        json("""[{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}]""")
+                    "/api/v1/folders/camera" -> json("""{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}""")
                     "/api/v1/files/upload" -> {
                         uploadStarted.countDown()
                         releaseUpload.await(10, TimeUnit.SECONDS)
@@ -218,9 +216,9 @@ class ProviderBatchContinuationTest {
             }
             val client = OkHttpClient()
             val api = ApiServiceFactory(baseUrlProvider, client, client, client)
-            val uploadRepository = FileUploadRepository(dao, api, FolderRepository(api), MediaStreamOpener(context))
+            val uploadRepository = FileUploadRepository(dao, api, MediaStreamOpener(context))
 
-            val upload = async(Dispatchers.IO) { uploadRepository.uploadPendingCameraFiles() }
+            val upload = async(Dispatchers.IO) { uploadRepository.uploadPendingCameraFiles(CAMERA_ID) }
             assertTrue(uploadStarted.await(10, TimeUnit.SECONDS))
 
             // Загрузчик держит файл в отправке, а Поставщик готовит следующие.

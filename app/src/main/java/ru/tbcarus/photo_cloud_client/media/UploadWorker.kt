@@ -16,7 +16,7 @@ import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * Загрузчик (A4.1): серверная обработка подготовленной Поставщиком очереди — pre-check → upload.
+ * Загрузчик (A4.1): серверная обработка подготовленной Поставщиком очереди — ID Camera → pre-check → upload.
  * Прогон ограничен бюджетом времени; остаток очереди продолжает следующий прогон (A8.2).
  * Не сканирует MediaStore и не вычисляет SHA-256. При отсутствии сессии, сервера или разрешения
  * очередь остаётся в Room без изменения статусов.
@@ -25,6 +25,7 @@ import kotlin.coroutines.cancellation.CancellationException
 class UploadWorker @AssistedInject constructor(
     @Assisted appContext: Context,
     @Assisted params: WorkerParameters,
+    private val folderRepository: FolderRepository,
     private val checksumPrecheckRepository: ChecksumPrecheckRepository,
     private val fileUploadRepository: FileUploadRepository,
     private val serverRepository: ServerRepository,
@@ -100,8 +101,17 @@ class UploadWorker @AssistedInject constructor(
             return Result.success()
         }
 
+        // ID Camera нужен до первого файла: без него очередь ждёт повтора, файлы не отправляются и не становятся FAILED.
+        val cameraFolderId = when (val folder = folderRepository.resolveCameraFolderId()) {
+            is CameraFolderOutcome.Success -> folder.folderId
+            is CameraFolderOutcome.Error -> {
+                Log.w(TAG, "Не удалось получить папку Camera — откладываем загрузку: ${folder.message}")
+                return retryWith(SyncStatus.ERROR)
+            }
+        }
+
         // Pre-check: CHECKSUM_READY → SYNCED (existing) или PENDING_UPLOAD (missing).
-        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(budget)) {
+        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(cameraFolderId, budget)) {
             is ChecksumPrecheckOutcome.Success -> outcome.result
             is ChecksumPrecheckOutcome.Error -> return retryWith(SyncStatus.ERROR)
         }
@@ -114,7 +124,7 @@ class UploadWorker @AssistedInject constructor(
         if (budget.isExhausted()) {
             upload = null
             retryNeeded = false
-        } else when (val outcome = fileUploadRepository.uploadPendingCameraFiles(budget)) {
+        } else when (val outcome = fileUploadRepository.uploadPendingCameraFiles(cameraFolderId, budget)) {
             is UploadOutcome.Success -> {
                 upload = outcome.result
                 // Осталась очередь из-за transient-ошибки → просим повтор.

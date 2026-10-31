@@ -7,13 +7,9 @@ import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * Результат поиска системной папки CAMERA на сервере.
- * Отсутствие CAMERA — не ошибка: сервер создаёт её лениво при первом upload.
- */
+/** Результат получения системной папки CAMERA на сервере. */
 sealed interface CameraFolderOutcome {
     data class Success(val folderId: Long) : CameraFolderOutcome
-    data object NotCreatedYet : CameraFolderOutcome
     data class Error(val message: String) : CameraFolderOutcome
 }
 
@@ -22,40 +18,19 @@ class FolderRepository @Inject constructor(
     private val apiServiceFactory: ApiServiceFactory
 ) {
 
-    private companion object {
-        const val CAMERA_FOLDER_TYPE = "CAMERA"
-    }
-
     /**
-     * Резолвит folderId системной папки CAMERA через folder API:
-     * root → children → поиск по folderType == "CAMERA".
+     * Получает ID CAMERA; сервер создаёт папку, если её ещё нет. Запрос идемпотентен.
+     * ID живёт только в пределах прогона: устаревший заменит запрос следующего прогона.
      */
     suspend fun resolveCameraFolderId(): CameraFolderOutcome = withContext(Dispatchers.IO) {
-        // TODO: Кэшировать идентификатор CAMERA-папки,
-        // чтобы не выполнять GET /folders/root и GET /folders/{id}/children перед каждой синхронизацией.
         try {
-            val rootResp = apiServiceFactory.authFolderService().getRoot().execute()
-            if (!rootResp.isSuccessful) {
-                return@withContext CameraFolderOutcome.Error(ApiErrorParser.parse(rootResp))
+            val response = apiServiceFactory.authFolderService().getOrCreateCamera().execute()
+            if (!response.isSuccessful) {
+                return@withContext CameraFolderOutcome.Error(ApiErrorParser.parse(response))
             }
-            val rootId = rootResp.body()?.id
-                ?: return@withContext CameraFolderOutcome.Error("Empty root folder response")
-
-            val childrenResp = apiServiceFactory.authFolderService().getChildren(rootId).execute()
-            if (!childrenResp.isSuccessful) {
-                return@withContext CameraFolderOutcome.Error(ApiErrorParser.parse(childrenResp))
-            }
-            val children = childrenResp.body() ?: emptyList()
-
-            // Ищем CAMERA только по folderType, не по имени папки.
-            val camera = children.firstOrNull { it.folderType == CAMERA_FOLDER_TYPE }
-            if (camera != null) {
-                CameraFolderOutcome.Success(camera.id)
-            } else {
-                // TODO: если сервер добавит endpoint получения/создания системных папок,
-                // заменить эту ветку на явное получение CAMERA folderId.
-                CameraFolderOutcome.NotCreatedYet
-            }
+            val folderId = response.body()?.id
+                ?: return@withContext CameraFolderOutcome.Error("Empty Camera folder response")
+            CameraFolderOutcome.Success(folderId)
         } catch (e: Exception) {
             CameraFolderOutcome.Error(e.message ?: "Ошибка при получении папки CAMERA")
         }

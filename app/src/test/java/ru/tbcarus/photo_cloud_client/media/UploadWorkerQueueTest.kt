@@ -223,9 +223,7 @@ class UploadWorkerQueueTest {
         if (!serverAvailable) return MockResponse().setResponseCode(503)
         return when {
             path == "/api/v1/test" -> json("""{"message":"ok"}""")
-            path == "/api/v1/folders/root" -> json("""{"id":$ROOT_ID,"parentId":null,"name":"root","folderType":"ROOT"}""")
-            path == "/api/v1/folders/$ROOT_ID/children" ->
-                json("""[{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}]""")
+            path == "/api/v1/folders/camera" -> json("""{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}""")
             path == "/api/v1/files/checksums/exists" -> {
                 val requested = Regex("[0-9a-f]{64}").findAll(request.body.readUtf8()).map { it.value }.toList()
                 beforePrecheckResponse()
@@ -263,8 +261,9 @@ class UploadWorkerQueueTest {
             ) = UploadWorker(
                 appContext,
                 workerParameters,
-                ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository),
-                FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(appContext)),
+                folderRepository,
+                ChecksumPrecheckRepository(dao, apiServiceFactory),
+                FileUploadRepository(dao, apiServiceFactory, MediaStreamOpener(appContext)),
                 ServerRepository(apiServiceFactory),
                 baseUrlProvider,
                 syncStatusStore,

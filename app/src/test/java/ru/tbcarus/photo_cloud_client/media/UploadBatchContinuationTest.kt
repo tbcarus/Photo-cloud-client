@@ -119,8 +119,8 @@ class UploadBatchContinuationTest {
         val api = ApiServiceFactory(baseUrlProvider, client, client, client)
         val folderRepository = FolderRepository(api)
         // Общие экземпляры, как @Singleton в приложении.
-        val precheckRepository = ChecksumPrecheckRepository(dao, api, folderRepository)
-        uploadRepository = FileUploadRepository(dao, api, folderRepository, MediaStreamOpener(context))
+        val precheckRepository = ChecksumPrecheckRepository(dao, api)
+        uploadRepository = FileUploadRepository(dao, api, MediaStreamOpener(context))
         val factory = object : WorkerFactory() {
             override fun createWorker(
                 appContext: Context,
@@ -128,7 +128,7 @@ class UploadBatchContinuationTest {
                 workerParameters: WorkerParameters
             ): ListenableWorker? = when (workerClassName) {
                 UploadWorker::class.java.name -> UploadWorker(
-                    appContext, workerParameters, precheckRepository, uploadRepository, ServerRepository(api),
+                    appContext, workerParameters, folderRepository, precheckRepository, uploadRepository, ServerRepository(api),
                     baseUrlProvider, syncStatusStore, InMemoryTokenStorage(Tokens("access", "refresh")),
                     mock(PeriodicSyncCoordinator::class.java), scheduler, SyncClock { clock.get() }
                 )
@@ -366,7 +366,7 @@ class UploadBatchContinuationTest {
 
         baseUrlProvider.reload()
         // Остановка Worker отменяет корутину прогона, пока первая отправка ещё ждёт ответа.
-        val run = launch(Dispatchers.Default) { uploadRepository.uploadPendingCameraFiles() }
+        val run = launch(Dispatchers.Default) { uploadRepository.uploadPendingCameraFiles(CAMERA_ID) }
         assertTrue(sending.await(10, TimeUnit.SECONDS))
         run.cancel()
         stopped.countDown()
@@ -504,9 +504,7 @@ class UploadBatchContinuationTest {
                 clock.addAndGet(pingCostMs)
                 json("""{"message":"ok"}""")
             }
-            "/api/v1/folders/root" -> json("""{"id":$ROOT_ID,"parentId":null,"name":"root","folderType":"ROOT"}""")
-            "/api/v1/folders/$ROOT_ID/children" ->
-                json("""[{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}]""")
+            "/api/v1/folders/camera" -> json("""{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}""")
             "/api/v1/files/checksums/exists" -> {
                 val requested = Regex("[0-9a-f]{64}").findAll(request.body.readUtf8()).map { it.value }.toList()
                 precheckRequests += requested.map { idByChecksum.getValue(it) }

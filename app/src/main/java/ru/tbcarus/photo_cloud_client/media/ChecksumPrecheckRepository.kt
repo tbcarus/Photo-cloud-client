@@ -20,62 +20,26 @@ import kotlin.coroutines.cancellation.CancellationException
  * Переход применяется условно: строку, которую Поставщик успел сбросить или обновить, ответ не перезаписывает.
  *
  * TODO: serverFileId для SYNCED-файлов без id будет заполнен будущим list-sync.
- * TODO: когда появится поддержка нескольких целевых папок,
- * pre-check должен принимать folderId явно, а не только CAMERA.
  */
 @Singleton
 class ChecksumPrecheckRepository @Inject constructor(
     private val mediaFileDao: MediaFileDao,
-    private val apiServiceFactory: ApiServiceFactory,
-    private val folderRepository: FolderRepository
+    private val apiServiceFactory: ApiServiceFactory
 ) {
 
     private val mutex = Mutex()
 
     /**
-     * Запускает pre-check по папке CAMERA партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
+     * Запускает pre-check по папке [folderId] партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
      * Перед каждым запросом проверяет [budget]: исчерпан — новый запрос не начинается,
      * оставшиеся CHECKSUM_READY проверит следующий прогон.
      */
-    suspend fun runCameraPrecheck(budget: WorkBudget = WorkBudget.UNLIMITED): ChecksumPrecheckOutcome =
+    suspend fun runCameraPrecheck(folderId: Long, budget: WorkBudget = WorkBudget.UNLIMITED): ChecksumPrecheckOutcome =
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                when (val folder = folderRepository.resolveCameraFolderId()) {
-                    is CameraFolderOutcome.Error -> ChecksumPrecheckOutcome.Error(folder.message)
-                    is CameraFolderOutcome.NotCreatedYet -> moveAllReadyToPendingUpload()
-                    is CameraFolderOutcome.Success -> runPrecheckForFolder(folder.folderId, budget)
-                }
+                runPrecheckForFolder(folderId, budget)
             }
         }
-
-    /**
-     * CAMERA ещё не создана на сервере, значит в целевой папке нет файлов.
-     * Pre-check не нужен: все готовые checksum переходят в очередь upload.
-     */
-    private suspend fun moveAllReadyToPendingUpload(): ChecksumPrecheckOutcome {
-        var pendingUpload = 0
-        while (true) {
-            val batch = mediaFileDao.getByStatusWithChecksumOnce(
-                MediaFileStatus.CHECKSUM_READY,
-                SyncConfig.PRECHECK_BATCH_SIZE
-            )
-            if (batch.isEmpty()) break
-
-            val moved = moveReady(batch, MediaFileStatus.PENDING_UPLOAD)
-            pendingUpload += moved
-            // Ни одна строка не перешла — остаток обработает следующий прогон, без зацикливания.
-            if (moved == 0) break
-        }
-
-        return ChecksumPrecheckOutcome.Success(
-            ChecksumPrecheckResult(
-                checked = pendingUpload,
-                existing = 0,
-                pendingUpload = pendingUpload,
-                unchanged = 0
-            )
-        )
-    }
 
     private suspend fun runPrecheckForFolder(folderId: Long, budget: WorkBudget): ChecksumPrecheckOutcome {
         var existingTotal = 0

@@ -111,8 +111,8 @@ class ProviderUploadEndToEndTest {
         // Общие экземпляры, как @Singleton в приложении: Mutex стадий действуют на все задачи.
         mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
         val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
-        val precheckRepository = ChecksumPrecheckRepository(dao, apiServiceFactory, folderRepository)
-        val uploadRepository = FileUploadRepository(dao, apiServiceFactory, folderRepository, MediaStreamOpener(context))
+        val precheckRepository = ChecksumPrecheckRepository(dao, apiServiceFactory)
+        val uploadRepository = FileUploadRepository(dao, apiServiceFactory, MediaStreamOpener(context))
         val serverRepository = ServerRepository(apiServiceFactory)
         scheduler = SyncScheduler(context)
         coordinator = PeriodicSyncCoordinator(
@@ -132,7 +132,7 @@ class ProviderUploadEndToEndTest {
                     scheduler, SyncClock.SYSTEM
                 )
                 UploadWorker::class.java.name -> UploadWorker(
-                    appContext, workerParameters, precheckRepository, uploadRepository, serverRepository,
+                    appContext, workerParameters, folderRepository, precheckRepository, uploadRepository, serverRepository,
                     baseUrlProvider, syncStatusStore, storage, coordinator, scheduler, SyncClock.SYSTEM
                 )
                 else -> null
@@ -393,9 +393,7 @@ class ProviderUploadEndToEndTest {
         record(1)
         return when (path) {
             "/api/v1/test" -> json("""{"message":"ok"}""")
-            "/api/v1/folders/root" -> json("""{"id":$ROOT_ID,"parentId":null,"name":"root","folderType":"ROOT"}""")
-            "/api/v1/folders/$ROOT_ID/children" ->
-                json("""[{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}]""")
+            "/api/v1/folders/camera" -> json("""{"id":$CAMERA_ID,"parentId":$ROOT_ID,"name":"Camera","folderType":"CAMERA"}""")
             "/api/v1/files/checksums/exists" -> {
                 val requested = Regex("[0-9a-f]{64}").findAll(request.body.readUtf8()).map { it.value }.toList()
                 requestedChecksums += requested

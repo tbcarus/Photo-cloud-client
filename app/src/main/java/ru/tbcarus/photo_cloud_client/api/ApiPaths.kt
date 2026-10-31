@@ -16,6 +16,5 @@ object ApiPaths {
     const val FILES_CHECKSUMS_EXISTS = "$FILES/checksums/exists"
 
     const val FOLDERS = "$API_V1/folders"
-    const val FOLDERS_ROOT = "$FOLDERS/root"
-    const val FOLDERS_CHILDREN = "$FOLDERS/{id}/children"
+    const val FOLDERS_CAMERA = "$FOLDERS/camera"
 }

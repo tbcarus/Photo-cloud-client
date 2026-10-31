@@ -36,7 +36,6 @@ import javax.inject.Singleton
 class FileUploadRepository @Inject constructor(
     private val mediaFileDao: MediaFileDao,
     private val apiServiceFactory: ApiServiceFactory,
-    private val folderRepository: FolderRepository,
     private val streamOpener: MediaStreamOpener
 ) {
 
@@ -47,35 +46,28 @@ class FileUploadRepository @Inject constructor(
     }
 
     /**
-     * Грузит PENDING_UPLOAD-фото в CAMERA партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
+     * Грузит PENDING_UPLOAD-фото в папку CAMERA [folderId] партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
      * Перед каждым файлом проверяет [budget]: исчерпан — новый файл не начинается, начатая отправка
      * не прерывается; остаток очереди отправит следующий прогон.
      */
-    suspend fun uploadPendingCameraFiles(budget: WorkBudget = WorkBudget.UNLIMITED): UploadOutcome =
+    suspend fun uploadPendingCameraFiles(folderId: Long, budget: WorkBudget = WorkBudget.UNLIMITED): UploadOutcome =
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                runUpload(budget)
+                runUpload(folderId, budget)
             }
         }
 
     /** Есть ли работа для Загрузчика: CHECKSUM_READY с checksum, PENDING_UPLOAD или UPLOADING. */
     suspend fun hasQueuedWork(): Boolean = mediaFileDao.countReadyForUpload() > 0
 
-    private suspend fun runUpload(budget: WorkBudget): UploadOutcome {
+    private suspend fun runUpload(folderId: Long, budget: WorkBudget): UploadOutcome {
         // Возвращаем зависшие UPLOADING-записи после возможного падения приложения.
         mediaFileDao.resetStatus(
             sourceStatus = MediaFileStatus.UPLOADING,
             targetStatus = MediaFileStatus.PENDING_UPLOAD
         )
 
-        // Если CAMERA не удалось получить, не блокируем upload:
-        // сервер сам направит IMAGE в CAMERA при upload без folderId.
-        val folderId: Long? = when (val folder = folderRepository.resolveCameraFolderId()) {
-            is CameraFolderOutcome.Success -> folder.folderId
-            CameraFolderOutcome.NotCreatedYet -> null
-            is CameraFolderOutcome.Error -> null
-        }
-        val folderIdPart = createFolderIdPart(folderId)
+        val folderIdPart = folderId.toString().toRequestBody("text/plain".toMediaTypeOrNull())
 
         var attempted = 0
         var succeeded = 0
@@ -165,7 +157,8 @@ class FileUploadRepository @Inject constructor(
                         }
                         continue
                     } else {
-                        // 401 после неудачного refresh / 404 folder / 5xx → transient; повтор — WorkManager.
+                        // 401 после неудачного refresh / 404 устаревшего folderId / 5xx → transient;
+                        // повтор — WorkManager, следующий прогон заново получит ID CAMERA.
                         mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                         leftPending++
                         return UploadOutcome.Error(
@@ -190,7 +183,7 @@ class FileUploadRepository @Inject constructor(
      */
     private suspend fun sendWithSingleRetry(
         file: MediaFile,
-        folderIdPart: RequestBody?,
+        folderIdPart: RequestBody,
         budget: WorkBudget
     ): Response<FileItemDto> {
         val filePart = createFilePart(file)
@@ -223,11 +216,6 @@ class FileUploadRepository @Inject constructor(
         val body = ContentUriRequestBody(streamOpener, uri, file.mimeType, file.size)
         val filename = file.displayName.ifBlank { "file_${file.mediaStoreId}" }
         return MultipartBody.Part.createFormData("file", filename, body)
-    }
-
-    private fun createFolderIdPart(folderId: Long?): RequestBody? {
-        if (folderId == null) return null
-        return folderId.toString().toRequestBody("text/plain".toMediaTypeOrNull())
     }
 
     /** Постоянные HTTP-ошибки upload: повтор не поможет. null — код не считаем permanent. */
