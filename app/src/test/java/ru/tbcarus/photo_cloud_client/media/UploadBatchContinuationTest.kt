@@ -86,6 +86,9 @@ class UploadBatchContinuationTest {
     @Volatile private var uploadCostMs = 0L
     @Volatile private var isExisting: (Long) -> Boolean = { false }
     @Volatile private var onUpload: (Long) -> Unit = {}
+    /** Пока задан, часы разового прогона ждут его: прогон остаётся RUNNING. */
+    @Volatile private var oneTimeClockGate: CountDownLatch? = null
+    private val cameraRequests = AtomicInteger()
     private val uploadCodes = ConcurrentHashMap<Long, Int>()
     /** Сколько ближайших ответов upload для файла оборвать; файл при этом уже сохранён Server. */
     private val lostResponses = ConcurrentHashMap<Long, Int>()
@@ -130,7 +133,8 @@ class UploadBatchContinuationTest {
                 UploadWorker::class.java.name -> UploadWorker(
                     appContext, workerParameters, folderRepository, precheckRepository, uploadRepository, ServerRepository(api),
                     baseUrlProvider, syncStatusStore, InMemoryTokenStorage(Tokens("access", "refresh")),
-                    mock(PeriodicSyncCoordinator::class.java), scheduler, SyncClock { clock.get() }
+                    mock(PeriodicSyncCoordinator::class.java), scheduler,
+                    workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags)
                 )
                 else -> null
             }
@@ -417,10 +421,12 @@ class UploadBatchContinuationTest {
         assertTrue(uploadStarted.await(10, TimeUnit.SECONDS))
         val oneTimeId = uploaderRuns().single().id
 
-        // Так регистрирует продолжение периодический прогон: KEEP не трогает идущую разовую цепочку.
-        scheduler.continueUpload(fromOneTimeRun = false).result.get()
-        assertEquals(listOf(oneTimeId), uploaderRuns().map { it.id })
-        assertEquals(WorkInfo.State.RUNNING, uploaderRuns().single().state)
+        // Так регистрирует продолжение периодический прогон: выполняющийся разовый не заменяется, новый ждёт его.
+        // KEEP не трогает идущую разовую цепочку.
+        scheduler.continueUpload().result.get()
+        assertEquals(2, uploaderRuns().size)
+        assertEquals(WorkInfo.State.RUNNING, info(oneTimeId).state)
+        assertEquals(1, uploaderRuns().count { it.state == WorkInfo.State.BLOCKED })
 
         release.countDown()
         awaitUntil { uploaderRuns().first { it.id == oneTimeId }.state.isFinished }
@@ -431,6 +437,60 @@ class UploadBatchContinuationTest {
         assertTrue(uploaderRuns().all { it.state == WorkInfo.State.SUCCEEDED })
         assertEquals(periodicId, periodicInfo().id)
         assertEquals(WorkInfo.State.ENQUEUED, periodicInfo().state)
+    }
+
+    // Гонка A8: периодический прогон держит Mutex upload, разовый ждёт его и уходит без прогресса, пока periodic
+    // регистрирует продолжение. Часы разового прогона удерживаются: в момент регистрации он точно ещё RUNNING.
+    @Test
+    fun continuationOfPeriodicRunSurvivesWaitingOneTimeRunWithoutProgress() = runBlocking {
+        scheduler.enqueueUploadPeriodic()
+        val periodicId = periodicInfo().id
+        (1L..3L).forEach { pendingUpload(it) }
+        val uploadStarted = CountDownLatch(1)
+        val releaseUpload = CountDownLatch(1)
+        onUpload = { id ->
+            if (id == 1L) {
+                uploadStarted.countDown()
+                releaseUpload.await(10, TimeUnit.SECONDS)
+            }
+        }
+
+        baseUrlProvider.reload()
+        startPeriodic(periodicId)
+        assertTrue(uploadStarted.await(10, TimeUnit.SECONDS))
+
+        scheduler.enqueueUpload()
+        val oneTimeId = startEnqueuedUploaders().single()
+        awaitUntil { cameraRequests.get() == 2 }
+        Thread.sleep(200)
+        val releaseOneTime = CountDownLatch(1)
+        oneTimeClockGate = releaseOneTime
+
+        // Бюджет periodic исчерпан: он сохраняет файл, регистрирует продолжение и завершается.
+        clock.addAndGet(BUDGET)
+        releaseUpload.countDown()
+        awaitUntil { uploaderRuns().size == 2 || periodicInfo().state == WorkInfo.State.ENQUEUED }
+        awaitUntil { periodicInfo().state == WorkInfo.State.ENQUEUED }
+
+        assertEquals("Выполняющийся разовый прогон не отменён", WorkInfo.State.RUNNING, info(oneTimeId).state)
+        assertEquals(2, uploaderRuns().size)
+        assertEquals(1, uploaderRuns().count { it.state == WorkInfo.State.BLOCKED })
+
+        oneTimeClockGate = null
+        releaseOneTime.countDown()
+        awaitUntil { info(oneTimeId).state.isFinished }
+
+        // Разовый прогон ничего не отправил и сам продолжения не ставил, но очередь продолжается.
+        assertEquals(WorkInfo.State.SUCCEEDED, info(oneTimeId).state)
+        assertEquals(listOf(1L), uploads.toList())
+        assertEquals(WorkInfo.State.SUCCEEDED, runNextUploader().state)
+
+        assertEquals(listOf(1L, 2L, 3L), uploads.toList())
+        assertEquals(3, dao.countByStatus(MediaFileStatus.SYNCED))
+        // Цепочка конечна: новых запусков нет, periodic на месте.
+        assertTrue(pendingUploaderRuns().isEmpty())
+        assertEquals(2, uploaderRuns().size)
+        assertEquals(periodicId, periodicInfo().id)
     }
 
     @Test
@@ -453,6 +513,18 @@ class UploadBatchContinuationTest {
         assertEquals(8, dao.countByStatus(MediaFileStatus.SYNCED))
         assertEquals(listOf(1L, 2L, 3L, 10L, 11L, 12L, 13L, 14L), uploads.toList())
         assertEquals(0, pendingUploaderRuns().size)
+    }
+
+    private fun workerClock(oneTime: Boolean) = SyncClock {
+        if (oneTime) oneTimeClockGate?.await(10, TimeUnit.SECONDS)
+        clock.get()
+    }
+
+    private fun startPeriodic(id: UUID) {
+        WorkManagerTestInitHelper.getTestDriver(context)!!.apply {
+            setPeriodDelayMet(id)
+            setAllConstraintsMet(id)
+        }
     }
 
     /** Запускает ожидающий разовый Загрузчик и ждёт окончания этого прогона. */
@@ -499,6 +571,7 @@ class UploadBatchContinuationTest {
 
     private fun respond(request: RecordedRequest): MockResponse {
         val path = request.path.orEmpty()
+        if (path == "/api/v1/folders/camera") cameraRequests.incrementAndGet()
         return when (path) {
             "/api/v1/test" -> {
                 clock.addAndGet(pingCostMs)

@@ -101,7 +101,7 @@ class ProviderWorker @AssistedInject constructor(
         // Без прогресса продолжение не ставится: остаток подхватят события и periodic, бесконечной цепочки нет.
         // Регистрация подтверждается записью в базу WorkManager до возврата success; её сбой — ошибка прогона (retry).
         if (checksum.processed > 0 && checksumRepository.hasPending()) {
-            syncScheduler.continueProvider(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
+            syncScheduler.continueProvider().await()
             Log.i(TAG, "Очередь хеширования не исчерпана — зарегистрировано продолжение Поставщика")
         }
 

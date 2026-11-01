@@ -39,7 +39,7 @@ class SyncScheduler @Inject constructor(
         const val UPLOAD_PERIODIC_WORK_NAME = "photo_upload_periodic"
         const val MEDIA_TRIGGER_WORK_NAME = "photo_media_trigger"
 
-        /** Тег разовых запросов: по нему Worker отличает разовый прогон от периодического. */
+        /** Тег разовых запросов: отличает их от периодических в базе WorkManager. */
         const val ONE_TIME_TAG = "one_time"
 
         private const val PERIODIC_INTERVAL_MINUTES = 30L
@@ -59,16 +59,15 @@ class SyncScheduler @Inject constructor(
     /**
      * Продолжение Поставщика после прогона, остановленного бюджетом времени (A8.1).
      *
-     * Из разового прогона — APPEND_OR_REPLACE к той же цепочке: следующий запуск зависит от текущего
-     * и начнётся только после его успешного завершения; текущий не отменяется. Внешние KEEP-сигналы
-     * в это время видят RUNNING/ENQUEUED и ничего не добавляют.
-     * Из периодического — обычный KEEP: идущая разовая цепочка продолжит себя сама, иначе ставится новая.
+     * APPEND_OR_REPLACE к разовой цепочке: следующий запуск зависит от текущего разового прогона и начнётся
+     * только после его успешного завершения; текущий не отменяется. Внешние KEEP-сигналы в это время видят
+     * RUNNING/ENQUEUED и ничего не добавляют. Без активной цепочки ставится новая.
+     * Периодический прогон регистрирует продолжение так же: разовый прогон, простоявший весь бюджет на Mutex,
+     * завершится без прогресса и своего продолжения не поставит, поэтому KEEP потерял бы продолжение.
      * Возвращённая [Operation] подтверждает запись в базу WorkManager, не немедленный запуск.
      */
-    fun continueProvider(fromOneTimeRun: Boolean): Operation {
-        val policy = if (fromOneTimeRun) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP
-        return workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, policy, providerRequest())
-    }
+    fun continueProvider(): Operation =
+        workManager.enqueueUniqueWork(PROVIDER_WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, providerRequest())
 
     private fun providerRequest() = OneTimeWorkRequestBuilder<ProviderWorker>()
         .addTag(ONE_TIME_TAG)
@@ -106,13 +105,10 @@ class SyncScheduler @Inject constructor(
 
     /**
      * Продолжение Загрузчика после прогона, остановленного бюджетом времени (A8.2), — по тем же правилам,
-     * что [continueProvider]: из разового прогона APPEND_OR_REPLACE к своей цепочке, из периодического — KEEP.
-     * Продолжению, как и любому разовому Загрузчику, нужна подключённая сеть.
+     * что [continueProvider]. Продолжению, как и любому разовому Загрузчику, нужна подключённая сеть.
      */
-    fun continueUpload(fromOneTimeRun: Boolean): Operation {
-        val policy = if (fromOneTimeRun) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP
-        return workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, policy, uploadRequest())
-    }
+    fun continueUpload(): Operation =
+        workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, uploadRequest())
 
     private fun uploadRequest() = OneTimeWorkRequestBuilder<UploadWorker>()
         .setConstraints(

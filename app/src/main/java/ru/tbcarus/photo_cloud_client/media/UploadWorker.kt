@@ -151,7 +151,7 @@ class UploadWorker @AssistedInject constructor(
         // Регистрация подтверждается записью в базу WorkManager до возврата success; её сбой — ошибка прогона (retry).
         val progress = precheck.existing + precheck.pendingUpload + (upload?.attempted ?: 0)
         if (progress > 0 && fileUploadRepository.hasQueuedWork()) {
-            syncScheduler.continueUpload(fromOneTimeRun = SyncScheduler.ONE_TIME_TAG in tags).await()
+            syncScheduler.continueUpload().await()
             Log.i(TAG, "Очередь Загрузчика не исчерпана — зарегистрировано продолжение")
         }
         // Успех прогона снимает проблему Загрузчика, но не означает пустой очереди: её показывают счётчики Room.

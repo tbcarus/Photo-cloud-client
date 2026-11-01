@@ -63,7 +63,7 @@ class ProviderContinuationMechanismTest {
 
         /** Как в Поставщике: продолжение подтверждено записью в базу WorkManager до возврата результата. */
         suspend fun registerContinuation() {
-            scheduler.continueProvider(fromOneTimeRun = oneTime).await()
+            scheduler.continueProvider().await()
         }
     }
 
@@ -184,12 +184,14 @@ class ProviderContinuationMechanismTest {
         awaitUntil { runs.any { it.id == periodicId } && periodicInfo().state == WorkInfo.State.ENQUEUED }
 
         assertFalse(runs.single { it.id == periodicId }.oneTime)
-        assertEquals(listOf(oneTimeId), infos().map { it.id })
-        assertEquals(WorkInfo.State.RUNNING, infos().single().state)
+        assertEquals(2, infos().size)
+        assertEquals(WorkInfo.State.RUNNING, infos().single { it.id == oneTimeId }.state)
+        assertEquals(1, infos().count { it.state == WorkInfo.State.BLOCKED })
 
         release.complete(Unit)
         awaitUntil { allFinished() }
-        assertEquals(WorkInfo.State.SUCCEEDED, infos().single().state)
+        assertTrue(infos().all { it.state == WorkInfo.State.SUCCEEDED })
+        assertEquals(2, runs.count { it.oneTime })
 
         // 3. Без активной разовой цепочки продолжение периодического прогона ставит новую разовую.
         steps += Step {
@@ -201,8 +203,42 @@ class ProviderContinuationMechanismTest {
             setAllConstraintsMet(periodicId)
         }
         awaitUntil { runs.count { it.id == periodicId } == 2 }
-        awaitUntil { runs.count { it.oneTime } == 2 && allFinished() }
-        assertEquals(1, infos().size)
+        awaitUntil { runs.count { it.oneTime } == 3 && allFinished() }
+        assertEquals(3, infos().size)
+    }
+
+    // Пока разовый прогон выполняется, каждый periodic с прогрессом добавляет один запуск в конец цепочки.
+    @Test
+    fun repeatedPeriodicContinuationsStayFiniteAndNoRunIsCancelled() = runBlocking {
+        val release = CompletableDeferred<Unit>()
+        steps += Step {
+            release.await()
+            WorkResult.success()
+        }
+        scheduler.enqueueProvider()
+        awaitUntil { states() == listOf(WorkInfo.State.RUNNING) }
+        val oneTimeId = infos().single().id
+
+        repeat(3) { index ->
+            steps += Step {
+                registerContinuation()
+                WorkResult.success()
+            }
+            val periodicId = if (index == 0) runPeriodic() else runPeriodicAgain()
+            awaitUntil { runs.count { it.id == periodicId } == index + 1 && periodicInfo().state == WorkInfo.State.ENQUEUED }
+        }
+
+        assertEquals(4, infos().size)
+        assertEquals(WorkInfo.State.RUNNING, infos().single { it.id == oneTimeId }.state)
+
+        // Запуски без прогресса продолжений не ставят: цепочка заканчивается и не растёт.
+        release.complete(Unit)
+        awaitUntil { allFinished() }
+        Thread.sleep(200)
+
+        assertEquals(4, infos().size)
+        assertEquals(4, runs.count { it.oneTime })
+        assertTrue(infos().all { it.state == WorkInfo.State.SUCCEEDED })
     }
 
     @Test
@@ -239,7 +275,7 @@ class ProviderContinuationMechanismTest {
         assertEquals(listOf(WorkInfo.State.CANCELLED, WorkInfo.State.CANCELLED), states())
 
         // APPEND_OR_REPLACE поверх отменённой цепочки начинает новую, а не ждёт отменённую.
-        scheduler.continueProvider(fromOneTimeRun = true).await()
+        scheduler.continueProvider().await()
         awaitUntil { runs.size == 2 && allFinished() }
         assertEquals(listOf(WorkInfo.State.SUCCEEDED), states())
     }
@@ -273,6 +309,15 @@ class ProviderContinuationMechanismTest {
         scheduler.enqueueProviderPeriodic()
         val id = workManager.getWorkInfosForUniqueWork(SyncScheduler.PROVIDER_PERIODIC_WORK_NAME).get().single().id
         WorkManagerTestInitHelper.getTestDriver(context)!!.setAllConstraintsMet(id)
+        return id
+    }
+
+    private fun runPeriodicAgain(): UUID {
+        val id = periodicInfo().id
+        WorkManagerTestInitHelper.getTestDriver(context)!!.apply {
+            setPeriodDelayMet(id)
+            setAllConstraintsMet(id)
+        }
         return id
     }
 

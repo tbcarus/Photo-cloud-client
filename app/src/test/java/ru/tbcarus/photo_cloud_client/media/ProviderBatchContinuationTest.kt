@@ -74,6 +74,8 @@ class ProviderBatchContinuationTest {
     private val clock = AtomicLong()
     private val opened = CopyOnWriteArrayList<Long>()
     @Volatile private var onOpen: (Long) -> Unit = {}
+    /** Пока задан, часы разового прогона ждут его: прогон остаётся RUNNING. */
+    @Volatile private var oneTimeClockGate: CountDownLatch? = null
 
     @Before
     fun setUp() {
@@ -109,7 +111,7 @@ class ProviderBatchContinuationTest {
             ): ListenableWorker? = when (workerClassName) {
                 ProviderWorker::class.java.name -> ProviderWorker(
                     appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore,
-                    coordinator, scheduler, SyncClock { clock.get() }
+                    coordinator, scheduler, workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags)
                 )
                 else -> null
             }
@@ -189,6 +191,55 @@ class ProviderBatchContinuationTest {
         assertTrue(opened.isEmpty())
     }
 
+    // Гонка A8: периодический прогон держит Mutex хеширования, разовый ждёт его и уходит без прогресса.
+    @Test
+    fun continuationOfPeriodicRunSurvivesWaitingOneTimeRunWithoutProgress() = runBlocking {
+        (1L..4L).forEach { media.add(image(it)) }
+        val hashingStarted = CountDownLatch(1)
+        val releaseHashing = CountDownLatch(1)
+        onOpen = { id ->
+            if (id == 1L) {
+                hashingStarted.countDown()
+                releaseHashing.await(10, TimeUnit.SECONDS)
+            }
+        }
+        scheduler.enqueueProviderPeriodic()
+        val periodicId = periodicInfo().id
+        WorkManagerTestInitHelper.getTestDriver(context)!!.apply {
+            setPeriodDelayMet(periodicId)
+            setAllConstraintsMet(periodicId)
+        }
+        assertTrue(hashingStarted.await(10, TimeUnit.SECONDS))
+
+        scheduler.enqueueProvider()
+        val oneTimeId = providerRuns().single().id
+        awaitUntil { workManager.getWorkInfoById(oneTimeId).get()!!.state == WorkInfo.State.RUNNING }
+        Thread.sleep(200)
+        val releaseOneTime = CountDownLatch(1)
+        oneTimeClockGate = releaseOneTime
+
+        // Бюджет periodic исчерпан: он сохраняет файл, регистрирует продолжение и завершается.
+        clock.addAndGet(SyncConfig.WORKER_TIME_BUDGET_MS)
+        releaseHashing.countDown()
+        awaitUntil { periodicInfo().state == WorkInfo.State.ENQUEUED }
+
+        assertEquals("Выполняющийся разовый прогон не отменён", WorkInfo.State.RUNNING, oneTimeState(oneTimeId))
+        assertEquals(2, providerRuns().size)
+        assertEquals(1, providerRuns().count { it.state == WorkInfo.State.BLOCKED })
+
+        oneTimeClockGate = null
+        releaseOneTime.countDown()
+        awaitUntil { providerRuns().all { it.state.isFinished } }
+
+        // Разовый прогон ничего не обработал, но очередь обработана продолжением; цепочка конечна.
+        assertEquals(WorkInfo.State.SUCCEEDED, oneTimeState(oneTimeId))
+        assertEquals(2, providerRuns().size)
+        assertTrue(providerRuns().all { it.state == WorkInfo.State.SUCCEEDED })
+        assertEquals(0, dao.countByStatus(MediaFileStatus.PENDING))
+        assertEquals(4, dao.countByStatus(MediaFileStatus.CHECKSUM_READY))
+        assertEquals(periodicId, periodicInfo().id)
+    }
+
     @Test
     fun hashingIsNotBlockedByRunningUpload() = runBlocking {
         val uploadStarted = CountDownLatch(1)
@@ -235,6 +286,16 @@ class ProviderBatchContinuationTest {
             server.shutdown()
         }
     }
+
+    private fun workerClock(oneTime: Boolean) = SyncClock {
+        if (oneTime) oneTimeClockGate?.await(10, TimeUnit.SECONDS)
+        clock.get()
+    }
+
+    private fun periodicInfo(): WorkInfo =
+        workManager.getWorkInfosForUniqueWork(SyncScheduler.PROVIDER_PERIODIC_WORK_NAME).get().single()
+
+    private fun oneTimeState(id: java.util.UUID): WorkInfo.State = workManager.getWorkInfoById(id).get()!!.state
 
     private fun providerRuns(): List<WorkInfo> =
         workManager.getWorkInfosForUniqueWork(SyncScheduler.PROVIDER_WORK_NAME).get()
