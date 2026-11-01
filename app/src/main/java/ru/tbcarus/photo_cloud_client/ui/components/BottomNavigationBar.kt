@@ -27,16 +27,18 @@ fun BottomNavigationBar(
             NavigationBarItem(
                 selected = currentRoute == item.route,
                 onClick = {
-                    if (currentRoute != item.route) {
-                        navController.navigate(item.route) {
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    }
+                    if (currentRoute != item.route) navController.navigateToTab(item.route)
                 },
                 icon = { Icon(item.icon, contentDescription = item.label) },
                 label = { Text(item.label, fontSize = 10.sp) }
             )
         }
+    }
+}
+
+fun NavHostController.navigateToTab(route: String) {
+    navigate(route) {
+        launchSingleTop = true
+        restoreState = true
     }
 }

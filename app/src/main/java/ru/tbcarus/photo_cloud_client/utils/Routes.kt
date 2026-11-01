@@ -5,5 +5,6 @@ object Routes {
     const val Login = "auth"
     const val Settings = "settings"
     const val Profile = "profile"
+    const val Library = "library"
     const val Files = "files"
 }

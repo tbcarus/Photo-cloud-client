@@ -11,16 +11,29 @@ import ru.tbcarus.photo_cloud_client.ui.screens.ProfileScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.SettingsScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.auth.AuthScreen
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
+import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryScreen
+import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryViewModel
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 import ru.tbcarus.photo_cloud_client.utils.Routes
 
 @Composable
-fun NavigationGraph(navController: NavHostController, networkViewModel: NetworkViewModel) {
+fun NavigationGraph(
+    navController: NavHostController,
+    networkViewModel: NetworkViewModel,
+    libraryViewModel: LibraryViewModel
+) {
     NavHost(navController, startDestination = Routes.Network) {
         composable(Routes.Network) { NetworkScreen(viewModel = networkViewModel) }
         composable(Routes.Login) { AuthScreen() }
         composable(Routes.Settings) { SettingsScreen() }
         composable(Routes.Profile) { ProfileScreen() }
+        composable(Routes.Library) {
+            LibraryScreen(
+                viewModel = libraryViewModel,
+                onOpenNetwork = { navController.navigateToTab(Routes.Network) },
+                onOpenLogin = { navController.navigateToTab(Routes.Login) }
+            )
+        }
         composable(Routes.Files) {
             val viewModel: FilesViewModel = hiltViewModel()
             FilesScreen(viewModel = viewModel)

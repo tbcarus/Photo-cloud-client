@@ -1,5 +1,8 @@
 package ru.tbcarus.photo_cloud_client.di
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.server.buildBaseUrl
@@ -11,8 +14,12 @@ class BaseUrlProvider @Inject constructor(
     private val serverPreferences: ServerPreferences
 ) {
     // Пишется из корутин UI и Worker, читается из потоков OkHttp.
-    @Volatile
-    var baseUrl: String = ""
+    private val baseUrlState = MutableStateFlow("")
+    val baseUrlFlow: StateFlow<String> = baseUrlState.asStateFlow()
+
+    var baseUrl: String
+        get() = baseUrlState.value
+        set(value) { baseUrlState.value = value }
     val isReady: Boolean get() = baseUrl.isNotBlank()
 
     /**

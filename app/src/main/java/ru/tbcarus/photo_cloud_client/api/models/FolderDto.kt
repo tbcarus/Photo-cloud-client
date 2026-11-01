@@ -8,4 +8,6 @@ data class FolderDto(
     val folderType: String,
     val createdAt: String? = null,
     val updatedAt: String? = null
-)
+) {
+    val isCamera: Boolean get() = folderType == "CAMERA"
+}
