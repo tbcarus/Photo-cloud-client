@@ -10,4 +10,5 @@ data class FolderDto(
     val updatedAt: String? = null
 ) {
     val isCamera: Boolean get() = folderType == "CAMERA"
+    val isRoot: Boolean get() = folderType == "ROOT"
 }

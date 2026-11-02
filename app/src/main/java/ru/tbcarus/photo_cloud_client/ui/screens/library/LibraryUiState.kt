@@ -28,5 +28,7 @@ data class LibraryUiState(
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
     val canGoUp: Boolean get() = path.size > 1
+    // В Camera файлы попадают только через backup Android.
+    val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
 }

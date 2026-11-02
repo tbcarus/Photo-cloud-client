@@ -1,6 +1,8 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -24,14 +26,18 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,7 +50,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -53,6 +62,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.transfer.TransferState
+import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
 
 // Следующая страница запрашивается заранее, до появления последней строки.
 private const val LOAD_MORE_THRESHOLD = 10
@@ -64,6 +75,40 @@ fun LibraryScreen(
     onOpenLogin: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsState()
+    val transfer by viewModel.transferState.collectAsState()
+
+    // Назначение запоминается до системного выбора: после гибели процесса открытая папка была бы уже другой.
+    var destinationId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var destinationIsRoot by rememberSaveable { mutableStateOf(false) }
+    fun takeDestination(): UploadDestination? =
+        destinationId?.let { UploadDestination(it, destinationIsRoot) }.also { destinationId = null }
+
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        takeDestination()?.let { if (uris.isNotEmpty()) viewModel.uploadFiles(it, uris) }
+    }
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        takeDestination()?.let { destination -> uri?.let { viewModel.uploadFolder(destination, it) } }
+    }
+    fun startUpload(folder: Boolean) {
+        val destination = viewModel.uploadDestination() ?: return
+        destinationId = destination.folderId
+        destinationIsRoot = destination.isRoot
+        if (folder) pickFolder.launch(null) else pickFiles.launch(arrayOf("*/*"))
+    }
+
+    // octet-stream: с MIME, не совпадающим с расширением, провайдер дописал бы к имени своё расширение.
+    var savingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val createDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        savingId?.let { viewModel.saveDownload(it, uri) }
+    }
+    LaunchedEffect(transfer) {
+        val awaiting = transfer as? TransferState.AwaitingDestination ?: return@LaunchedEffect
+        if (savingId == awaiting.id) return@LaunchedEffect
+        savingId = awaiting.id
+        createDocument.launch(awaiting.fileName)
+    }
 
     // Статус, а не вход на экран: адрес может восстановиться уже при открытом экране.
     LaunchedEffect(state.status) { viewModel.ensureLoaded() }
@@ -80,7 +125,13 @@ fun LibraryScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        LibraryHeader(state, onRefresh = viewModel::refresh, onUp = viewModel::navigateUp)
+        LibraryHeader(
+            state = state,
+            transferActive = transfer.isActive,
+            onRefresh = viewModel::refresh,
+            onUp = viewModel::navigateUp,
+            onUpload = ::startUpload
+        )
         state.notice?.let { notice ->
             Text(
                 text = notice,
@@ -89,6 +140,7 @@ fun LibraryScreen(
                 modifier = Modifier.padding(bottom = 4.dp)
             )
         }
+        TransferPanel(transfer, onCancel = viewModel::cancelTransfer, onDismiss = viewModel::dismissTransfer)
         HorizontalDivider()
 
         Box(
@@ -117,7 +169,7 @@ fun LibraryScreen(
                     if (state.isEmpty) {
                         StateMessage(text = "Папка пуста")
                     } else {
-                        LibraryList(state, listState, viewModel)
+                        LibraryList(state, listState, viewModel, downloadEnabled = !transfer.isActive)
                     }
             }
         }
@@ -125,13 +177,20 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryHeader(state: LibraryUiState, onRefresh: () -> Unit, onUp: () -> Unit) {
+private fun LibraryHeader(
+    state: LibraryUiState,
+    transferActive: Boolean,
+    onRefresh: () -> Unit,
+    onUp: () -> Unit,
+    onUpload: (folder: Boolean) -> Unit
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = "Библиотека",
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.weight(1f)
         )
+        if (state.canUpload) UploadMenu(enabled = !transferActive, onUpload = onUpload)
         val canRefresh = state.status != LibraryStatus.NoServer && state.status != LibraryStatus.NoSession
         IconButton(onClick = onRefresh, enabled = canRefresh) {
             Icon(Icons.Default.Refresh, contentDescription = "Обновить")
@@ -161,7 +220,32 @@ private fun LibraryHeader(state: LibraryUiState, onRefresh: () -> Unit, onUp: ()
 }
 
 @Composable
-private fun LibraryList(state: LibraryUiState, listState: LazyListState, viewModel: LibraryViewModel) {
+private fun UploadMenu(enabled: Boolean, onUpload: (folder: Boolean) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }, enabled = enabled) {
+            Icon(Icons.Default.Upload, contentDescription = "Загрузить")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(text = { Text("Загрузить файлы") }, onClick = {
+                expanded = false
+                onUpload(false)
+            })
+            DropdownMenuItem(text = { Text("Загрузить папку") }, onClick = {
+                expanded = false
+                onUpload(true)
+            })
+        }
+    }
+}
+
+@Composable
+private fun LibraryList(
+    state: LibraryUiState,
+    listState: LazyListState,
+    viewModel: LibraryViewModel,
+    downloadEnabled: Boolean
+) {
     val nearEnd by remember(listState) {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -181,7 +265,7 @@ private fun LibraryList(state: LibraryUiState, listState: LazyListState, viewMod
             HorizontalDivider()
         }
         items(state.files, key = { "file-${it.id}" }) { file ->
-            FileRow(file, inCamera)
+            FileRow(file, inCamera, downloadEnabled, onDownload = { viewModel.download(file) })
             HorizontalDivider()
         }
         if (state.isLoadingMore) {
@@ -243,9 +327,9 @@ private fun FolderRow(folder: FolderDto, onClick: () -> Unit) {
     }
 }
 
-// Нажатие не обрабатывается: действия с файлами относятся к следующим этапам.
+// Нажатие на строку оставлено для будущего просмотра; скачивание — отдельной кнопкой.
 @Composable
-private fun FileRow(file: FileItemDto, inCamera: Boolean) {
+private fun FileRow(file: FileItemDto, inCamera: Boolean, downloadEnabled: Boolean, onDownload: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -258,7 +342,7 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean) {
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.width(12.dp))
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = file.originalFilename.orEmpty(),
                 style = MaterialTheme.typography.bodyMedium,
@@ -271,6 +355,9 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+        IconButton(onClick = onDownload, enabled = downloadEnabled && file.id != null) {
+            Icon(Icons.Default.Download, contentDescription = "Скачать")
         }
     }
 }

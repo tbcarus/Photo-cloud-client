@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.library
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -9,7 +10,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
@@ -18,7 +18,12 @@ import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
-import ru.tbcarus.photo_cloud_client.utils.JwtUtils
+import ru.tbcarus.photo_cloud_client.library.LibrarySession
+import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.transfer.TransferKind
+import ru.tbcarus.photo_cloud_client.transfer.TransferManager
+import ru.tbcarus.photo_cloud_client.transfer.TransferState
+import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
 import javax.inject.Inject
 
 /**
@@ -29,21 +34,26 @@ import javax.inject.Inject
 class LibraryViewModel @Inject constructor(
     private val repository: LibraryRepository,
     baseUrlProvider: BaseUrlProvider,
-    tokenStorage: TokenStorage
+    tokenStorage: TokenStorage,
+    private val transfers: TransferManager
 ) : ViewModel() {
-
-    private data class LibraryContext(val baseUrl: String, val user: String?)
 
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
 
-    private var context: LibraryContext? = null
+    /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
+    val transferState: StateFlow<TransferState> = transfers.state
+
+    private var context: LibrarySession? = null
     private var loadJob: Job? = null
     private var loadMoreJob: Job? = null
     private var nextPage = 0
 
     // Номер текущей загрузки: ответ с другим номером устарел, даже если запрос не удалось прервать.
     private var generation = 0
+
+    // Итог передачи, по которому папка уже обновлена.
+    private var handledTransfer = -1L
 
     var scrollIndex = 0
         private set
@@ -53,13 +63,12 @@ class LibraryViewModel @Inject constructor(
     init {
         // Контекст задают адрес и subject: refresh меняет токены, но не пользователя.
         viewModelScope.launch {
-            combine(baseUrlProvider.baseUrlFlow, tokenStorage.tokensFlow) { baseUrl, tokens ->
-                LibraryContext(baseUrl, tokens?.let { JwtUtils.getSubject(it.accessToken) })
-            }.collect(::onContextChanged)
+            librarySessionFlow(baseUrlProvider, tokenStorage).collect(::onContextChanged)
         }
+        viewModelScope.launch { transfers.state.collect(::onTransferState) }
     }
 
-    private fun onContextChanged(newContext: LibraryContext) {
+    private fun onContextChanged(newContext: LibrarySession) {
         // Отказ Server при том же пользователе: после нового входа каталог снова можно запросить.
         if (newContext == context && _uiState.value.status != LibraryStatus.NoSession) return
         context = newContext
@@ -124,6 +133,44 @@ class LibraryViewModel @Inject constructor(
                 }
                 is LibraryResult.Failure -> applyFailure(result, state.path)
             }
+        }
+    }
+
+    /** Папка для ручной загрузки: текущая, кроме Camera. */
+    fun uploadDestination(): UploadDestination? {
+        val state = _uiState.value
+        val folder = state.currentFolder ?: return null
+        return if (state.canUpload) UploadDestination(folder.id, folder.isRoot) else null
+    }
+
+    fun uploadFiles(destination: UploadDestination, uris: List<Uri>) {
+        transfers.uploadFiles(destination, uris)
+    }
+
+    fun uploadFolder(destination: UploadDestination, treeUri: Uri) {
+        transfers.uploadFolder(destination, treeUri)
+    }
+
+    fun download(file: FileItemDto) {
+        transfers.download(file)
+    }
+
+    fun saveDownload(id: Long, uri: Uri?) = transfers.saveDownload(id, uri)
+
+    fun cancelTransfer() = transfers.cancel()
+
+    fun dismissTransfer() = transfers.dismiss()
+
+    // Загруженные файлы видны сразу, если пользователь остался в той же папке той же сессии.
+    private fun onTransferState(transfer: TransferState) {
+        if (transfer !is TransferState.Finished || transfer.kind != TransferKind.UPLOAD) return
+        if (transfer.id == handledTransfer) return
+        handledTransfer = transfer.id
+        val state = _uiState.value
+        if (transfer.session == context && state.status == LibraryStatus.Content &&
+            state.currentFolder?.id == transfer.destinationFolderId
+        ) {
+            refresh()
         }
     }
 

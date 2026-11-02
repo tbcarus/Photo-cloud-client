@@ -1,6 +1,7 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import android.app.Application
+import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,6 +32,13 @@ import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
+import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.transfer.FakeDocuments
+import ru.tbcarus.photo_cloud_client.transfer.FakeTransferRemote
+import ru.tbcarus.photo_cloud_client.transfer.TransferManager
+import ru.tbcarus.photo_cloud_client.transfer.TransferState
+import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
+import java.nio.file.Files
 import java.util.Base64
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -66,8 +74,20 @@ class LibraryViewModelTest {
         Dispatchers.resetMain()
     }
 
+    private val transferRemote = FakeTransferRemote()
+    private val transferDocuments = FakeDocuments(ApplicationProvider.getApplicationContext())
+    private val transfers by lazy {
+        TransferManager(
+            transferRemote,
+            transferDocuments,
+            Files.createTempDirectory("transfer").toFile(),
+            librarySessionFlow(baseUrlProvider, tokens),
+            UnconfinedTestDispatcher()
+        )
+    }
+
     private fun createViewModel() {
-        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens)
+        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers)
     }
 
     private fun opened(): LibraryViewModel {
@@ -493,6 +513,54 @@ class LibraryViewModelTest {
     }
 
     private fun fileIds() = state.files.map { it.id }
+
+    @Test
+    fun finishedUploadRefreshesOpenDestinationWithoutLeavingIt() {
+        repository.setChildren(root, alpha)
+        transferRemote.folder(alpha.id, root.id, alpha.name)
+        opened().openFolder(alpha)
+        repository.calls.clear()
+        val local = transferDocuments.file("new.txt", "x".toByteArray())
+
+        viewModel.uploadFiles(viewModel.uploadDestination()!!, listOf(local.uri))
+
+        assertTrue(viewModel.transferState.value is TransferState.Finished)
+        assertEquals(listOf("children:3", "files:3:0"), repository.calls)
+        assertEquals(listOf(root, alpha), state.path)
+    }
+
+    @Test
+    fun finishedUploadDoesNotReloadFolderUserLeft() {
+        repository.setChildren(root, alpha)
+        transferRemote.folder(alpha.id, root.id, alpha.name)
+        opened().openFolder(alpha)
+        val local = transferDocuments.file("new.txt", "x".toByteArray())
+        val gate = transferRemote.hold("upload:3:new.txt")
+        viewModel.uploadFiles(viewModel.uploadDestination()!!, listOf(local.uri))
+        viewModel.navigateUp()
+        repository.calls.clear()
+
+        gate.complete(Unit)
+
+        assertTrue(viewModel.transferState.value is TransferState.Finished)
+        assertTrue(repository.calls.isEmpty())
+        assertEquals(listOf(root), state.path)
+    }
+
+    @Test
+    fun uploadIsOfferedInRootAndUserFoldersButNotInCamera() {
+        repository.setChildren(root, camera, alpha)
+        opened()
+        assertEquals(UploadDestination(root.id, isRoot = true), viewModel.uploadDestination())
+
+        viewModel.openFolder(alpha)
+        assertEquals(UploadDestination(alpha.id, isRoot = false), viewModel.uploadDestination())
+
+        viewModel.navigateUp()
+        viewModel.openFolder(camera)
+        assertFalse(state.canUpload)
+        assertNull(viewModel.uploadDestination())
+    }
 
     private fun file(id: Long) = FileItemDto(id = id, originalFilename = "file$id.txt")
 

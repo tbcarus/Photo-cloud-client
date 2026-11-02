@@ -10,9 +10,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
@@ -27,6 +31,14 @@ fun MainScreen(networkViewModel: NetworkViewModel, libraryViewModel: LibraryView
     val navController = rememberNavController()
 
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Ручная передача идёт только при живом процессе: на время неё экран не гаснет на любой вкладке.
+    val transfer by libraryViewModel.transferState.collectAsState()
+    val view = LocalView.current
+    DisposableEffect(transfer.isActive) {
+        view.keepScreenOn = transfer.isActive
+        onDispose { view.keepScreenOn = false }
+    }
 
     Scaffold(
         topBar = {
