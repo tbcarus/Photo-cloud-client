@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +35,7 @@ import ru.tbcarus.photo_cloud_client.media.mediaAccess
 import ru.tbcarus.photo_cloud_client.media.mediaPermissionRequest
 import ru.tbcarus.photo_cloud_client.media.mediaReadPermission
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
+import ru.tbcarus.photo_cloud_client.ui.screens.settings.FolderBackupSection
 import ru.tbcarus.photo_cloud_client.ui.screens.settings.SettingsViewModel
 
 /**
@@ -79,7 +82,7 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
 
     OnResumeEffect { refresh() }
 
-    Column(modifier = Modifier.padding(16.dp)) {
+    Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         PhotoAccessSection(
             access = photoAccess,
             blocked = photoRequest.blocked,
@@ -100,6 +103,8 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             },
             onOpenSettings = { context.startActivity(context.appSettingsIntent()) }
         )
+        Spacer(Modifier.height(24.dp))
+        FolderBackupSection()
     }
 }
 

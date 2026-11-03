@@ -28,7 +28,12 @@ data class LibraryUiState(
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
     val canGoUp: Boolean get() = path.size > 1
+    /**
+     * AutoUploads и дерево активного источника меняет только автоматическое резервирование. Вложенные папки
+     * backupSource не имеют: принадлежность дереву определяет корень источника на открытом пути.
+     */
+    val inManagedTree: Boolean get() = currentFolder?.isAutoUploads == true || path.any { it.isActiveBackupSource }
     // В Camera файлы попадают только через backup Android.
-    val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false
+    val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
 }

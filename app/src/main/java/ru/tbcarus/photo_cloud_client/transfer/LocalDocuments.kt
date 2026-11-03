@@ -77,20 +77,22 @@ open class LocalDocuments @Inject constructor(
         } catch (e: Exception) {
             return LocalDir(name = null, problem = UNREADABLE_FOLDER)
         }
-        val rootName = try {
-            resolver.query(
-                DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId),
-                arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null
-            )?.use { if (it.moveToFirst()) it.stringOrNull(Document.COLUMN_DISPLAY_NAME) else null }
-        } catch (e: Exception) {
-            null
-        }
         return walkDocumentTree(
             rootId = rootId,
-            rootName = rootName,
+            rootName = treeName(treeUri),
             children = { parentId -> children(treeUri, parentId) },
             documentUri = { id -> DocumentsContract.buildDocumentUriUsingTree(treeUri, id) }
         )
+    }
+
+    /** Имя выбранной папки дерева; null — провайдер его не сообщил. */
+    open fun treeName(treeUri: Uri): String? = try {
+        resolver.query(
+            DocumentsContract.buildDocumentUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri)),
+            arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null
+        )?.use { if (it.moveToFirst()) it.stringOrNull(Document.COLUMN_DISPLAY_NAME) else null }
+    } catch (e: Exception) {
+        null
     }
 
     open fun open(uri: Uri): InputStream =

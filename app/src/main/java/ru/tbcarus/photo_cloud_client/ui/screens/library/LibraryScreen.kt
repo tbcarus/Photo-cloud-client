@@ -24,7 +24,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.AudioFile
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
@@ -307,18 +309,27 @@ private fun FolderRow(folder: FolderDto, onClick: () -> Unit) {
             .padding(vertical = 12.dp)
     ) {
         Icon(
-            imageVector = if (folder.isCamera) Icons.Default.PhotoCamera else Icons.Default.Folder,
+            imageVector = when {
+                folder.isCamera -> Icons.Default.PhotoCamera
+                folder.isAutoUploads -> Icons.Default.Backup
+                folder.isActiveBackupSource -> Icons.Default.CloudSync
+                else -> Icons.Default.Folder
+            },
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary
         )
         Spacer(Modifier.width(12.dp))
-        Text(
-            text = folder.name,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = folder.name,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            folderSubtitle(folder)?.let {
+                Text(text = it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         Icon(
             imageVector = Icons.Default.ChevronRight,
             contentDescription = null,

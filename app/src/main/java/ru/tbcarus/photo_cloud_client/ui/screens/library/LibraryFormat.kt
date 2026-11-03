@@ -15,6 +15,13 @@ private val shortExtension = Regex("[\\p{L}\\p{N}]{1,8}")
 fun libraryPathLabel(path: List<FolderDto>): String =
     path.mapIndexed { index, folder -> if (index == 0) "Корень" else folder.name }.joinToString(" / ")
 
+/** Пояснение к системному контейнеру и активному источнику; у обычных папок его нет. */
+fun folderSubtitle(folder: FolderDto): String? = when {
+    folder.isAutoUploads -> "Автоматическая загрузка папок"
+    folder.isActiveBackupSource -> "Источник автоматической загрузки"
+    else -> null
+}
+
 /** Вторая строка файла: тип, размер и доступная дата. */
 fun librarySubtitle(file: FileItemDto, inCamera: Boolean): String =
     listOfNotNull(

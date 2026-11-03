@@ -19,5 +19,6 @@ object ApiPaths {
     const val FOLDERS = "$API_V1/folders"
     const val FOLDERS_ROOT = "$FOLDERS/root"
     const val FOLDERS_CAMERA = "$FOLDERS/camera"
+    const val FOLDERS_BACKUP = "$FOLDERS/backup"
     const val FOLDERS_CHILDREN = "$FOLDERS/{id}/children"
 }
