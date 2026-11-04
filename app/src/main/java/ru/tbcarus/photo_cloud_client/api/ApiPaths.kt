@@ -16,6 +16,8 @@ object ApiPaths {
     const val FILES_CHECKSUMS_EXISTS = "$FILES/checksums/exists"
     const val FILES_DOWNLOAD = "$FILES/{id}/download"
     const val FILE_ID = "$FILES/{id}"
+    const val FILE_MOVE = "$FILES/{id}/move"
+    const val FILE_COPY = "$FILES/{id}/copy"
 
     const val FOLDERS = "$API_V1/folders"
     const val FOLDERS_ROOT = "$FOLDERS/root"
@@ -23,5 +25,6 @@ object ApiPaths {
     const val FOLDERS_BACKUP = "$FOLDERS/backup"
     const val FOLDERS_CHILDREN = "$FOLDERS/{id}/children"
     const val FOLDER_ID = "$FOLDERS/{id}"
+    const val FOLDER_MOVE = "$FOLDERS/{id}/move"
     const val FOLDER_BACKUP_SOURCE = "$FOLDERS/{id}/backup"
 }

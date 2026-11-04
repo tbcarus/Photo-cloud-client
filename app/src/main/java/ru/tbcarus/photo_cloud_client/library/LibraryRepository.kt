@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.library
 
+import com.google.gson.JsonParseException
 import com.google.gson.stream.MalformedJsonException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -7,10 +8,13 @@ import kotlinx.coroutines.withContext
 import retrofit2.Call
 import retrofit2.Response
 import retrofit2.awaitResponse
+import ru.tbcarus.photo_cloud_client.api.models.CopyFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.CreateFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest
+import ru.tbcarus.photo_cloud_client.api.models.MoveFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFolderRequest
 import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
@@ -36,10 +40,13 @@ sealed interface LibraryResult<out T> {
     data object Managed : Failure
     /** 400: Server отклонил имя или операцию над объектом. */
     data class Rejected(val message: String) : Failure
+    /** Server ответил 2xx, но тело не разобрано: операция могла выполниться. Только для move и copy. */
+    data class UnknownResult(val message: String) : Failure
 }
 
 /**
- * Серверная библиотека: чтение и ручные изменения пользователя (создание папки, переименование).
+ * Серверная библиотека: чтение и ручные изменения пользователя (создание папки, переименование, перемещение,
+ * копирование файла).
  * backupSource не передаётся: это запросы обычного пользователя, а не резервирования. С локальной очередью backup не связан.
  */
 @Singleton
@@ -74,15 +81,35 @@ open class LibraryRepository @Inject constructor(
     open suspend fun renameFile(fileId: Long, name: String): LibraryResult<FileItemDto> =
         request(change = true) { apiServiceFactory.authFileService().renameFile(fileId, RenameFileRequest(name)) }
 
+    open suspend fun moveFile(fileId: Long, targetFolderId: Long): LibraryResult<FileItemDto> =
+        request(change = true, uncertainBody = true) {
+            apiServiceFactory.authFileService().moveFile(fileId, MoveFileRequest(targetFolderId))
+        }
+
+    open suspend fun copyFile(fileId: Long, targetFolderId: Long, name: String): LibraryResult<FileItemDto> =
+        request(change = true, uncertainBody = true) {
+            apiServiceFactory.authFileService().copyFile(fileId, CopyFileRequest(targetFolderId, name))
+        }
+
+    open suspend fun moveFolder(folderId: Long, targetParentId: Long): LibraryResult<FolderDto> =
+        request(change = true, uncertainBody = true) {
+            apiServiceFactory.authFolderService().moveFolder(folderId, MoveFolderRequest(targetParentId))
+        }
+
     // awaitResponse при отмене корутины прерывает и сам HTTP-запрос.
-    private suspend fun <T : Any> request(change: Boolean = false, call: () -> Call<T>): LibraryResult<T> =
+    // uncertainBody: Retrofit разбирает только тело 2xx, поэтому ошибка разбора означает, что Server операцию принял.
+    private suspend fun <T : Any> request(
+        change: Boolean = false,
+        uncertainBody: Boolean = false,
+        call: () -> Call<T>
+    ): LibraryResult<T> =
         withContext(Dispatchers.IO) {
             try {
                 val response = call().awaitResponse()
                 val body = response.body()
                 when {
                     response.isSuccessful && body != null -> LibraryResult.Success(body)
-                    response.isSuccessful -> LibraryResult.ServerError("Пустой ответ сервера")
+                    response.isSuccessful -> unreadable(uncertainBody, "Пустой ответ сервера")
                     response.code() == 401 || response.code() == 403 -> LibraryResult.Unauthorized
                     response.code() == 404 -> LibraryResult.NotFound
                     else -> failure(response, change)
@@ -91,13 +118,18 @@ open class LibraryRepository @Inject constructor(
                 throw e
             } catch (e: MalformedJsonException) {
                 // Наследник IOException, но ответ получен: связь исправна.
-                LibraryResult.ServerError("Некорректный ответ сервера")
+                unreadable(uncertainBody, "Некорректный ответ сервера")
+            } catch (e: JsonParseException) {
+                unreadable(uncertainBody, e.message ?: "Некорректный ответ сервера")
             } catch (e: IOException) {
                 LibraryResult.NetworkError(e.message ?: "Сервер не отвечает")
             } catch (e: RuntimeException) {
                 LibraryResult.ServerError(e.message ?: "Некорректный ответ сервера")
             }
         }
+
+    private fun unreadable(uncertainBody: Boolean, message: String): LibraryResult.Failure =
+        if (uncertainBody) LibraryResult.UnknownResult(message) else LibraryResult.ServerError(message)
 
     // Код и текст ошибки берутся из одного чтения тела.
     private fun failure(response: Response<*>, change: Boolean): LibraryResult.Failure {

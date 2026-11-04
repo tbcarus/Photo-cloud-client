@@ -277,6 +277,84 @@ class LibraryRepositoryTest {
     }
 
     @Test
+    fun moveFileSendsOnlyTargetFolder() = runBlocking {
+        server.enqueue(json("""{"id":42,"folderId":5,"originalFilename":"План.pdf"}"""))
+
+        val result = repository.moveFile(42, 5)
+
+        assertEquals(42L, (result as LibraryResult.Success).value.id)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/files/42/move", request.path)
+        assertEquals("""{"targetFolderId":5}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun copyFileSendsTargetAndCopyName() = runBlocking {
+        server.enqueue(json("""{"id":77,"folderId":3,"originalFilename":"План (черновик).pdf"}"""))
+
+        val result = repository.copyFile(42, 3, "План (черновик).pdf")
+
+        assertEquals(77L, (result as LibraryResult.Success).value.id)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/files/42/copy", request.path)
+        assertEquals("""{"targetFolderId":3,"originalName":"План (черновик).pdf"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun moveFolderSendsTargetParent() = runBlocking {
+        server.enqueue(json("""{"id":3,"parentId":1,"name":"Trips","folderType":"USER"}"""))
+
+        val result = repository.moveFolder(3, 1)
+
+        assertEquals(LibraryResult.Success(FolderDto(3, 1, "Trips", "USER")), result)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/folders/3/move", request.path)
+        assertEquals("""{"targetParentId":1}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun relocationRefusalsAreDistinguished() = runBlocking {
+        server.enqueue(json("""{"code":"BAD_REQUEST","message":"Cannot move folder into its descendant"}""").setResponseCode(400))
+        server.enqueue(json("""{"code":"CONFLICT","message":"File with this name already exists in folder"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"FOLDER_MANAGED","message":"Folder belongs to an active backup source"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"FILE_ITEM_NOT_FOUND","message":"File not found"}""").setResponseCode(404))
+
+        assertEquals(LibraryResult.Rejected("Cannot move folder into its descendant"), repository.moveFolder(3, 5))
+        assertEquals(LibraryResult.NameTaken, repository.copyFile(42, 3, "a.txt"))
+        assertEquals(LibraryResult.Managed, repository.moveFile(42, 6))
+        assertEquals(LibraryResult.NotFound, repository.moveFile(42, 6))
+    }
+
+    @Test
+    fun unreadableSuccessOfRelocationIsUnknownResult() = runBlocking {
+        // Server принял операцию (2xx), но тело не разбирается: результат неизвестен, а не ошибка.
+        server.enqueue(json("<html>"))
+        server.enqueue(json("""[{"id":77}]"""))
+        server.enqueue(json(""""moved""""))
+
+        assertTrue(repository.moveFile(42, 5) is LibraryResult.UnknownResult)
+        assertTrue(repository.copyFile(42, 5, "a.txt") is LibraryResult.UnknownResult)
+        assertTrue(repository.moveFolder(3, 1) is LibraryResult.UnknownResult)
+        // Каждый вызов — ровно один запрос.
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun relocationHttpErrorsAreUnchangedAndOtherChangesKeepServerError() = runBlocking {
+        server.enqueue(json("""{"code":"INTERNAL_ERROR","message":"Physical storage operation failed"}""").setResponseCode(500))
+        server.enqueue(json("<html>"))
+        server.enqueue(json("<html>"))
+
+        assertEquals(LibraryResult.ServerError("Physical storage operation failed"), repository.copyFile(42, 5, "a.txt"))
+        // Создание и переименование (6.1) и чтение разбирают тело по-прежнему.
+        assertTrue(repository.renameFolder(3, "X") is LibraryResult.ServerError)
+        assertTrue(repository.getChildren(1) is LibraryResult.ServerError)
+    }
+
+    @Test
     fun readingKeepsConflictAsServerError() = runBlocking {
         server.enqueue(json("""{"code":"CONFLICT","message":"Conflict"}""").setResponseCode(409))
 

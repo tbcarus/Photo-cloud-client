@@ -12,6 +12,7 @@ import retrofit2.http.Path;
 import ru.tbcarus.photo_cloud_client.api.models.CreateBackupSourceRequest;
 import ru.tbcarus.photo_cloud_client.api.models.CreateFolderRequest;
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto;
+import ru.tbcarus.photo_cloud_client.api.models.MoveFolderRequest;
 import ru.tbcarus.photo_cloud_client.api.models.RenameFolderRequest;
 
 public interface FolderService {
@@ -30,6 +31,10 @@ public interface FolderService {
     /** Переименование с сохранением ID: Server меняет только имя папки, вложенные объекты не трогает. */
     @PATCH(ApiPaths.FOLDER_ID)
     Call<FolderDto> renameFolder(@Path("id") long id, @Body RenameFolderRequest request);
+
+    /** Перенос USER-папки вместе с поддеревом; ID папки и вложенных объектов сохраняются. */
+    @POST(ApiPaths.FOLDER_MOVE)
+    Call<FolderDto> moveFolder(@Path("id") long id, @Body MoveFolderRequest request);
 
     // Идемпотентно по sourceUuid: повтор с тем же UUID и именем возвращает прежнюю папку.
     @POST(ApiPaths.FOLDERS_BACKUP)

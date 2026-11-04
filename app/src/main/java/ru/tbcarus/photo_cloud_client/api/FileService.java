@@ -15,8 +15,10 @@ import retrofit2.http.Query;
 import retrofit2.http.Streaming;
 import ru.tbcarus.photo_cloud_client.api.models.ChecksumExistsRequest;
 import ru.tbcarus.photo_cloud_client.api.models.ChecksumExistsResponse;
+import ru.tbcarus.photo_cloud_client.api.models.CopyFileRequest;
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto;
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto;
+import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest;
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest;
 
 public interface FileService {
@@ -64,4 +66,12 @@ public interface FileService {
     /** Переименование с сохранением ID; backupSource — для файла активного дерева своего источника. */
     @PATCH(ApiPaths.FILE_ID)
     Call<FileItemDto> renameFile(@Path("id") long id, @Body RenameFileRequest request);
+
+    /** Перенос в другую папку вместе с физическим файлом; ID сохраняется. */
+    @POST(ApiPaths.FILE_MOVE)
+    Call<FileItemDto> moveFile(@Path("id") long id, @Body MoveFileRequest request);
+
+    /** Серверная копия: новый FileItem и независимые байты, Android байты не передаёт. */
+    @POST(ApiPaths.FILE_COPY)
+    Call<FileItemDto> copyFile(@Path("id") long id, @Body CopyFileRequest request);
 }

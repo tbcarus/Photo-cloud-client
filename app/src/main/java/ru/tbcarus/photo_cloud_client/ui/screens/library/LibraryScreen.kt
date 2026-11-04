@@ -64,6 +64,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -82,6 +83,7 @@ import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 
 // Следующая страница запрашивается заранее, до появления последней строки.
 private const val LOAD_MORE_THRESHOLD = 10
+private const val DISABLED_ALPHA = 0.38f
 
 @Composable
 fun LibraryScreen(
@@ -127,7 +129,10 @@ fun LibraryScreen(
 
     // Статус, а не вход на экран: адрес может восстановиться уже при открытом экране.
     LaunchedEffect(state.status) { viewModel.ensureLoaded() }
-    BackHandler(enabled = state.canGoUp) { viewModel.navigateUp() }
+    // При выборе назначения Back поднимается по папкам, а в корне отменяет выбор.
+    BackHandler(enabled = state.canGoUp || state.picking) {
+        if (state.canGoUp) viewModel.navigateUp() else viewModel.cancelRelocation()
+    }
 
     // Вне LazyColumn: при загрузке списка нет, а положение нужно сохранить при смене вкладки.
     val listState = remember(state.contentVersion) { LazyListState(viewModel.scrollIndex, viewModel.scrollOffset) }
@@ -156,12 +161,38 @@ fun LibraryScreen(
                 onDismiss = viewModel::dismissEdit
             )
         }
-        if (state.isSourceRoot) SourceRootPanel(state, onDisable = viewModel::disableSource)
+        state.relocation?.let { relocation ->
+            RelocationPanel(
+                state = state,
+                relocation = relocation,
+                onConfirm = viewModel::requestRelocationConfirm,
+                onCancel = viewModel::cancelRelocation,
+                onRefresh = viewModel::refresh
+            )
+            if (relocation.confirming) {
+                RelocationDialog(
+                    relocation = relocation,
+                    target = state.path,
+                    onNameChange = viewModel::onCopyNameChange,
+                    onConfirm = viewModel::confirmRelocation,
+                    onDismiss = viewModel::dismissRelocationConfirm
+                )
+            }
+        }
+        if (state.isSourceRoot && !state.picking) SourceRootPanel(state, onDisable = viewModel::disableSource)
         state.notice?.let { notice ->
             Text(
                 text = notice,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+        }
+        state.info?.let { info ->
+            Text(
+                text = info,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(bottom = 4.dp)
             )
         }
@@ -307,26 +338,44 @@ private fun LibraryList(
         if (nearEnd) viewModel.onListEndReached()
     }
 
+    // Положение списка запоминается до выбора назначения: отмена вернёт к той же строке.
+    fun keepPosition() = viewModel.saveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+
     val inCamera = state.currentFolder?.isCamera == true
+    val relocation = state.relocation
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(state.folders, key = { "folder-${it.id}" }) { folder ->
+            // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
+            val actions = listOfNotNull(
+                RowAction("Переименовать", { viewModel.startRename(folder) }).takeIf { state.canRename(folder) },
+                RowAction("Переместить", {
+                    keepPosition()
+                    viewModel.startMove(folder)
+                }).takeIf { state.canMove(folder) }
+            )
             FolderRow(
                 folder = folder,
-                canRename = state.canRename(folder),
-                onClick = { viewModel.openFolder(folder) },
-                onRename = { viewModel.startRename(folder) }
+                actions = actions,
+                blocked = relocation?.let { blockedFolderProblem(it, state.path, folder) },
+                onClick = { viewModel.openFolder(folder) }
             )
             HorizontalDivider()
         }
         items(state.files, key = { "file-${it.id}" }) { file ->
-            FileRow(
-                file = file,
-                inCamera = inCamera,
-                downloadEnabled = downloadEnabled,
-                canRename = state.canRename(file),
-                onDownload = { viewModel.download(file) },
-                onRename = { viewModel.startRename(file) }
+            // При выборе назначения файлы видны для сверки имён, но действий с ними нет.
+            val actions = if (state.picking) emptyList() else listOfNotNull(
+                RowAction("Скачать", { viewModel.download(file) }, enabled = downloadEnabled && file.id != null),
+                RowAction("Переименовать", { viewModel.startRename(file) }).takeIf { state.canRename(file) },
+                RowAction("Переместить", {
+                    keepPosition()
+                    viewModel.startMove(file)
+                }).takeIf { state.canMove(file) },
+                RowAction("Копировать", {
+                    keepPosition()
+                    viewModel.startCopy(file)
+                }).takeIf { state.canCopy(file) }
             )
+            FileRow(file = file, inCamera = inCamera, actions = actions, dimmed = state.picking)
             HorizontalDivider()
         }
         if (state.isLoadingMore) {
@@ -358,13 +407,15 @@ private fun LibraryList(
     }
 }
 
+/** [blocked] — причина, по которой при выборе назначения в папку нет смысла входить. */
 @Composable
-private fun FolderRow(folder: FolderDto, canRename: Boolean, onClick: () -> Unit, onRename: () -> Unit) {
+private fun FolderRow(folder: FolderDto, actions: List<RowAction>, blocked: String?, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = blocked == null, onClick = onClick)
+            .alpha(if (blocked == null) 1f else DISABLED_ALPHA)
             .padding(vertical = 4.dp)
     ) {
         FolderIcon(folderKind(folder))
@@ -380,29 +431,22 @@ private fun FolderRow(folder: FolderDto, canRename: Boolean, onClick: () -> Unit
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            folderSubtitle(folder)?.let {
+            (blocked ?: folderSubtitle(folder))?.let {
                 Text(text = it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
-        ActionsMenu(if (canRename) listOf(RowAction("Переименовать", onRename)) else emptyList())
+        ActionsMenu(actions)
     }
 }
 
 // Нажатие на строку оставлено для будущего просмотра; действия — в меню строки.
 @Composable
-private fun FileRow(
-    file: FileItemDto,
-    inCamera: Boolean,
-    downloadEnabled: Boolean,
-    canRename: Boolean,
-    onDownload: () -> Unit,
-    onRename: () -> Unit
-) {
+private fun FileRow(file: FileItemDto, inCamera: Boolean, actions: List<RowAction>, dimmed: Boolean) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (dimmed) DISABLED_ALPHA else 1f)
             .padding(vertical = 4.dp)
     ) {
         Icon(
@@ -429,12 +473,7 @@ private fun FileRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        ActionsMenu(
-            listOfNotNull(
-                RowAction("Скачать", onDownload, enabled = downloadEnabled && file.id != null),
-                RowAction("Переименовать", onRename).takeIf { canRename }
-            )
-        )
+        ActionsMenu(actions)
     }
 }
 
@@ -548,6 +587,128 @@ private fun NameDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !edit.saving) { Text("Отмена") }
+        }
+    )
+}
+
+/** Панель выбора назначения: что выполняется, годится ли открытая папка, подтверждение и отмена. */
+@Composable
+private fun RelocationPanel(
+    state: LibraryUiState,
+    relocation: Relocation,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    val (title, confirm) = when (relocation.item) {
+        is Relocated.MoveFile -> "Перемещение файла" to "Переместить сюда"
+        is Relocated.CopyFile -> "Копирование файла" to "Копировать сюда"
+        is Relocated.MoveFolder -> "Перемещение папки" to "Переместить сюда"
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "$title «${relocation.item.name}»",
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "Выберите папку назначения",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            val problem = state.pickProblem.takeIf { state.status == LibraryStatus.Content }
+            (relocation.error ?: problem)?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (relocation.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                if (relocation.unknownResult) TextButton(onClick = onRefresh) { Text("Обновить") }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onCancel, enabled = !relocation.saving) { Text("Отмена") }
+                Button(
+                    onClick = onConfirm,
+                    enabled = state.pickProblem == null && !relocation.saving && !relocation.unknownResult
+                ) { Text(confirm) }
+            }
+        }
+    }
+}
+
+/** Итог операции до отправки; для копии файла — имя копии, по умолчанию исходное. */
+@Composable
+private fun RelocationDialog(
+    relocation: Relocation,
+    target: List<FolderDto>,
+    onNameChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val (title, confirm, subject) = when (relocation.item) {
+        is Relocated.MoveFile -> Triple("Переместить файл?", "Переместить", "Файл")
+        is Relocated.CopyFile -> Triple("Копировать файл?", "Копировать", "Файл")
+        is Relocated.MoveFolder -> Triple("Переместить папку?", "Переместить", "Папка")
+    }
+    var field by remember(relocation.id) {
+        val name = relocation.copyName
+        val stem = name.lastIndexOf('.').takeIf { it > 0 } ?: name.length
+        mutableStateOf(TextFieldValue(name, TextRange(0, stem)))
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        // Пока запрос выполняется, диалог не закрывается: результат должен дойти до Library.
+        properties = DialogProperties(dismissOnBackPress = !relocation.saving, dismissOnClickOutside = !relocation.saving),
+        title = { Text(title) },
+        text = {
+            Column {
+                Text("$subject: ${relocation.item.name}", style = MaterialTheme.typography.bodyMedium)
+                Text("Из: ${libraryPathLabel(relocation.sourcePath)}", style = MaterialTheme.typography.bodyMedium)
+                Text("В: ${libraryPathLabel(target)}", style = MaterialTheme.typography.bodyMedium)
+                if (relocation.item is Relocated.CopyFile) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = field,
+                        onValueChange = {
+                            field = it
+                            onNameChange(it.text)
+                        },
+                        label = { Text("Имя копии") },
+                        singleLine = true,
+                        enabled = !relocation.saving,
+                        isError = relocation.error != null,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { onConfirm() }),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                relocation.error?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !relocation.saving) {
+                if (relocation.saving) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(confirm)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !relocation.saving) { Text("Отмена") }
         }
     )
 }

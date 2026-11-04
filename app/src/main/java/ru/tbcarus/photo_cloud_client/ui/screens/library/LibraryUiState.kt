@@ -54,7 +54,11 @@ data class LibraryUiState(
     val disabling: Boolean = false,
     // Меняется с каждой загрузкой каталога: новый список начинается с начала.
     val contentVersion: Int = 0,
-    val edit: NameEdit? = null
+    val edit: NameEdit? = null,
+    // Выбор назначения: живёт поверх навигации и переживает переходы между папками.
+    val relocation: Relocation? = null,
+    // Итог успешной операции; ошибки показывает notice.
+    val info: String? = null
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
     val canGoUp: Boolean get() = path.size > 1
@@ -67,8 +71,10 @@ data class LibraryUiState(
     val inActiveSource: Boolean get() = path.any { it.isActiveBackupSource }
     /** Открыта сама корневая папка активного источника: только у неё Server хранит backupSource. */
     val isSourceRoot: Boolean get() = status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
-    // В Camera файлы попадают только через backup Android.
-    val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree
+    val picking: Boolean get() = relocation != null
+    // В Camera файлы попадают только через backup Android. Во время выбора назначения изменения недоступны.
+    val canUpload: Boolean get() =
+        status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree && !picking
     /** Server создаёт папки только в ROOT и USER вне активного дерева: те же папки, что принимают ручную загрузку. */
     val canCreateFolder: Boolean get() = canUpload
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
@@ -77,9 +83,27 @@ data class LibraryUiState(
      * Системные папки (ROOT, Camera, AutoUploads) и корень активного источника не переименовываются, как и всё
      * внутри активного дерева. Отключённый источник в AutoUploads — обычная USER-папка. Окончательно решает Server.
      */
-    fun canRename(folder: FolderDto): Boolean =
-        status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+    fun canRename(folder: FolderDto): Boolean = status == LibraryStatus.Content && !picking &&
+        folder.isUser && !folder.isActiveBackupSource && !inActiveSource
 
     /** Файл активного дерева меняет только резервирование; файлы Camera Server переименовывает по своим правилам. */
-    fun canRename(file: FileItemDto): Boolean = status == LibraryStatus.Content && file.id != null && !inActiveSource
+    fun canRename(file: FileItemDto): Boolean =
+        status == LibraryStatus.Content && !picking && file.id != null && !inActiveSource
+
+    /** Перемещается только USER-папка вне активного дерева, в том числе отключённый источник из AutoUploads. */
+    fun canMove(folder: FolderDto): Boolean = canRename(folder)
+
+    /** Файл Camera перемещать некуда: Server не переносит файлы между Camera и библиотекой. */
+    fun canMove(file: FileItemDto): Boolean = canRename(file) && currentFolder?.isCamera == false
+
+    /** Копию файла Camera можно положить в библиотеку; из активного дерева копирование запрещено. */
+    fun canCopy(file: FileItemDto): Boolean = canRename(file)
+
+    /** Причина, по которой открытая папка не подходит как назначение; null — подтверждение доступно. */
+    val pickProblem: String?
+        get() {
+            val relocation = relocation ?: return null
+            if (status != LibraryStatus.Content || path.isEmpty()) return "Папка загружается"
+            return destinationProblem(relocation, path)
+        }
 }

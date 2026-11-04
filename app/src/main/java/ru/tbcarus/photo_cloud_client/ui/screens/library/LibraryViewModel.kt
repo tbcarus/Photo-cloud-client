@@ -62,6 +62,12 @@ class LibraryViewModel @Inject constructor(
     private var handledTransfer = -1L
 
     private var editSerial = 0
+    private var relocationSerial = 0
+
+    // Исходная папка выбора назначения: отмена возвращает её список и прокрутку без запросов.
+    private var relocationSource: RelocationSource? = null
+
+    private class RelocationSource(val state: LibraryUiState, val nextPage: Int, val scrollIndex: Int, val scrollOffset: Int)
 
     var scrollIndex = 0
         private set
@@ -81,6 +87,7 @@ class LibraryViewModel @Inject constructor(
         if (newContext == context && _uiState.value.status != LibraryStatus.NoSession) return
         context = newContext
         cancelLoads()
+        relocationSource = null
         resetScroll()
         val status = when {
             newContext.baseUrl.isBlank() -> LibraryStatus.NoServer
@@ -106,6 +113,10 @@ class LibraryViewModel @Inject constructor(
     fun refresh() {
         val state = _uiState.value
         if (state.status == LibraryStatus.NoServer || state.status == LibraryStatus.NoSession) return
+        // После неизвестного результата повтор доступен только с обновлённым каталогом перед глазами.
+        updateRelocation {
+            if (it.unknownResult) it.copy(unknownResult = false, error = "Проверьте, выполнена ли операция, прежде чем повторять") else it
+        }
         if (state.path.isEmpty()) loadRoot() else loadFolder(state.path)
     }
 
@@ -279,6 +290,126 @@ class LibraryViewModel @Inject constructor(
         is NameTarget.File -> "Файл «${target.file.originalFilename.orEmpty()}» не найден: возможно, он удалён или перемещён"
     }
 
+    fun startMove(file: FileItemDto) {
+        if (_uiState.value.canMove(file)) startRelocation(Relocated.MoveFile(file))
+    }
+
+    fun startCopy(file: FileItemDto) {
+        if (_uiState.value.canCopy(file)) startRelocation(Relocated.CopyFile(file))
+    }
+
+    fun startMove(folder: FolderDto) {
+        if (_uiState.value.canMove(folder)) startRelocation(Relocated.MoveFolder(folder))
+    }
+
+    /**
+     * Выбор назначения начинается в папке объекта: соседние и родительские папки рядом, корень — по пути вверх.
+     * Список исходной папки запоминается, чтобы отмена вернула его без запросов.
+     */
+    private fun startRelocation(item: Relocated) {
+        val state = _uiState.value
+        if (state.edit != null || state.picking) return
+        relocationSource = RelocationSource(state, nextPage, scrollIndex, scrollOffset)
+        val copyName = (item as? Relocated.CopyFile)?.name.orEmpty()
+        _uiState.update {
+            it.copy(relocation = Relocation(++relocationSerial, item, state.path, copyName), notice = null, info = null)
+        }
+    }
+
+    /** Отмена ничего не меняет на Server; если запрос уже отправлялся, исходная папка перечитывается. */
+    fun cancelRelocation() {
+        val relocation = _uiState.value.relocation ?: return
+        if (relocation.saving) return
+        returnToSource(relocation, reload = relocation.attempted, info = null)
+    }
+
+    /** «Переместить сюда» / «Копировать сюда»: итог показывается до отправки. */
+    fun requestRelocationConfirm() {
+        val state = _uiState.value
+        val relocation = state.relocation ?: return
+        if (relocation.saving || relocation.unknownResult || state.pickProblem != null) return
+        updateRelocation { it.copy(confirming = true, error = null) }
+    }
+
+    fun dismissRelocationConfirm() = updateRelocation { if (it.saving) it else it.copy(confirming = false, error = null) }
+
+    fun onCopyNameChange(name: String) = updateRelocation { if (it.saving) it else it.copy(copyName = name, error = null) }
+
+    /** Один запрос за подтверждение; при неизвестном результате автоматического повтора нет. */
+    fun confirmRelocation() {
+        val state = _uiState.value
+        val relocation = state.relocation ?: return
+        val target = state.currentFolder ?: return
+        if (!relocation.confirming || relocation.saving || relocation.unknownResult || state.pickProblem != null) return
+        copyNameProblem(relocation, target)?.let { problem ->
+            updateRelocation { it.copy(error = problem) }
+            return
+        }
+        val item = relocation.item
+        val fileId = when (item) {
+            is Relocated.MoveFile -> item.file.id
+            is Relocated.CopyFile -> item.file.id
+            is Relocated.MoveFolder -> item.folder.id
+        } ?: return
+        updateRelocation { it.copy(saving = true, attempted = true, error = null) }
+        viewModelScope.launch {
+            val result = when (item) {
+                is Relocated.MoveFile -> repository.moveFile(fileId, target.id)
+                is Relocated.CopyFile -> repository.copyFile(fileId, target.id, relocation.copyName)
+                is Relocated.MoveFolder -> repository.moveFolder(fileId, target.id)
+            }
+            // Сменилась сессия: состояние уже сброшено.
+            if (_uiState.value.relocation?.id != relocation.id) return@launch
+            when (result) {
+                is LibraryResult.Success -> {
+                    // Копия в другую папку исходную не меняет: её список возвращается без запроса.
+                    val changesSource = item !is Relocated.CopyFile || target.id == relocation.sourceFolder.id
+                    returnToSource(relocation, reload = changesSource, info = successText(item, relocation.copyName, target))
+                }
+                LibraryResult.Unauthorized -> applyFailure(LibraryResult.Unauthorized, _uiState.value.path)
+                LibraryResult.NotFound -> returnToSource(relocation, reload = true, info = null, notice = NOT_FOUND_TEXT)
+                is LibraryResult.NetworkError -> markUnknown("Связь прервалась (${result.message})")
+                is LibraryResult.UnknownResult -> markUnknown("Ответ сервера не разобран (${result.message})")
+                is LibraryResult.Failure -> updateRelocation { it.copy(saving = false, error = failureText(result)) }
+            }
+        }
+    }
+
+    private fun returnToSource(relocation: Relocation, reload: Boolean, info: String?, notice: String? = null) {
+        val saved = relocationSource
+        relocationSource = null
+        if (reload || saved == null) {
+            loadFolder(relocation.sourcePath, notice, info, keepRelocation = false)
+            return
+        }
+        cancelLoads()
+        nextPage = saved.nextPage
+        saveScroll(saved.scrollIndex, saved.scrollOffset)
+        _uiState.update {
+            saved.state.copy(relocation = null, info = info, notice = notice, contentVersion = it.contentVersion + 1)
+        }
+    }
+
+    private fun updateRelocation(change: (Relocation) -> Relocation) {
+        _uiState.update { state -> state.relocation?.let { state.copy(relocation = change(it)) } ?: state }
+    }
+
+    private fun successText(item: Relocated, copyName: String, target: FolderDto): String = when (item) {
+        is Relocated.MoveFile -> "Файл «${item.name}» перемещён в «${folderLabel(target)}»"
+        is Relocated.CopyFile -> "Копия «$copyName» создана в «${folderLabel(target)}»"
+        is Relocated.MoveFolder -> "Папка «${item.name}» перемещена в «${folderLabel(target)}»"
+    }
+
+    // Server мог выполнить операцию: выбор назначения сохраняется, повтор — только после обновления папки.
+    private fun markUnknown(reason: String) = updateRelocation {
+        it.copy(
+            saving = false,
+            confirming = false,
+            unknownResult = true,
+            error = "$reason, результат неизвестен. Обновите папку и проверьте, выполнена ли операция, прежде чем повторять."
+        )
+    }
+
     fun download(file: FileItemDto) {
         transfers.download(file)
     }
@@ -323,8 +454,13 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    private fun loadFolder(path: List<FolderDto>, notice: String? = null) {
-        val current = beginLoad(path, notice)
+    private fun loadFolder(
+        path: List<FolderDto>,
+        notice: String? = null,
+        info: String? = null,
+        keepRelocation: Boolean = true
+    ) {
+        val current = beginLoad(path, notice, info, keepRelocation)
         loadJob = viewModelScope.launch { loadContent(current, path) }
     }
 
@@ -356,7 +492,7 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    private fun beginLoad(path: List<FolderDto>, notice: String?): Int {
+    private fun beginLoad(path: List<FolderDto>, notice: String?, info: String? = null, keepRelocation: Boolean = true): Int {
         cancelLoads()
         resetScroll()
         _uiState.update {
@@ -364,7 +500,9 @@ class LibraryViewModel @Inject constructor(
                 status = LibraryStatus.Loading,
                 path = path,
                 notice = notice,
+                info = info,
                 contentVersion = it.contentVersion + 1,
+                relocation = it.relocation.takeIf { keepRelocation },
                 // Обновление той же папки (например, после ручной загрузки) не закрывает открытый диалог.
                 edit = it.edit?.takeIf { edit -> edit.parent.id == path.lastOrNull()?.id }
             )
@@ -385,6 +523,7 @@ class LibraryViewModel @Inject constructor(
         when {
             failure is LibraryResult.Unauthorized -> {
                 cancelLoads()
+                relocationSource = null
                 _uiState.update {
                     LibraryUiState(status = LibraryStatus.NoSession, contentVersion = it.contentVersion + 1)
                 }
@@ -404,6 +543,7 @@ class LibraryViewModel @Inject constructor(
         LibraryResult.NameTaken -> "Имя уже занято файлом или папкой"
         LibraryResult.Managed -> "Папку изменяет только автоматическое резервирование"
         is LibraryResult.Rejected -> "Сервер отклонил операцию: ${failure.message}"
+        is LibraryResult.UnknownResult -> "Результат операции неизвестен: ${failure.message}"
     }
 
     // Offset-пагинация при изменении каталога может вернуть файл повторно, а ключ строки уникален.
@@ -412,5 +552,6 @@ class LibraryViewModel @Inject constructor(
 
     private companion object {
         const val FOLDER_GONE_NOTICE = "Папка удалена или недоступна. Открыт корень."
+        const val NOT_FOUND_TEXT = "Объект или папка назначения не найдены: возможно, они удалены или перемещены"
     }
 }

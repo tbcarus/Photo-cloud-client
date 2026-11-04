@@ -1006,6 +1006,475 @@ class LibraryViewModelTest {
         assertTrue(repository.calls.isEmpty())
     }
 
+    // --- Перемещение и копирование (этап 6.2) ---
+
+    private fun moveTo(target: FolderDto) {
+        viewModel.navigateUp()
+        viewModel.openFolder(target)
+    }
+
+    @Test
+    fun movedFileLeavesSourceAfterServerConfirmation() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11))))
+        opened().openFolder(alpha)
+
+        viewModel.startMove(state.files.first())
+        // Выбор начинается в папке файла: туда переместить нельзя.
+        assertTrue(state.picking)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals("Файл уже находится здесь", state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        assertFalse(state.relocation!!.confirming)
+
+        moveTo(beta)
+        assertNull(state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        assertTrue(state.relocation!!.confirming)
+        repository.setFiles(alpha, 0, page(listOf(file(11))))
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+
+        assertNull(state.relocation)
+        assertEquals(listOf("moveFile:10:${beta.id}", "children:${alpha.id}", "files:${alpha.id}:0"), repository.calls)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf(11L), fileIds())
+        assertEquals("Файл «file10.txt» перемещён в «Beta»", state.info)
+    }
+
+    @Test
+    fun copiedFileKeepsSourceListWithoutReload() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11)), hasNext = true))
+        repository.setFiles(alpha, 1, page(listOf(file(12))))
+        opened().openFolder(alpha)
+        viewModel.loadNextPage()
+        viewModel.saveScroll(2, 15)
+        val before = state
+
+        viewModel.startCopy(state.files.first())
+        assertEquals("file10.txt", state.relocation!!.copyName)
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+
+        // Исходный каталог не менялся: возвращается без запросов, с прежними страницами и прокруткой.
+        assertEquals(listOf("copyFile:10:${beta.id}:file10.txt"), repository.calls)
+        assertNull(state.relocation)
+        assertEquals(before.path, state.path)
+        assertEquals(listOf(10L, 11L, 12L), fileIds())
+        assertEquals(before.hasNext, state.hasNext)
+        assertEquals(2, viewModel.scrollIndex)
+        assertEquals(15, viewModel.scrollOffset)
+        assertEquals("Копия «file10.txt» создана в «Beta»", state.info)
+    }
+
+    @Test
+    fun copyIntoSameFolderNeedsNewName() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+
+        viewModel.startCopy(state.files.single())
+        assertNull(state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+        assertEquals("Копия в той же папке должна называться иначе", state.relocation!!.error)
+        assertTrue(repository.calls.isEmpty())
+
+        viewModel.onCopyNameChange("file10 (копия).txt")
+        repository.setFiles(alpha, 0, page(listOf(file(10), FileItemDto(id = 99, originalFilename = "file10 (копия).txt"))))
+        viewModel.confirmRelocation()
+
+        assertEquals(
+            listOf("copyFile:10:${alpha.id}:file10 (копия).txt", "children:${alpha.id}", "files:${alpha.id}:0"),
+            repository.calls
+        )
+        // Копия получила новый ID Server, исходный файл на месте.
+        assertEquals(listOf(10L, 99L), fileIds())
+    }
+
+    @Test
+    fun movedFolderKeepsIdAndSourceIsReloaded() {
+        repository.setChildren(root, alpha, beta)
+        repository.setChildren(alpha, nested)
+        opened()
+
+        viewModel.startMove(alpha)
+        assertEquals("Папка уже находится здесь", state.pickProblem)
+        viewModel.openFolder(beta)
+        viewModel.requestRelocationConfirm()
+        repository.setChildren(root, beta)
+        repository.setChildren(beta, alpha.copy(parentId = beta.id))
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+
+        assertEquals(listOf("moveFolder:${alpha.id}:${beta.id}", "children:${root.id}", "files:${root.id}:0"), repository.calls)
+        assertEquals(listOf(root), state.path)
+        assertEquals(listOf(beta), state.folders)
+        viewModel.openFolder(beta)
+        assertEquals(alpha.id, state.folders.single().id)
+    }
+
+    @Test
+    fun folderCannotBeMovedIntoItsSubtree() {
+        repository.setChildren(root, alpha, beta)
+        repository.setChildren(alpha, nested)
+        opened()
+        viewModel.startMove(alpha)
+
+        // Экран не открывает саму папку; даже если путь в неё ведёт, подтверждения нет.
+        assertNotNull(blockedFolderProblem(state.relocation!!, state.path, alpha))
+        viewModel.openFolder(alpha)
+        viewModel.openFolder(nested)
+        assertEquals("Нельзя переместить папку в саму себя или во вложенную папку", state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertTrue(repository.calls.none { it.startsWith("moveFolder") })
+    }
+
+    @Test
+    fun nameConflictKeepsDestinationAndDialog() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startCopy(state.files.single())
+        moveTo(beta)
+        repository.fail("copyFile:10:${beta.id}:file10.txt", LibraryResult.NameTaken)
+        viewModel.requestRelocationConfirm()
+        val version = state.contentVersion
+
+        viewModel.confirmRelocation()
+
+        val relocation = state.relocation!!
+        assertEquals("Имя уже занято файлом или папкой", relocation.error)
+        assertTrue(relocation.confirming)
+        assertFalse(relocation.saving)
+        assertEquals(listOf(root, beta), state.path)
+        assertEquals(version, state.contentVersion)
+
+        // Пользователь сам меняет имя: суффиксы не добавляются автоматически.
+        viewModel.onCopyNameChange("file10-2.txt")
+        viewModel.confirmRelocation()
+        assertTrue(repository.calls.contains("copyFile:10:${beta.id}:file10-2.txt"))
+        assertNull(state.relocation)
+    }
+
+    @Test
+    fun activeSourceIsNotDestinationAndManagedRefusalIsShown() {
+        val (autoUploads, source, nestedSource) = openSourceRoot()
+        repository.setChildren(root, camera, autoUploads, alpha)
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        viewModel.openFolder(alpha)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        viewModel.refresh()
+        viewModel.startMove(state.files.single())
+        viewModel.navigateUp()
+        viewModel.openFolder(autoUploads)
+        viewModel.openFolder(source)
+        assertEquals("Папку изменяет только автоматическое резервирование", state.pickProblem)
+        viewModel.openFolder(nestedSource)
+        assertEquals("Папку изменяет только автоматическое резервирование", state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertTrue(repository.calls.none { it.startsWith("moveFile") })
+
+        // Защиту, о которой Android не знал, сообщает Server.
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        viewModel.openFolder(beta)
+        repository.fail("moveFile:10:${beta.id}", LibraryResult.Managed)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertEquals("Папку изменяет только автоматическое резервирование", state.relocation!!.error)
+    }
+
+    @Test
+    fun disabledSourceMovesFromAutoUploadsToLibrary() {
+        val autoUploads = FolderDto(20, 1, "AutoUploads", "AUTO_UPLOADS")
+        val disabled = FolderDto(21, 20, "OldPhone", "USER")
+        repository.setChildren(root, autoUploads, alpha)
+        repository.setChildren(autoUploads, disabled)
+        opened().openFolder(autoUploads)
+
+        viewModel.startMove(disabled)
+        assertEquals("В AutoUploads размещаются только источники резервирования", state.pickProblem)
+        viewModel.navigateUp()
+        viewModel.openFolder(alpha)
+        viewModel.requestRelocationConfirm()
+        repository.setChildren(autoUploads)
+        viewModel.confirmRelocation()
+
+        assertTrue(repository.calls.contains("moveFolder:${disabled.id}:${alpha.id}"))
+        assertEquals(listOf(root, autoUploads), state.path)
+        assertTrue(state.folders.isEmpty())
+    }
+
+    @Test
+    fun cameraFileIsOnlyCopiedIntoLibrary() {
+        repository.setChildren(root, camera, alpha)
+        repository.setFiles(camera, 0, page(listOf(file(30))))
+        opened().openFolder(camera)
+        val photo = state.files.single()
+
+        viewModel.startMove(photo)
+        assertNull(state.relocation)
+
+        viewModel.startCopy(photo)
+        assertNotNull(state.pickProblem)
+        viewModel.navigateUp()
+        viewModel.openFolder(alpha)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertTrue(repository.calls.contains("copyFile:30:${alpha.id}:file30.txt"))
+        assertEquals(listOf(root, camera), state.path)
+    }
+
+    @Test
+    fun refusalsKeepDestinationAndLibraryUnchanged() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startMove(state.files.single())
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        val key = "moveFile:10:${beta.id}"
+
+        repository.fail(key, LibraryResult.Rejected("Cannot move file between Camera and library folders"))
+        viewModel.confirmRelocation()
+        assertEquals("Сервер отклонил операцию: Cannot move file between Camera and library folders", state.relocation!!.error)
+
+        repository.fail(key, LibraryResult.ServerError("Physical storage operation failed"))
+        viewModel.confirmRelocation()
+        assertEquals("Ошибка сервера: Physical storage operation failed", state.relocation!!.error)
+        assertFalse(state.relocation!!.unknownResult)
+        assertEquals(listOf(root, beta), state.path)
+        assertEquals(2, repository.calls.count { it == key })
+
+        // Отмена после отправленных запросов перечитывает исходную папку.
+        repository.calls.clear()
+        viewModel.cancelRelocation()
+        assertNull(state.relocation)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf("children:${alpha.id}", "files:${alpha.id}:0"), repository.calls)
+    }
+
+    @Test
+    fun missingObjectReturnsToSourceWithNotice() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startMove(state.files.single())
+        moveTo(beta)
+        repository.fail("moveFile:10:${beta.id}", LibraryResult.NotFound)
+        repository.setFiles(alpha, 0, page(emptyList()))
+        viewModel.requestRelocationConfirm()
+
+        viewModel.confirmRelocation()
+
+        assertNull(state.relocation)
+        assertEquals(listOf(root, alpha), state.path)
+        assertTrue(state.files.isEmpty())
+        assertEquals("Объект или папка назначения не найдены: возможно, они удалены или перемещены", state.notice)
+    }
+
+    @Test
+    fun cancelRestoresSourceWithoutRequests() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11)), hasNext = true))
+        repository.setFiles(alpha, 1, page(listOf(file(12))))
+        opened().openFolder(alpha)
+        viewModel.loadNextPage()
+        viewModel.saveScroll(1, 7)
+        val before = state
+
+        viewModel.startMove(state.files.first())
+        moveTo(beta)
+        repository.calls.clear()
+        viewModel.cancelRelocation()
+
+        assertTrue(repository.calls.isEmpty())
+        assertNull(state.relocation)
+        assertEquals(before.path, state.path)
+        assertEquals(before.files, state.files)
+        assertEquals(1, viewModel.scrollIndex)
+        assertEquals(7, viewModel.scrollOffset)
+        // Догрузка продолжается с той же страницы.
+        assertFalse(state.hasNext)
+    }
+
+    @Test
+    fun sessionChangeDuringRelocationDropsLateResult() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startMove(state.files.single())
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        val gate = repository.hold("moveFile:10:${beta.id}")
+        viewModel.confirmRelocation()
+
+        baseUrlProvider.baseUrl = SERVER_B
+        repository.calls.clear()
+        gate.complete(Unit)
+
+        assertNull(state.relocation)
+        assertEquals(LibraryStatus.Idle, state.status)
+        assertTrue(repository.calls.isEmpty())
+    }
+
+    @Test
+    fun destinationFilesArePagedDuringSelection() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        repository.setFiles(beta, 0, page(listOf(file(20), file(21)), hasNext = true))
+        repository.setFiles(beta, 1, page(listOf(file(22))))
+        opened().openFolder(alpha)
+        viewModel.startCopy(state.files.single())
+
+        moveTo(beta)
+        assertEquals(listOf(20L, 21L), fileIds())
+        viewModel.onListEndReached()
+
+        assertEquals(listOf(20L, 21L, 22L), fileIds())
+        assertTrue(state.picking)
+        assertNull(state.pickProblem)
+    }
+
+    @Test
+    fun unknownResultIsNotRepeatedAutomatically() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startCopy(state.files.single())
+        moveTo(beta)
+        val key = "copyFile:10:${beta.id}:file10.txt"
+        repository.fail(key, LibraryResult.NetworkError("timeout"))
+        viewModel.requestRelocationConfirm()
+
+        viewModel.confirmRelocation()
+
+        val relocation = state.relocation!!
+        assertTrue(relocation.unknownResult)
+        assertFalse(relocation.confirming)
+        assertTrue(relocation.error!!.contains("результат неизвестен"))
+        // Повтор недоступен, пока папка не обновлена.
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertEquals(1, repository.calls.count { it == key })
+
+        // Обновление показывает фактическое состояние назначения: копия уже есть.
+        repository.setFiles(beta, 0, page(listOf(FileItemDto(id = 50, originalFilename = "file10.txt"))))
+        viewModel.refresh()
+        assertFalse(state.relocation!!.unknownResult)
+        assertEquals(listOf(50L), fileIds())
+        assertEquals(1, repository.calls.count { it == key })
+
+        // Повтор — только явным подтверждением пользователя; Server отвечает конфликтом, дубликата нет.
+        repository.fail(key, LibraryResult.NameTaken)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertEquals(2, repository.calls.count { it == key })
+        assertEquals("Имя уже занято файлом или папкой", state.relocation!!.error)
+    }
+
+    @Test
+    fun unreadableSuccessKeepsSelectionAndBlocksRepeat() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11))))
+        opened().openFolder(alpha)
+        viewModel.startMove(state.files.first())
+        moveTo(beta)
+        val key = "moveFile:10:${beta.id}"
+        // Server переместил файл, но ответ не разобран.
+        repository.fail(key, LibraryResult.UnknownResult("Expected BEGIN_OBJECT"))
+        repository.setFiles(alpha, 0, page(listOf(file(11))))
+        repository.setFiles(beta, 0, page(listOf(file(10))))
+        viewModel.requestRelocationConfirm()
+        val version = state.contentVersion
+        repository.calls.clear()
+
+        viewModel.confirmRelocation()
+
+        // Выбор назначения сохранён, Library не перечитана и не объявила успех.
+        val relocation = state.relocation!!
+        assertEquals(listOf(key), repository.calls)
+        assertTrue(relocation.unknownResult)
+        assertFalse(relocation.confirming)
+        assertFalse(relocation.saving)
+        assertTrue(relocation.error!!.startsWith("Ответ сервера не разобран (Expected BEGIN_OBJECT), результат неизвестен"))
+        assertEquals(listOf(root, beta), state.path)
+        assertEquals(version, state.contentVersion)
+        assertNull(state.info)
+
+        // Без обновления подтверждение недоступно, автоматического повтора нет.
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertEquals(listOf(key), repository.calls)
+
+        // Обновление показывает, что файл уже в назначении; отмена перечитывает исходную папку.
+        viewModel.refresh()
+        assertFalse(state.relocation!!.unknownResult)
+        assertEquals(listOf(10L), fileIds())
+        viewModel.cancelRelocation()
+        assertNull(state.relocation)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf(11L), fileIds())
+        assertEquals(1, repository.calls.count { it == key })
+    }
+
+    @Test
+    fun unreadableCopyAndFolderMoveAreUnknownToo() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startCopy(state.files.single())
+        moveTo(beta)
+        repository.fail("copyFile:10:${beta.id}:file10.txt", LibraryResult.UnknownResult("malformed"))
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertTrue(state.relocation!!.unknownResult)
+        viewModel.refresh()
+        viewModel.cancelRelocation()
+
+        viewModel.navigateUp()
+        viewModel.startMove(alpha)
+        viewModel.openFolder(beta)
+        repository.fail("moveFolder:${alpha.id}:${beta.id}", LibraryResult.UnknownResult("malformed"))
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+        assertTrue(state.relocation!!.unknownResult)
+        assertEquals(1, repository.calls.count { it.startsWith("copyFile") })
+        assertEquals(1, repository.calls.count { it.startsWith("moveFolder") })
+    }
+
+    @Test
+    fun repeatedConfirmationWhileRelocatingSendsOneRequest() {
+        repository.setChildren(root, alpha, beta)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened().openFolder(alpha)
+        viewModel.startMove(state.files.single())
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        val gate = repository.hold("moveFile:10:${beta.id}")
+
+        viewModel.confirmRelocation()
+        viewModel.confirmRelocation()
+        viewModel.cancelRelocation()
+        viewModel.dismissRelocationConfirm()
+        assertTrue(state.relocation!!.saving)
+        gate.complete(Unit)
+
+        assertEquals(1, repository.calls.count { it.startsWith("moveFile") })
+        assertNull(state.relocation)
+    }
+
     // Room отвечает на своём потоке: итог отключения приходит асинхронно.
     private fun awaitState(condition: (LibraryUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + 5_000
@@ -1096,6 +1565,15 @@ class LibraryViewModelTest {
 
         override suspend fun renameFile(fileId: Long, name: String): LibraryResult<FileItemDto> =
             answer("renameFile:$fileId:$name", FileItemDto(id = fileId, originalFilename = name))
+
+        override suspend fun moveFile(fileId: Long, targetFolderId: Long): LibraryResult<FileItemDto> =
+            answer("moveFile:$fileId:$targetFolderId", FileItemDto(id = fileId, folderId = targetFolderId))
+
+        override suspend fun copyFile(fileId: Long, targetFolderId: Long, name: String): LibraryResult<FileItemDto> =
+            answer("copyFile:$fileId:$targetFolderId:$name", FileItemDto(id = 2000, folderId = targetFolderId, originalFilename = name))
+
+        override suspend fun moveFolder(folderId: Long, targetParentId: Long): LibraryResult<FolderDto> =
+            answer("moveFolder:$folderId:$targetParentId", FolderDto(folderId, targetParentId, "moved", "USER"))
 
         private suspend fun <T> answer(key: String, value: T): LibraryResult<T> {
             calls += key
