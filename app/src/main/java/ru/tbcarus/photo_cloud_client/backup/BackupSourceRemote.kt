@@ -27,10 +27,47 @@ sealed interface RegistrationOutcome {
     data class Unknown(val message: String) : RegistrationOutcome
 }
 
+/** Итог DELETE /folders/{id}/backup: отключённым источник считается только по подтверждению Server. */
+sealed interface DisableOutcome {
+    data object Disabled : DisableOutcome
+
+    /** 404: папки нет в аккаунте — отключение не подтверждено. */
+    data object NotFound : DisableOutcome
+
+    /** 400 и прочие 4xx: папка не корень источника либо запрос отклонён. */
+    data class Rejected(val message: String) : DisableOutcome
+
+    data object Unauthorized : DisableOutcome
+
+    /** Нет ответа или 5xx: Server мог успеть отключить, повтор того же DELETE безопасен. */
+    data class Unknown(val message: String) : DisableOutcome
+}
+
 @Singleton
 open class BackupSourceRemote @Inject constructor(
     private val apiServiceFactory: ApiServiceFactory
 ) {
+
+    open suspend fun disable(folderId: Long): DisableOutcome = withContext(Dispatchers.IO) {
+        try {
+            val response = apiServiceFactory.authFolderService().disableBackupSource(folderId).awaitResponse()
+            when {
+                response.isSuccessful -> DisableOutcome.Disabled
+                response.code() == 401 || response.code() == 403 -> DisableOutcome.Unauthorized
+                response.code() == 404 -> DisableOutcome.NotFound
+                response.code() in 400..499 -> DisableOutcome.Rejected(ApiErrorParser.parse(response))
+                else -> DisableOutcome.Unknown("Ошибка сервера: ${ApiErrorParser.parse(response)}")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IOException) {
+            DisableOutcome.Unknown("Нет связи с сервером")
+        } catch (e: IllegalStateException) {
+            DisableOutcome.Unknown(e.message ?: "Адрес сервера не задан")
+        } catch (e: RuntimeException) {
+            DisableOutcome.Unknown(e.message ?: "Некорректный ответ сервера")
+        }
+    }
 
     open suspend fun register(name: String, sourceUuid: String): RegistrationOutcome = withContext(Dispatchers.IO) {
         try {

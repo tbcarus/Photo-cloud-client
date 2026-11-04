@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.backup.BackupAccount
+import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
+import ru.tbcarus.photo_cloud_client.backup.SourceActionResult
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
@@ -35,7 +38,8 @@ class LibraryViewModel @Inject constructor(
     private val repository: LibraryRepository,
     baseUrlProvider: BaseUrlProvider,
     tokenStorage: TokenStorage,
-    private val transfers: TransferManager
+    private val transfers: TransferManager,
+    private val sources: BackupSourceRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LibraryUiState())
@@ -149,6 +153,33 @@ class LibraryViewModel @Inject constructor(
 
     fun uploadFolder(destination: UploadDestination, treeUri: Uri) {
         transfers.uploadFolder(destination, treeUri)
+    }
+
+    /**
+     * Отключение источника открытой папки тем же механизмом, что в Settings: достаточно ID папки и текущей сессии,
+     * локальная запись источника не нужна. После 204 папка остаётся открытой уже как обычная.
+     */
+    fun disableSource() {
+        val state = _uiState.value
+        val folder = state.currentFolder ?: return
+        val session = context ?: return
+        val user = session.user ?: return
+        if (!state.isSourceRoot || state.disabling) return
+        val current = generation
+        _uiState.update { it.copy(disabling = true, notice = null) }
+        viewModelScope.launch {
+            val result = sources.disable(BackupAccount(session.baseUrl, user), folder.id, folder.backupSource)
+            // Пользователь ушёл из папки или сменилась сессия: Room уже обновлён, экран показывает другое.
+            if (current != generation) return@launch
+            when (result) {
+                SourceActionResult.Done -> {
+                    val path = _uiState.value.path
+                    loadFolder(path.dropLast(1) + folder.copy(backupSource = null))
+                }
+                is SourceActionResult.Failed -> _uiState.update { it.copy(disabling = false, notice = result.message) }
+                is SourceActionResult.NotConnected -> _uiState.update { it.copy(disabling = false, notice = result.message) }
+            }
+        }
     }
 
     fun download(file: FileItemDto) {

@@ -42,6 +42,19 @@ class LibraryManagedTreeTest {
     }
 
     @Test
+    fun disableIsOfferedOnlyOnActiveSourceRoot() {
+        assertTrue(at(root, autoUploads, active).isSourceRoot)
+        assertFalse(at(root).isSourceRoot)
+        assertFalse(at(root, camera).isSourceRoot)
+        assertFalse(at(root, autoUploads).isSourceRoot)
+        assertFalse(at(root, autoUploads, active, nested).isSourceRoot)
+        assertFalse(at(root, work).isSourceRoot)
+        assertFalse(at(root, autoUploads, disabled).isSourceRoot)
+        // Пока каталог не загружен, действия нет.
+        assertFalse(LibraryUiState(status = LibraryStatus.Loading, path = listOf(root, autoUploads, active)).isSourceRoot)
+    }
+
+    @Test
     fun containerAndActiveSourceAreMarked() {
         assertEquals("Автоматическая загрузка папок", folderSubtitle(autoUploads))
         assertEquals("Источник автоматической загрузки", folderSubtitle(active))

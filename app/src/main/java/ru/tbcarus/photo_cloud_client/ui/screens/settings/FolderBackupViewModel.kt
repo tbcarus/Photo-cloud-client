@@ -21,6 +21,7 @@ import ru.tbcarus.photo_cloud_client.backup.BackupAccountProvider
 import ru.tbcarus.photo_cloud_client.backup.BackupSource
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
 import ru.tbcarus.photo_cloud_client.backup.BackupTreeDao
+import ru.tbcarus.photo_cloud_client.backup.RegistrationState
 import ru.tbcarus.photo_cloud_client.backup.SourceFileCounters
 import ru.tbcarus.photo_cloud_client.backup.SourceActionResult
 import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
@@ -40,7 +41,7 @@ data class FolderBackupUiState(
     val message: String? = null
 )
 
-/** Раздел Settings «Автоматическая загрузка папок»: подключение источников без загрузки файлов. */
+/** Раздел Settings «Автоматическая загрузка папок»: подключение и отключение источников. */
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class FolderBackupViewModel @Inject constructor(
@@ -104,6 +105,13 @@ class FolderBackupViewModel @Inject constructor(
     }
 
     fun retry(id: Long, serverName: String?) = perform { repository.retry(id, serverName) }
+
+    /** Только подтверждённый активный источник: у ожидающих регистрации остаются повтор и отмена. */
+    fun disable(source: BackupSource) {
+        val folderId = source.serverRootFolderId ?: return
+        if (source.registrationState != RegistrationState.ACTIVE) return
+        perform { repository.disable(BackupAccount(source.serverUrl, source.accountId), folderId, source.sourceUuid) }
+    }
 
     fun cancelFailed(id: Long) = perform {
         repository.cancelFailed(id)

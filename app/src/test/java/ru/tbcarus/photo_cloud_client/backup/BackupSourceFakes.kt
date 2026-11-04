@@ -61,12 +61,20 @@ class FakeBackupServer : Dispatcher() {
     var dropResponse = false
     var forcedStatus: Int? = null
     var responseUuid: String? = null
+    /** ID корней из DELETE /folders/{id}/backup; ответ — 204 либо disableStatus. */
+    val disables = CopyOnWriteArrayList<Long>()
+    var disableStatus: Int? = null
     private var nextId = 100L
 
     fun folderCount() = folders.size
 
     @Synchronized
     override fun dispatch(request: RecordedRequest): MockResponse {
+        if (request.method == "DELETE") {
+            disables += request.requestUrl!!.encodedPath.removePrefix("/api/v1/folders/").removeSuffix("/backup").toLong()
+            return disableStatus?.let { MockResponse().setResponseCode(it).setBody("""{"code":"X","message":"forced"}""") }
+                ?: MockResponse().setResponseCode(204)
+        }
         val body = JSONObject(request.body.readUtf8())
         requests += body
         forcedStatus?.let { return MockResponse().setResponseCode(it).setBody("""{"code":"X","message":"forced"}""") }

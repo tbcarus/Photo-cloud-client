@@ -4,6 +4,7 @@ import java.util.List;
 
 import retrofit2.Call;
 import retrofit2.http.Body;
+import retrofit2.http.DELETE;
 import retrofit2.http.GET;
 import retrofit2.http.POST;
 import retrofit2.http.Path;
@@ -27,4 +28,8 @@ public interface FolderService {
     // Идемпотентно по sourceUuid: повтор с тем же UUID и именем возвращает прежнюю папку.
     @POST(ApiPaths.FOLDERS_BACKUP)
     Call<FolderDto> registerBackupSource(@Body CreateBackupSourceRequest request);
+
+    // Идемпотентно: повтор для уже отключённого корня источника тоже отвечает 204.
+    @DELETE(ApiPaths.FOLDER_BACKUP_SOURCE)
+    Call<Void> disableBackupSource(@Path("id") long id);
 }

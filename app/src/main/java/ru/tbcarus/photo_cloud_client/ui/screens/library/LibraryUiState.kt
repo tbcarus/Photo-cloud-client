@@ -23,6 +23,8 @@ data class LibraryUiState(
     val isLoadingMore: Boolean = false,
     val loadMoreError: String? = null,
     val notice: String? = null,
+    // Идёт отключение источника открытой папки: повторное нажатие не отправит второй запрос.
+    val disabling: Boolean = false,
     // Меняется с каждой загрузкой каталога: новый список начинается с начала.
     val contentVersion: Int = 0
 ) {
@@ -33,6 +35,8 @@ data class LibraryUiState(
      * backupSource не имеют: принадлежность дереву определяет корень источника на открытом пути.
      */
     val inManagedTree: Boolean get() = currentFolder?.isAutoUploads == true || path.any { it.isActiveBackupSource }
+    /** Открыта сама корневая папка активного источника: только у неё Server хранит backupSource. */
+    val isSourceRoot: Boolean get() = status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
     // В Camera файлы попадают только через backup Android.
     val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()

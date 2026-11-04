@@ -66,6 +66,7 @@ import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
 import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
+import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 
 // Следующая страница запрашивается заранее, до появления последней строки.
 private const val LOAD_MORE_THRESHOLD = 10
@@ -134,6 +135,7 @@ fun LibraryScreen(
             onUp = viewModel::navigateUp,
             onUpload = ::startUpload
         )
+        if (state.isSourceRoot) SourceRootPanel(state, onDisable = viewModel::disableSource)
         state.notice?.let { notice ->
             Text(
                 text = notice,
@@ -218,6 +220,24 @@ private fun LibraryHeader(
                 .horizontalScroll(pathScroll)
                 .padding(vertical = 4.dp)
         )
+    }
+}
+
+/** Корень активного источника: отметка и отключение резервирования. */
+@Composable
+private fun SourceRootPanel(state: LibraryUiState, onDisable: () -> Unit) {
+    val folder = state.currentFolder ?: return
+    var confirm by rememberSaveable(folder.id) { mutableStateOf(false) }
+    if (confirm) DisableSourceDialog(folder.name, onConfirm = onDisable, onDismiss = { confirm = false })
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 4.dp)) {
+        Icon(Icons.Default.CloudSync, contentDescription = null, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Источник автоматической загрузки",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f)
+        )
+        OutlinedButton(onClick = { confirm = true }, enabled = !state.disabling) { Text("Отключить резервирование") }
     }
 }
 

@@ -25,6 +25,18 @@ import org.robolectric.annotation.Config
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import androidx.room.Room
+import ru.tbcarus.photo_cloud_client.backup.BackupAccount
+import ru.tbcarus.photo_cloud_client.backup.BackupSource
+import ru.tbcarus.photo_cloud_client.backup.BackupSourceRemote
+import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
+import ru.tbcarus.photo_cloud_client.backup.DisableOutcome
+import ru.tbcarus.photo_cloud_client.backup.FakeAccess
+import ru.tbcarus.photo_cloud_client.backup.FakeAccounts
+import ru.tbcarus.photo_cloud_client.backup.FakeScheduler
+import ru.tbcarus.photo_cloud_client.backup.RegistrationState
+import ru.tbcarus.photo_cloud_client.backup.SourceAccess
+import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.core.storage.InMemoryTokenStorage
@@ -86,8 +98,21 @@ class LibraryViewModelTest {
         )
     }
 
+    private val disableRemote = FakeDisableRemote()
+    private val db by lazy {
+        Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Application>(), AppDatabase::class.java)
+            .allowMainThreadQueries().build()
+    }
+    private val sources by lazy {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        BackupSourceRepository(
+            db.backupSourceDao(), disableRemote, FakeAccess(context),
+            FakeAccounts(BackupAccount(SERVER_A, "alice")), FakeScheduler(context)
+        )
+    }
+
     private fun createViewModel() {
-        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers)
+        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers, sources)
     }
 
     private fun opened(): LibraryViewModel {
@@ -560,6 +585,119 @@ class LibraryViewModelTest {
         viewModel.openFolder(camera)
         assertFalse(state.canUpload)
         assertNull(viewModel.uploadDestination())
+    }
+
+    @Test
+    fun disableOnSourceRootWithoutLocalRecordKeepsFolderOpenAndAllowsUpload() {
+        val (autoUploads, source, nestedSource) = openSourceRoot()
+        repository.setFiles(source, 0, page(listOf(file(10), file(11))))
+        assertTrue(state.isSourceRoot)
+        assertFalse(state.canUpload)
+        repository.calls.clear()
+
+        viewModel.disableSource()
+        awaitState { !it.isSourceRoot && it.status == LibraryStatus.Content }
+
+        assertEquals(listOf(source.id), disableRemote.calls)
+        // Та же папка, без отметки источника: путь не сбрасывается в ROOT, содержимое перечитано.
+        assertEquals(listOf(root, autoUploads, source.copy(backupSource = null)), state.path)
+        assertEquals(LibraryStatus.Content, state.status)
+        assertFalse(state.isSourceRoot)
+        assertTrue(state.canUpload)
+        assertEquals(UploadDestination(source.id, isRoot = false), viewModel.uploadDestination())
+        assertEquals(listOf(nestedSource), state.folders)
+        assertEquals(listOf(10L, 11L), fileIds())
+        assertEquals(listOf("children:${source.id}", "files:${source.id}:0"), repository.calls.sorted())
+        assertNull(state.notice)
+
+        // Внутри отключённого дерева ручная загрузка тоже доступна.
+        viewModel.openFolder(nestedSource)
+        assertTrue(state.canUpload)
+    }
+
+    @Test
+    fun failedDisableKeepsSourceAndShowsError() {
+        val (autoUploads, source, _) = openSourceRoot()
+        disableRemote.outcome = DisableOutcome.Unknown("Нет связи с сервером")
+
+        viewModel.disableSource()
+        awaitState { it.notice != null }
+
+        assertEquals(listOf(root, autoUploads, source), state.path)
+        assertTrue(state.isSourceRoot)
+        assertFalse(state.canUpload)
+        assertFalse(state.disabling)
+        assertEquals("Нет связи с сервером" + BackupSourceRepository.DISABLE_UNKNOWN_SUFFIX, state.notice)
+
+        // Повтор — тот же ID.
+        disableRemote.outcome = DisableOutcome.Disabled
+        viewModel.disableSource()
+        awaitState { !it.isSourceRoot && it.status == LibraryStatus.Content }
+        assertEquals(listOf(source.id, source.id), disableRemote.calls)
+    }
+
+    @Test
+    fun disableIsIgnoredOutsideSourceRoot() {
+        val (_, _, nestedSource) = openSourceRoot()
+        viewModel.openFolder(nestedSource)
+
+        viewModel.disableSource()
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        viewModel.disableSource()
+
+        assertTrue(disableRemote.calls.isEmpty())
+    }
+
+    @Test
+    fun disableUpdatesLocalRecordOfThisDevice() = kotlinx.coroutines.runBlocking {
+        val (_, source, _) = openSourceRoot()
+        val id = db.backupSourceDao().insert(
+            BackupSource(
+                sourceUuid = source.backupSource!!, treeUri = "content://tree/docs", localName = "Documents",
+                serverName = "Documents", serverRootFolderId = source.id, serverUrl = SERVER_A, accountId = "alice",
+                registrationState = RegistrationState.ACTIVE, registrationError = null,
+                accessState = SourceAccess.AVAILABLE, createdAt = 1
+            )
+        )
+
+        viewModel.disableSource()
+        awaitState { !it.isSourceRoot && it.status == LibraryStatus.Content }
+
+        assertEquals(RegistrationState.REMOTE_DISABLED, db.backupSourceDao().get(id)!!.registrationState)
+    }
+
+    // Room отвечает на своём потоке: итог отключения приходит асинхронно.
+    private fun awaitState(condition: (LibraryUiState) -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!condition(state)) {
+            check(System.currentTimeMillis() < deadline) { "Состояние не достигнуто: $state" }
+            Thread.sleep(10)
+        }
+    }
+
+    private fun openSourceRoot(): Triple<FolderDto, FolderDto, FolderDto> {
+        val autoUploads = FolderDto(20, 1, "AutoUploads", "AUTO_UPLOADS")
+        val source = FolderDto(21, 20, "Documents", "USER", backupSource = "550e8400-e29b-41d4-a716-446655440000")
+        val nestedSource = FolderDto(22, 21, "Проекты", "USER")
+        repository.setChildren(root, camera, autoUploads)
+        repository.setChildren(autoUploads, source)
+        repository.setChildren(source, nestedSource)
+        opened()
+        viewModel.openFolder(autoUploads)
+        viewModel.openFolder(source)
+        return Triple(autoUploads, source, nestedSource)
+    }
+
+    /** DELETE без HTTP: исход задаёт тест. */
+    private class FakeDisableRemote : BackupSourceRemote(mock(ApiServiceFactory::class.java)) {
+        var outcome: DisableOutcome = DisableOutcome.Disabled
+        val calls = mutableListOf<Long>()
+
+        override suspend fun disable(folderId: Long): DisableOutcome {
+            calls += folderId
+            return outcome
+        }
     }
 
     private fun file(id: Long) = FileItemDto(id = id, originalFilename = "file$id.txt")

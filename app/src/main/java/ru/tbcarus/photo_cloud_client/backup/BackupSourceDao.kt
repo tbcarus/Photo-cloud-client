@@ -66,6 +66,17 @@ interface BackupSourceDao {
     """)
     suspend fun markRemoteDisabled(id: Long, reason: String): Int
 
+    /**
+     * Отключение пользователем, подтверждённое Server: запись источника того же Server и аккаунта по ID корня
+     * (и UUID, если известен). Очередь, URI и UUID сохраняются; reason пуст — это не ошибка.
+     */
+    @Query("""
+        UPDATE backup_sources SET registrationState = 'REMOTE_DISABLED', registrationError = NULL
+        WHERE serverUrl = :serverUrl AND accountId = :accountId AND serverRootFolderId = :folderId
+          AND (:sourceUuid IS NULL OR LOWER(sourceUuid) = LOWER(:sourceUuid)) AND registrationState = 'ACTIVE'
+    """)
+    suspend fun markDisabled(serverUrl: String, accountId: String, folderId: Long, sourceUuid: String?): Int
+
     @Query("UPDATE backup_sources SET scanGeneration = :generation, scanErrors = 0 WHERE id = :id")
     suspend fun startScan(id: Long, generation: Int)
 

@@ -28,6 +28,9 @@ sealed interface SourceActionResult {
  *
  * Регистрация выполняется только по действию пользователя: при старте приложения и входе повторов нет,
  * а ACTIVE-источник повторно не регистрируется никогда.
+ *
+ * Отключение (этап 5.5) — один метод для Settings и Library: подтверждённое Server отключение переводит запись
+ * в REMOTE_DISABLED, ничего не удаляя; повторное подключение не выполняется.
  */
 @Singleton
 class BackupSourceRepository @Inject constructor(
@@ -49,6 +52,10 @@ class BackupSourceRepository @Inject constructor(
         const val MISMATCHED_RESPONSE = "Ответ сервера не соответствует запросу. Повторите"
         const val UNKNOWN_SUFFIX = ". Результат неизвестен — повторите с тем же именем"
         const val REMOTE_DISABLED = "Источник отключён на сервере: повторная регистрация не выполняется"
+        const val DISABLE_ACCOUNT_CHANGED = "Аккаунт или сервер сменились: отключение не выполнено"
+        const val DISABLE_CONTEXT_CHANGED = "Аккаунт или сервер сменились во время отключения. Откройте источник заново и повторите"
+        const val DISABLE_NOT_FOUND = "Папка источника не найдена на сервере: отключение не подтверждено"
+        const val DISABLE_UNKNOWN_SUFFIX = ". Источник не отключён — повторите"
     }
 
     // Одна регистрация одновременно: двойное нажатие не отправит два запроса одного источника.
@@ -110,6 +117,27 @@ class BackupSourceRepository @Inject constructor(
     /** Отмена записи, которую Server окончательно отклонил: на Server её нет, URI и UUID больше не нужны. */
     suspend fun cancelFailed(id: Long) {
         dao.deleteFailed(id)
+    }
+
+    /**
+     * Отключает источник по ID его корня на Server. expected — Server и аккаунт, в которых пользователь видел источник:
+     * в другом контексте DELETE не отправляется, а ответ, полученный после смены контекста, не меняет Room.
+     * Запись Room (если она есть на этом устройстве) меняется только после 204; повтор идёт к тому же ID.
+     */
+    suspend fun disable(expected: BackupAccount, folderId: Long, sourceUuid: String?): SourceActionResult = mutex.withLock {
+        if (accounts.current() != expected) return SourceActionResult.Failed(DISABLE_ACCOUNT_CHANGED)
+        val outcome = remote.disable(folderId)
+        if (accounts.current() != expected) return SourceActionResult.Failed(DISABLE_CONTEXT_CHANGED)
+        when (outcome) {
+            DisableOutcome.Disabled -> {
+                withContext(Dispatchers.IO) { dao.markDisabled(expected.serverUrl, expected.accountId, folderId, sourceUuid) }
+                SourceActionResult.Done
+            }
+            DisableOutcome.NotFound -> SourceActionResult.Failed(DISABLE_NOT_FOUND)
+            is DisableOutcome.Rejected -> SourceActionResult.Failed("Сервер отклонил отключение: ${outcome.message}")
+            DisableOutcome.Unauthorized -> SourceActionResult.Failed(AUTH_REQUIRED)
+            is DisableOutcome.Unknown -> SourceActionResult.Failed(outcome.message + DISABLE_UNKNOWN_SUFFIX)
+        }
     }
 
     /** Перечитывает доступ к деревьям источников аккаунта: при открытии Settings и возврате на экран. */

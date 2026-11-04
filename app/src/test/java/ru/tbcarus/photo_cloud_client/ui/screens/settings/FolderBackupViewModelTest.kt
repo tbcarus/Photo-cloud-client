@@ -147,7 +147,8 @@ class FolderBackupViewModelTest {
         viewModel.connect()
 
         await { viewModel.uiState.value.message?.takeIf { !viewModel.uiState.value.busy } }
-        val failed = viewModel.uiState.value.sources.single { it.registrationState == RegistrationState.REGISTRATION_FAILED }
+        // Сообщение приходит раньше, чем Room-поток обновит список: ждём ту же запись.
+        val failed = await { viewModel.uiState.value.sources.singleOrNull { it.registrationState == RegistrationState.REGISTRATION_FAILED } }
         assertEquals("Projects", failed.serverName)
         assertNull(viewModel.uiState.value.picked)
     }
@@ -183,6 +184,68 @@ class FolderBackupViewModelTest {
         }
         assertEquals(RegistrationState.ACTIVE, restored.registrationState)
         assertEquals(1, fakeServer.requests.size)
+    }
+
+    @Test
+    fun disableTurnsActiveSourceIntoDisabledAndKeepsItsRecord() = runBlocking {
+        val active = connectActive()
+
+        viewModel.disable(active)
+
+        val disabled = await {
+            viewModel.uiState.value.sources.singleOrNull()
+                ?.takeIf { it.registrationState == RegistrationState.REMOTE_DISABLED && !viewModel.uiState.value.busy }
+        }
+        assertEquals(listOf(100L), fakeServer.disables)
+        assertEquals(active.copy(registrationState = RegistrationState.REMOTE_DISABLED), disabled)
+        assertNull(viewModel.uiState.value.message)
+        // Повторной регистрации нет.
+        assertEquals(1, fakeServer.requests.size)
+    }
+
+    @Test
+    fun failedDisableShowsErrorAndKeepsSourceActive() = runBlocking {
+        val active = connectActive()
+        fakeServer.disableStatus = 500
+
+        viewModel.disable(active)
+
+        val message = await { viewModel.uiState.value.message?.takeIf { !viewModel.uiState.value.busy } }
+        assertTrue(message.endsWith(BackupSourceRepository.DISABLE_UNKNOWN_SUFFIX))
+        assertEquals(RegistrationState.ACTIVE, db.backupSourceDao().get(active.id)!!.registrationState)
+
+        // Повтор после ошибки — тот же ID.
+        fakeServer.disableStatus = null
+        viewModel.disable(active)
+        await { viewModel.uiState.value.sources.singleOrNull()?.takeIf { it.registrationState == RegistrationState.REMOTE_DISABLED } }
+        assertEquals(listOf(100L, 100L), fakeServer.disables)
+    }
+
+    @Test
+    fun pendingAndFailedSourcesAreNotDisabled() = runBlocking {
+        fakeServer.takenNames += "Documents"
+        viewModel.onFolderPicked(tree)
+        await { viewModel.uiState.value.picked }
+        viewModel.connect()
+        val failed = await {
+            viewModel.uiState.value.sources.singleOrNull()?.takeIf { it.registrationState == RegistrationState.REGISTRATION_FAILED }
+        }
+
+        viewModel.disable(failed)
+        viewModel.disable(failed.copy(registrationState = RegistrationState.PENDING_REGISTRATION, serverRootFolderId = 5))
+
+        assertTrue(fakeServer.disables.isEmpty())
+        assertEquals(RegistrationState.REGISTRATION_FAILED, db.backupSourceDao().get(failed.id)!!.registrationState)
+    }
+
+    private suspend fun connectActive(): ru.tbcarus.photo_cloud_client.backup.BackupSource {
+        viewModel.onFolderPicked(tree)
+        await { viewModel.uiState.value.picked }
+        viewModel.connect()
+        return await {
+            viewModel.uiState.value.sources.singleOrNull()
+                ?.takeIf { it.registrationState == RegistrationState.ACTIVE && !viewModel.uiState.value.busy }
+        }
     }
 
     // Состояние меняется асинхронно (Room и HTTP на своих потоках): ждём нужного значения.
