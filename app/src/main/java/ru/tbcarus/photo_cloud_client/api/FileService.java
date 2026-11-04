@@ -5,6 +5,7 @@ import okhttp3.RequestBody;
 import okhttp3.ResponseBody;
 import retrofit2.Call;
 import retrofit2.http.Body;
+import retrofit2.http.DELETE;
 import retrofit2.http.GET;
 import retrofit2.http.Multipart;
 import retrofit2.http.PATCH;
@@ -74,4 +75,8 @@ public interface FileService {
     /** Серверная копия: новый FileItem и независимые байты, Android байты не передаёт. */
     @POST(ApiPaths.FILE_COPY)
     Call<FileItemDto> copyFile(@Path("id") long id, @Body CopyFileRequest request);
+
+    /** Удаление записи и байтов файла; ответ 204 без тела. */
+    @DELETE(ApiPaths.FILE_ID)
+    Call<Void> deleteFile(@Path("id") long id);
 }

@@ -40,6 +40,32 @@ data class NameEdit(
         }
 }
 
+/** Удаляемый объект. */
+sealed interface DeleteTarget {
+    val name: String
+
+    data class File(val file: FileItemDto) : DeleteTarget {
+        override val name: String get() = file.originalFilename.orEmpty()
+    }
+
+    data class Folder(val folder: FolderDto) : DeleteTarget {
+        override val name: String get() = folder.name
+    }
+}
+
+/**
+ * Подтверждение удаления объекта папки [parent]. [unknownResult] — ответ потерян: Server мог удалить объект,
+ * повторное удаление доступно только после обновления каталога.
+ */
+data class Deletion(
+    val id: Int,
+    val target: DeleteTarget,
+    val parent: FolderDto,
+    val deleting: Boolean = false,
+    val error: String? = null,
+    val unknownResult: Boolean = false
+)
+
 data class LibraryUiState(
     val status: LibraryStatus = LibraryStatus.Idle,
     // Открытые папки от ROOT до текущей: API не отдаёт путь и не ищет папку по ID.
@@ -57,6 +83,7 @@ data class LibraryUiState(
     val edit: NameEdit? = null,
     // Выбор назначения: живёт поверх навигации и переживает переходы между папками.
     val relocation: Relocation? = null,
+    val deletion: Deletion? = null,
     // Итог успешной операции; ошибки показывает notice.
     val info: String? = null
 ) {
@@ -98,6 +125,14 @@ data class LibraryUiState(
 
     /** Копию файла Camera можно положить в библиотеку; из активного дерева копирование запрещено. */
     fun canCopy(file: FileItemDto): Boolean = canRename(file)
+
+    /**
+     * Удаление разрешено там же, где переименование: Server не удаляет ROOT, Camera, AutoUploads, корень активного
+     * источника и всё в его дереве. Файлы Camera и отключённые источники удаляются как обычные объекты.
+     */
+    fun canDelete(folder: FolderDto): Boolean = canRename(folder)
+
+    fun canDelete(file: FileItemDto): Boolean = canRename(file)
 
     /** Причина, по которой открытая папка не подходит как назначение; null — подтверждение доступно. */
     val pickProblem: String?

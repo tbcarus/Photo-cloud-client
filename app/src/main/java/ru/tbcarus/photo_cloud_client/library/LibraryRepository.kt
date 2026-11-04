@@ -46,7 +46,7 @@ sealed interface LibraryResult<out T> {
 
 /**
  * Серверная библиотека: чтение и ручные изменения пользователя (создание папки, переименование, перемещение,
- * копирование файла).
+ * копирование файла, удаление).
  * backupSource не передаётся: это запросы обычного пользователя, а не резервирования. С локальной очередью backup не связан.
  */
 @Singleton
@@ -96,23 +96,42 @@ open class LibraryRepository @Inject constructor(
             apiServiceFactory.authFolderService().moveFolder(folderId, MoveFolderRequest(targetParentId))
         }
 
-    // awaitResponse при отмене корутины прерывает и сам HTTP-запрос.
+    // Успех — любой 2xx: тело 204 не разбирается. 409 без FOLDER_MANAGED у удаления — не имя, а занятый объект.
+    open suspend fun deleteFile(fileId: Long): LibraryResult<Unit> =
+        send(change = true, nameConflict = false, call = { apiServiceFactory.authFileService().deleteFile(fileId) }) {
+            LibraryResult.Success(Unit)
+        }
+
+    open suspend fun deleteFolder(folderId: Long): LibraryResult<Unit> =
+        send(change = true, nameConflict = false, call = { apiServiceFactory.authFolderService().deleteFolder(folderId) }) {
+            LibraryResult.Success(Unit)
+        }
+
     // uncertainBody: Retrofit разбирает только тело 2xx, поэтому ошибка разбора означает, что Server операцию принял.
     private suspend fun <T : Any> request(
         change: Boolean = false,
         uncertainBody: Boolean = false,
         call: () -> Call<T>
-    ): LibraryResult<T> =
+    ): LibraryResult<T> = send(change, uncertainBody, call = call) { body ->
+        if (body != null) LibraryResult.Success(body) else unreadable(uncertainBody, "Пустой ответ сервера")
+    }
+
+    // awaitResponse при отмене корутины прерывает и сам HTTP-запрос.
+    private suspend fun <T, R> send(
+        change: Boolean = false,
+        uncertainBody: Boolean = false,
+        nameConflict: Boolean = true,
+        call: () -> Call<T>,
+        success: (T?) -> LibraryResult<R>
+    ): LibraryResult<R> =
         withContext(Dispatchers.IO) {
             try {
                 val response = call().awaitResponse()
-                val body = response.body()
                 when {
-                    response.isSuccessful && body != null -> LibraryResult.Success(body)
-                    response.isSuccessful -> unreadable(uncertainBody, "Пустой ответ сервера")
+                    response.isSuccessful -> success(response.body())
                     response.code() == 401 || response.code() == 403 -> LibraryResult.Unauthorized
                     response.code() == 404 -> LibraryResult.NotFound
-                    else -> failure(response, change)
+                    else -> failure(response, change, nameConflict)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -132,11 +151,12 @@ open class LibraryRepository @Inject constructor(
         if (uncertainBody) LibraryResult.UnknownResult(message) else LibraryResult.ServerError(message)
 
     // Код и текст ошибки берутся из одного чтения тела.
-    private fun failure(response: Response<*>, change: Boolean): LibraryResult.Failure {
+    private fun failure(response: Response<*>, change: Boolean, nameConflict: Boolean): LibraryResult.Failure {
         val error = ApiErrorParser.read(response)
         return when {
             change && response.code() == 409 && error.code == FOLDER_MANAGED -> LibraryResult.Managed
-            change && response.code() == 409 -> LibraryResult.NameTaken
+            change && response.code() == 409 && nameConflict -> LibraryResult.NameTaken
+            change && response.code() == 409 -> LibraryResult.Rejected(error.message)
             change && response.code() == 400 -> LibraryResult.Rejected(error.message)
             else -> LibraryResult.ServerError(error.message)
         }

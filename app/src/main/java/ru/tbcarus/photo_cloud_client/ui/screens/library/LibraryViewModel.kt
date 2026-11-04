@@ -63,6 +63,7 @@ class LibraryViewModel @Inject constructor(
 
     private var editSerial = 0
     private var relocationSerial = 0
+    private var deletionSerial = 0
 
     // Исходная папка выбора назначения: отмена возвращает её список и прокрутку без запросов.
     private var relocationSource: RelocationSource? = null
@@ -279,9 +280,9 @@ class LibraryViewModel @Inject constructor(
     }
 
     // Только первая страница с начала: новое место объекта задаёт сортировка Server.
-    private fun reloadParent(parent: FolderDto, notice: String?) {
+    private fun reloadParent(parent: FolderDto, notice: String?, info: String? = null) {
         val state = _uiState.value
-        if (state.currentFolder?.id == parent.id) loadFolder(state.path, notice)
+        if (state.currentFolder?.id == parent.id) loadFolder(state.path, notice, info)
     }
 
     private fun notFoundText(target: NameTarget): String = when (target) {
@@ -308,7 +309,7 @@ class LibraryViewModel @Inject constructor(
      */
     private fun startRelocation(item: Relocated) {
         val state = _uiState.value
-        if (state.edit != null || state.picking) return
+        if (state.edit != null || state.deletion != null || state.picking) return
         relocationSource = RelocationSource(state, nextPage, scrollIndex, scrollOffset)
         val copyName = (item as? Relocated.CopyFile)?.name.orEmpty()
         _uiState.update {
@@ -410,6 +411,83 @@ class LibraryViewModel @Inject constructor(
         )
     }
 
+    fun startDelete(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.canDelete(file) && file.id != null) openDeletion(DeleteTarget.File(file))
+    }
+
+    fun startDelete(folder: FolderDto) {
+        if (_uiState.value.canDelete(folder)) openDeletion(DeleteTarget.Folder(folder))
+    }
+
+    /** Пока запрос выполняется, диалог не закрывается: его итог должен дойти до списка. */
+    fun dismissDelete() {
+        _uiState.update { if (it.deletion?.deleting == true) it else it.copy(deletion = null) }
+    }
+
+    /**
+     * Один DELETE на подтверждение. Строка исчезает только после ответа Server, перечитыванием открытой папки.
+     * При неизвестном результате запрос не повторяется: сначала обновление каталога.
+     */
+    fun confirmDelete() {
+        val deletion = _uiState.value.deletion ?: return
+        if (deletion.deleting || deletion.unknownResult) return
+        updateDeletion { it.copy(deleting = true, error = null) }
+        viewModelScope.launch {
+            val result = when (val target = deletion.target) {
+                is DeleteTarget.File -> repository.deleteFile(target.file.id ?: return@launch)
+                is DeleteTarget.Folder -> repository.deleteFolder(target.folder.id)
+            }
+            // Сменилась сессия: состояние уже сброшено, интерфейс другого аккаунта не меняется.
+            if (_uiState.value.deletion?.id != deletion.id) return@launch
+            when (result) {
+                is LibraryResult.Success -> {
+                    _uiState.update { it.copy(deletion = null) }
+                    reloadParent(deletion.parent, notice = null, info = deletedText(deletion.target))
+                }
+                LibraryResult.Unauthorized -> applyFailure(LibraryResult.Unauthorized, _uiState.value.path)
+                LibraryResult.NotFound -> {
+                    _uiState.update { it.copy(deletion = null) }
+                    reloadParent(deletion.parent, notice = "«${deletion.target.name}» не найден: возможно, он уже удалён")
+                }
+                is LibraryResult.NetworkError -> markDeleteUnknown("Связь прервалась (${result.message})")
+                is LibraryResult.UnknownResult -> markDeleteUnknown("Ответ сервера не разобран (${result.message})")
+                is LibraryResult.Failure -> updateDeletion { it.copy(deleting = false, error = failureText(result)) }
+            }
+        }
+    }
+
+    /** «Обновить» после неизвестного результата: диалог закрывается, каталог показывает фактическое состояние. */
+    fun refreshAfterDelete() {
+        if (_uiState.value.deletion?.deleting == true) return
+        _uiState.update { it.copy(deletion = null) }
+        refresh()
+    }
+
+    private fun openDeletion(target: DeleteTarget) {
+        val state = _uiState.value
+        val parent = state.currentFolder ?: return
+        if (state.edit != null || state.deletion != null || state.picking) return
+        _uiState.update { it.copy(deletion = Deletion(++deletionSerial, target, parent), notice = null, info = null) }
+    }
+
+    private fun updateDeletion(change: (Deletion) -> Deletion) {
+        _uiState.update { state -> state.deletion?.let { state.copy(deletion = change(it)) } ?: state }
+    }
+
+    private fun markDeleteUnknown(reason: String) = updateDeletion {
+        it.copy(
+            deleting = false,
+            unknownResult = true,
+            error = "$reason, результат неизвестен. Обновите папку, чтобы увидеть, удалён ли объект."
+        )
+    }
+
+    private fun deletedText(target: DeleteTarget): String = when (target) {
+        is DeleteTarget.File -> "Файл «${target.name}» удалён"
+        is DeleteTarget.Folder -> "Папка «${target.name}» удалена"
+    }
+
     fun download(file: FileItemDto) {
         transfers.download(file)
     }
@@ -504,7 +582,8 @@ class LibraryViewModel @Inject constructor(
                 contentVersion = it.contentVersion + 1,
                 relocation = it.relocation.takeIf { keepRelocation },
                 // Обновление той же папки (например, после ручной загрузки) не закрывает открытый диалог.
-                edit = it.edit?.takeIf { edit -> edit.parent.id == path.lastOrNull()?.id }
+                edit = it.edit?.takeIf { edit -> edit.parent.id == path.lastOrNull()?.id },
+                deletion = it.deletion?.takeIf { deletion -> deletion.parent.id == path.lastOrNull()?.id }
             )
         }
         return generation

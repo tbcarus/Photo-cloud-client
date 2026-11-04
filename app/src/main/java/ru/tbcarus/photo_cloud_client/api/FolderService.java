@@ -36,6 +36,10 @@ public interface FolderService {
     @POST(ApiPaths.FOLDER_MOVE)
     Call<FolderDto> moveFolder(@Path("id") long id, @Body MoveFolderRequest request);
 
+    /** Удаление USER-папки со всем поддеревом; ответ 204 без тела. */
+    @DELETE(ApiPaths.FOLDER_ID)
+    Call<Void> deleteFolder(@Path("id") long id);
+
     // Идемпотентно по sourceUuid: повтор с тем же UUID и именем возвращает прежнюю папку.
     @POST(ApiPaths.FOLDERS_BACKUP)
     Call<FolderDto> registerBackupSource(@Body CreateBackupSourceRequest request);

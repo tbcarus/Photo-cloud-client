@@ -355,6 +355,37 @@ class LibraryRepositoryTest {
     }
 
     @Test
+    fun deleteSucceedsWithNoContent() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse().setResponseCode(204))
+
+        assertEquals(LibraryResult.Success(Unit), repository.deleteFile(42))
+        assertEquals(LibraryResult.Success(Unit), repository.deleteFolder(3))
+        val file = server.takeRequest()
+        assertEquals("DELETE", file.method)
+        assertEquals("/api/v1/files/42", file.path)
+        val folder = server.takeRequest()
+        assertEquals("DELETE", folder.method)
+        assertEquals("/api/v1/folders/3", folder.path)
+    }
+
+    @Test
+    fun deleteRefusalsKeepServerReason() = runBlocking {
+        server.enqueue(json("""{"code":"BAD_REQUEST","message":"Cannot delete system folder"}""").setResponseCode(400))
+        server.enqueue(json("""{"code":"FOLDER_MANAGED","message":"Folder belongs to an active backup source"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"CONFLICT","message":"Object is busy or not accessible, try again later"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"FILE_ITEM_NOT_FOUND","message":"File not found"}""").setResponseCode(404))
+        server.enqueue(json("""{"code":"INTERNAL_ERROR","message":"Physical storage operation failed"}""").setResponseCode(500))
+
+        assertEquals(LibraryResult.Rejected("Cannot delete system folder"), repository.deleteFolder(2))
+        assertEquals(LibraryResult.Managed, repository.deleteFolder(6))
+        // Занятый объект — не конфликт имени: показывается причина Server.
+        assertEquals(LibraryResult.Rejected("Object is busy or not accessible, try again later"), repository.deleteFile(42))
+        assertEquals(LibraryResult.NotFound, repository.deleteFile(42))
+        assertEquals(LibraryResult.ServerError("Physical storage operation failed"), repository.deleteFile(42))
+    }
+
+    @Test
     fun readingKeepsConflictAsServerError() = runBlocking {
         server.enqueue(json("""{"code":"CONFLICT","message":"Conflict"}""").setResponseCode(409))
 

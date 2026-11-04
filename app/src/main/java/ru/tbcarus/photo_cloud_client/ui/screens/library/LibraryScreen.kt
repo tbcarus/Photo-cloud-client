@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderZip
@@ -153,6 +154,14 @@ fun LibraryScreen(
             onUpload = ::startUpload,
             onCreateFolder = viewModel::startCreateFolder
         )
+        state.deletion?.let { deletion ->
+            DeleteDialog(
+                deletion = deletion,
+                onConfirm = viewModel::confirmDelete,
+                onRefresh = viewModel::refreshAfterDelete,
+                onDismiss = viewModel::dismissDelete
+            )
+        }
         state.edit?.let { edit ->
             NameDialog(
                 edit = edit,
@@ -351,7 +360,8 @@ private fun LibraryList(
                 RowAction("Переместить", {
                     keepPosition()
                     viewModel.startMove(folder)
-                }).takeIf { state.canMove(folder) }
+                }).takeIf { state.canMove(folder) },
+                RowAction("Удалить", { viewModel.startDelete(folder) }, destructive = true).takeIf { state.canDelete(folder) }
             )
             FolderRow(
                 folder = folder,
@@ -373,7 +383,8 @@ private fun LibraryList(
                 RowAction("Копировать", {
                     keepPosition()
                     viewModel.startCopy(file)
-                }).takeIf { state.canCopy(file) }
+                }).takeIf { state.canCopy(file) },
+                RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
             )
             FileRow(file = file, inCamera = inCamera, actions = actions, dimmed = state.picking)
             HorizontalDivider()
@@ -477,7 +488,13 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean, actions: List<RowActio
     }
 }
 
-private data class RowAction(val label: String, val onClick: () -> Unit, val enabled: Boolean = true)
+private data class RowAction(
+    val label: String,
+    val onClick: () -> Unit,
+    val enabled: Boolean = true,
+    // Удаление выделено значком и цветом ошибки.
+    val destructive: Boolean = false
+)
 
 /** Кнопка «⋮» строки; без действий на её месте пустое поле той же ширины, чтобы строки не сдвигались. */
 @Composable
@@ -493,10 +510,20 @@ private fun ActionsMenu(actions: List<RowAction>) {
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             actions.forEach { action ->
-                DropdownMenuItem(text = { Text(action.label) }, enabled = action.enabled, onClick = {
-                    expanded = false
-                    action.onClick()
-                })
+                val color = if (action.destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                DropdownMenuItem(
+                    text = { Text(action.label, color = color) },
+                    leadingIcon = if (action.destructive) {
+                        { Icon(Icons.Default.Delete, contentDescription = null, tint = color) }
+                    } else {
+                        null
+                    },
+                    enabled = action.enabled,
+                    onClick = {
+                        expanded = false
+                        action.onClick()
+                    }
+                )
             }
         }
     }
@@ -709,6 +736,65 @@ private fun RelocationDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !relocation.saving) { Text("Отмена") }
+        }
+    )
+}
+
+/**
+ * Подтверждение удаления файла или папки. Корзины нет: удаление необратимо. После неизвестного результата
+ * повторного «Удалить» нет — только обновление каталога.
+ */
+@Composable
+private fun DeleteDialog(deletion: Deletion, onConfirm: () -> Unit, onRefresh: () -> Unit, onDismiss: () -> Unit) {
+    val (title, question) = when (deletion.target) {
+        is DeleteTarget.File -> "Удалить файл?" to "Удалить файл «${deletion.target.name}»?"
+        is DeleteTarget.Folder ->
+            "Удалить папку?" to "Удалить папку «${deletion.target.name}» вместе со всеми вложенными папками и файлами?"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnBackPress = !deletion.deleting, dismissOnClickOutside = !deletion.deleting),
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(question, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Восстановление через корзину не предусмотрено.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // Server не сообщает Android об удалении: резервирование Camera фото повторно не отправит.
+                if (deletion.target is DeleteTarget.File && deletion.parent.isCamera) {
+                    Text(
+                        "Фото на телефоне останется, повторно автоматически оно не загрузится.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                deletion.error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            if (deletion.unknownResult) {
+                TextButton(onClick = onRefresh) { Text("Обновить") }
+            } else {
+                TextButton(onClick = onConfirm, enabled = !deletion.deleting) {
+                    if (deletion.deleting) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("Удалить", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !deletion.deleting) {
+                Text(if (deletion.unknownResult) "Закрыть" else "Отмена")
+            }
         }
     )
 }

@@ -1475,6 +1475,260 @@ class LibraryViewModelTest {
         assertNull(state.relocation)
     }
 
+    // --- Удаление (этап 6.3) ---
+
+    @Test
+    fun deletedFileDisappearsAfterServerConfirmation() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11))))
+        opened().openFolder(alpha)
+
+        viewModel.startDelete(state.files.first())
+        assertEquals(DeleteTarget.File(file(10)), state.deletion!!.target)
+        // До подтверждения запросов нет, строка на месте.
+        repository.setFiles(alpha, 0, page(listOf(file(11))))
+        repository.calls.clear()
+        viewModel.confirmDelete()
+
+        assertNull(state.deletion)
+        assertEquals(listOf("deleteFile:10", "children:${alpha.id}", "files:${alpha.id}:0"), repository.calls)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf(11L), fileIds())
+        assertEquals("Файл «file10.txt» удалён", state.info)
+    }
+
+    @Test
+    fun deletedFolderWithContentDisappears() {
+        repository.setChildren(root, alpha, beta)
+        repository.setChildren(alpha, nested)
+        repository.setFiles(alpha, 0, page(listOf(file(10))))
+        opened()
+
+        viewModel.startDelete(alpha)
+        repository.setChildren(root, beta)
+        repository.calls.clear()
+        viewModel.confirmDelete()
+
+        // Поддерево удаляет Server одним запросом; Android вложенные объекты не перебирает.
+        assertEquals(listOf("deleteFolder:${alpha.id}", "children:${root.id}", "files:${root.id}:0"), repository.calls)
+        assertEquals(listOf(beta), state.folders)
+        assertEquals("Папка «Alpha» удалена", state.info)
+
+        // Пустая папка — тот же запрос.
+        viewModel.startDelete(beta)
+        repository.setChildren(root)
+        viewModel.confirmDelete()
+        assertTrue(repository.calls.contains("deleteFolder:${beta.id}"))
+        assertTrue(state.folders.isEmpty())
+    }
+
+    @Test
+    fun cancelledDeletionChangesNothing() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        val before = state
+        repository.calls.clear()
+
+        viewModel.startDelete(state.files.single())
+        viewModel.dismissDelete()
+        viewModel.startDelete(alpha)
+        viewModel.dismissDelete()
+
+        assertTrue(repository.calls.isEmpty())
+        assertEquals(before, state)
+    }
+
+    @Test
+    fun repeatedConfirmationWhileDeletingSendsOneRequest() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startDelete(state.files.single())
+        val gate = repository.hold("deleteFile:10")
+
+        viewModel.confirmDelete()
+        viewModel.confirmDelete()
+        viewModel.dismissDelete()
+        assertTrue(state.deletion!!.deleting)
+        repository.setFiles(root, 0, page(emptyList()))
+        gate.complete(Unit)
+
+        assertEquals(1, repository.calls.count { it == "deleteFile:10" })
+        assertNull(state.deletion)
+        assertTrue(state.files.isEmpty())
+    }
+
+    @Test
+    fun systemFoldersAndActiveTreeAreNotDeleted() {
+        val (autoUploads, source, nestedSource) = openSourceRoot()
+        repository.setFiles(source, 0, page(listOf(file(40))))
+        viewModel.refresh()
+        viewModel.startDelete(nestedSource)
+        viewModel.startDelete(state.files.single())
+        viewModel.navigateUp()
+        viewModel.startDelete(source)
+        viewModel.navigateUp()
+        viewModel.startDelete(camera)
+        viewModel.startDelete(autoUploads)
+        viewModel.startDelete(root)
+
+        assertNull(state.deletion)
+        assertTrue(repository.calls.none { it.startsWith("delete") })
+    }
+
+    @Test
+    fun disabledSourceAndCameraFileAreDeletedAsServerAllows() {
+        val autoUploads = FolderDto(20, 1, "AutoUploads", "AUTO_UPLOADS")
+        val disabled = FolderDto(21, 20, "OldPhone", "USER")
+        repository.setChildren(root, camera, autoUploads)
+        repository.setChildren(autoUploads, disabled)
+        repository.setFiles(camera, 0, page(listOf(file(30))))
+        opened().openFolder(autoUploads)
+
+        viewModel.startDelete(disabled)
+        viewModel.confirmDelete()
+        assertTrue(repository.calls.contains("deleteFolder:${disabled.id}"))
+
+        viewModel.navigateUp()
+        viewModel.openFolder(camera)
+        viewModel.startDelete(state.files.single())
+        assertNotNull(state.deletion)
+        viewModel.confirmDelete()
+        assertTrue(repository.calls.contains("deleteFile:30"))
+        assertNull(state.deletion)
+    }
+
+    @Test
+    fun refusalsKeepDialogAndList() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startDelete(state.files.single())
+        val version = state.contentVersion
+
+        repository.fail("deleteFile:10", LibraryResult.Rejected("Object is busy or not accessible, try again later"))
+        viewModel.confirmDelete()
+        assertEquals("Сервер отклонил операцию: Object is busy or not accessible, try again later", state.deletion!!.error)
+
+        repository.fail("deleteFile:10", LibraryResult.Managed)
+        viewModel.confirmDelete()
+        assertEquals("Папку изменяет только автоматическое резервирование", state.deletion!!.error)
+
+        // 5xx не повторяется сам, повтор — новым подтверждением пользователя.
+        repository.fail("deleteFile:10", LibraryResult.ServerError("Physical storage operation failed"))
+        viewModel.confirmDelete()
+        assertEquals("Ошибка сервера: Physical storage operation failed", state.deletion!!.error)
+        assertFalse(state.deletion!!.deleting)
+        assertFalse(state.deletion!!.unknownResult)
+
+        assertEquals(3, repository.calls.count { it == "deleteFile:10" })
+        assertEquals(version, state.contentVersion)
+        assertEquals(listOf(10L), fileIds())
+        assertEquals(listOf(alpha), state.folders)
+    }
+
+    @Test
+    fun missingObjectClosesDialogAndReloads() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startDelete(state.files.single())
+        repository.fail("deleteFile:10", LibraryResult.NotFound)
+        repository.setFiles(root, 0, page(emptyList()))
+        repository.calls.clear()
+
+        viewModel.confirmDelete()
+
+        assertNull(state.deletion)
+        assertEquals("«file10.txt» не найден: возможно, он уже удалён", state.notice)
+        assertEquals(listOf("deleteFile:10", "children:1", "files:1:0"), repository.calls)
+        assertTrue(state.files.isEmpty())
+    }
+
+    @Test
+    fun lostResponseAfterDeletionIsUnknownAndNotRepeated() {
+        repository.setChildren(root, alpha)
+        repository.setChildren(alpha, nested)
+        opened().openFolder(alpha)
+        viewModel.startDelete(nested)
+        // Server удалил папку, но ответ потерян.
+        repository.fail("deleteFolder:${nested.id}", LibraryResult.NetworkError("timeout"))
+        repository.setChildren(alpha)
+        val version = state.contentVersion
+        repository.calls.clear()
+
+        viewModel.confirmDelete()
+
+        val deletion = state.deletion!!
+        assertTrue(deletion.unknownResult)
+        assertFalse(deletion.deleting)
+        assertTrue(deletion.error!!.startsWith("Связь прервалась (timeout), результат неизвестен"))
+        assertEquals(version, state.contentVersion)
+        assertEquals(listOf(nested), state.folders)
+
+        // Повтор недоступен: только обновление.
+        viewModel.confirmDelete()
+        assertEquals(listOf("deleteFolder:${nested.id}"), repository.calls)
+
+        viewModel.refreshAfterDelete()
+        assertNull(state.deletion)
+        assertTrue(state.folders.isEmpty())
+        // Исчезнувшая строка ошибкой не считается.
+        assertNull(state.notice)
+        assertEquals(1, repository.calls.count { it.startsWith("deleteFolder") })
+        assertEquals(listOf(root, alpha), state.path)
+    }
+
+    @Test
+    fun deletingLastItemOfPageKeepsPaginationConsistent() {
+        repository.setFiles(root, 0, page(listOf(file(10), file(11)), hasNext = true))
+        repository.setFiles(root, 1, page(listOf(file(12))))
+        opened()
+        viewModel.loadNextPage()
+        assertEquals(listOf(10L, 11L, 12L), fileIds())
+
+        viewModel.startDelete(state.files.last())
+        repository.setFiles(root, 0, page(listOf(file(10), file(11)), hasNext = false))
+        repository.setFiles(root, 1, page(emptyList()))
+        repository.calls.clear()
+        viewModel.confirmDelete()
+
+        // Перечитывается только первая страница; удалённый файл не возвращается.
+        assertEquals(listOf("deleteFile:12", "children:1", "files:1:0"), repository.calls)
+        assertEquals(listOf(10L, 11L), fileIds())
+        assertFalse(state.hasNext)
+    }
+
+    @Test
+    fun sessionChangeDuringDeletionDropsLateResult() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startDelete(state.files.single())
+        val gate = repository.hold("deleteFile:10")
+        viewModel.confirmDelete()
+
+        tokens.saveTokens(tokensOf("bob"))
+        repository.calls.clear()
+        gate.complete(Unit)
+
+        assertNull(state.deletion)
+        assertEquals(LibraryStatus.Idle, state.status)
+        assertTrue(repository.calls.isEmpty())
+        assertNull(state.info)
+    }
+
+    @Test
+    fun sessionChangeBeforeConfirmationSendsNothing() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startDelete(state.files.single())
+
+        baseUrlProvider.baseUrl = SERVER_B
+        viewModel.confirmDelete()
+
+        assertNull(state.deletion)
+        assertTrue(repository.calls.none { it.startsWith("delete") })
+    }
+
     // Room отвечает на своём потоке: итог отключения приходит асинхронно.
     private fun awaitState(condition: (LibraryUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + 5_000
@@ -1574,6 +1828,10 @@ class LibraryViewModelTest {
 
         override suspend fun moveFolder(folderId: Long, targetParentId: Long): LibraryResult<FolderDto> =
             answer("moveFolder:$folderId:$targetParentId", FolderDto(folderId, targetParentId, "moved", "USER"))
+
+        override suspend fun deleteFile(fileId: Long): LibraryResult<Unit> = answer("deleteFile:$fileId", Unit)
+
+        override suspend fun deleteFolder(folderId: Long): LibraryResult<Unit> = answer("deleteFolder:$folderId", Unit)
 
         private suspend fun <T> answer(key: String, value: T): LibraryResult<T> {
             calls += key
