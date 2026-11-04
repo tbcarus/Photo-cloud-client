@@ -40,15 +40,15 @@ data class NameEdit(
         }
 }
 
-/** Удаляемый объект. */
-sealed interface DeleteTarget {
+/** Файл или папка открытого каталога: объект удаления, выделения и групповой операции. */
+sealed interface LibraryItem {
     val name: String
 
-    data class File(val file: FileItemDto) : DeleteTarget {
+    data class File(val file: FileItemDto) : LibraryItem {
         override val name: String get() = file.originalFilename.orEmpty()
     }
 
-    data class Folder(val folder: FolderDto) : DeleteTarget {
+    data class Folder(val folder: FolderDto) : LibraryItem {
         override val name: String get() = folder.name
     }
 }
@@ -59,7 +59,7 @@ sealed interface DeleteTarget {
  */
 data class Deletion(
     val id: Int,
-    val target: DeleteTarget,
+    val target: LibraryItem,
     val parent: FolderDto,
     val deleting: Boolean = false,
     val error: String? = null,
@@ -84,6 +84,10 @@ data class LibraryUiState(
     // Выбор назначения: живёт поверх навигации и переживает переходы между папками.
     val relocation: Relocation? = null,
     val deletion: Deletion? = null,
+    // Режим множественного выделения открытой папки.
+    val selection: Selection? = null,
+    // Групповая операция: прогресс, затем итог. Переживает перечитывание папки.
+    val batch: Batch? = null,
     // Итог успешной операции; ошибки показывает notice.
     val info: String? = null
 ) {
@@ -99,9 +103,12 @@ data class LibraryUiState(
     /** Открыта сама корневая папка активного источника: только у неё Server хранит backupSource. */
     val isSourceRoot: Boolean get() = status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
     val picking: Boolean get() = relocation != null
-    // В Camera файлы попадают только через backup Android. Во время выбора назначения изменения недоступны.
+    val selecting: Boolean get() = selection != null
+    // Выбор назначения, выделение и групповая операция исключают одиночные изменения.
+    private val busy: Boolean get() = picking || selecting || batch != null
+    // В Camera файлы попадают только через backup Android.
     val canUpload: Boolean get() =
-        status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree && !picking
+        status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree && !busy
     /** Server создаёт папки только в ROOT и USER вне активного дерева: те же папки, что принимают ручную загрузку. */
     val canCreateFolder: Boolean get() = canUpload
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
@@ -110,12 +117,23 @@ data class LibraryUiState(
      * Системные папки (ROOT, Camera, AutoUploads) и корень активного источника не переименовываются, как и всё
      * внутри активного дерева. Отключённый источник в AutoUploads — обычная USER-папка. Окончательно решает Server.
      */
-    fun canRename(folder: FolderDto): Boolean = status == LibraryStatus.Content && !picking &&
-        folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+    fun canRename(folder: FolderDto): Boolean = !busy && changeable(folder)
 
     /** Файл активного дерева меняет только резервирование; файлы Camera Server переименовывает по своим правилам. */
-    fun canRename(file: FileItemDto): Boolean =
-        status == LibraryStatus.Content && !picking && file.id != null && !inActiveSource
+    fun canRename(file: FileItemDto): Boolean = !busy && changeable(file)
+
+    private fun changeable(folder: FolderDto): Boolean =
+        status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+
+    private fun changeable(file: FileItemDto): Boolean = status == LibraryStatus.Content && file.id != null && !inActiveSource
+
+    /**
+     * Выделить можно только то, что допускает групповые операции: системные папки, корень активного источника
+     * и всё в активном дереве не выделяются.
+     */
+    fun canSelect(folder: FolderDto): Boolean = !picking && batch == null && changeable(folder)
+
+    fun canSelect(file: FileItemDto): Boolean = !picking && batch == null && changeable(file)
 
     /** Перемещается только USER-папка вне активного дерева, в том числе отключённый источник из AutoUploads. */
     fun canMove(folder: FolderDto): Boolean = canRename(folder)
@@ -133,6 +151,22 @@ data class LibraryUiState(
     fun canDelete(folder: FolderDto): Boolean = canRename(folder)
 
     fun canDelete(file: FileItemDto): Boolean = canRename(file)
+
+    /** Причина, по которой выделение нельзя переместить; null — можно выбирать назначение. */
+    val groupMoveProblem: String?
+        get() = when {
+            selection?.isEmpty != false -> "Ничего не выбрано"
+            currentFolder?.isCamera == true -> "Файлы Camera не перемещаются в библиотеку"
+            else -> null
+        }
+
+    /** Копирование папок на Server нет: группа копируется, только если в ней одни файлы. */
+    val groupCopyProblem: String?
+        get() = when {
+            selection?.isEmpty != false -> "Ничего не выбрано"
+            selection?.hasFolders == true -> "Копировать можно только файлы: копирования папок на Server нет"
+            else -> null
+        }
 
     /** Причина, по которой открытая папка не подходит как назначение; null — подтверждение доступно. */
     val pickProblem: String?

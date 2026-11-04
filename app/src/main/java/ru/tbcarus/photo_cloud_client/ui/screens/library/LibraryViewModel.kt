@@ -64,6 +64,7 @@ class LibraryViewModel @Inject constructor(
     private var editSerial = 0
     private var relocationSerial = 0
     private var deletionSerial = 0
+    private var batchSerial = 0
 
     // Исходная папка выбора назначения: отмена возвращает её список и прокрутку без запросов.
     private var relocationSource: RelocationSource? = null
@@ -309,11 +310,17 @@ class LibraryViewModel @Inject constructor(
      */
     private fun startRelocation(item: Relocated) {
         val state = _uiState.value
-        if (state.edit != null || state.deletion != null || state.picking) return
+        if (state.edit != null || state.deletion != null || state.picking || state.batch != null) return
+        // Выделение сохраняется вместе с исходным списком: отмена выбора назначения вернёт и его.
         relocationSource = RelocationSource(state, nextPage, scrollIndex, scrollOffset)
         val copyName = (item as? Relocated.CopyFile)?.name.orEmpty()
         _uiState.update {
-            it.copy(relocation = Relocation(++relocationSerial, item, state.path, copyName), notice = null, info = null)
+            it.copy(
+                relocation = Relocation(++relocationSerial, item, state.path, copyName),
+                selection = null,
+                notice = null,
+                info = null
+            )
         }
     }
 
@@ -347,10 +354,18 @@ class LibraryViewModel @Inject constructor(
             return
         }
         val item = relocation.item
+        if (item is Relocated.Group) {
+            // Группа выполняется пакетом из исходной папки: назначение уже проверено для каждого объекта.
+            val targetPath = state.path
+            returnToSource(relocation, reload = false, info = null)
+            startBatch(if (item.copy) BatchKind.COPY else BatchKind.MOVE, item.items, relocation.sourcePath, targetPath)
+            return
+        }
         val fileId = when (item) {
             is Relocated.MoveFile -> item.file.id
             is Relocated.CopyFile -> item.file.id
             is Relocated.MoveFolder -> item.folder.id
+            is Relocated.Group -> null
         } ?: return
         updateRelocation { it.copy(saving = true, attempted = true, error = null) }
         viewModelScope.launch {
@@ -358,6 +373,7 @@ class LibraryViewModel @Inject constructor(
                 is Relocated.MoveFile -> repository.moveFile(fileId, target.id)
                 is Relocated.CopyFile -> repository.copyFile(fileId, target.id, relocation.copyName)
                 is Relocated.MoveFolder -> repository.moveFolder(fileId, target.id)
+                is Relocated.Group -> return@launch
             }
             // Сменилась сессия: состояние уже сброшено.
             if (_uiState.value.relocation?.id != relocation.id) return@launch
@@ -399,6 +415,7 @@ class LibraryViewModel @Inject constructor(
         is Relocated.MoveFile -> "Файл «${item.name}» перемещён в «${folderLabel(target)}»"
         is Relocated.CopyFile -> "Копия «$copyName» создана в «${folderLabel(target)}»"
         is Relocated.MoveFolder -> "Папка «${item.name}» перемещена в «${folderLabel(target)}»"
+        is Relocated.Group -> ""
     }
 
     // Server мог выполнить операцию: выбор назначения сохраняется, повтор — только после обновления папки.
@@ -413,11 +430,11 @@ class LibraryViewModel @Inject constructor(
 
     fun startDelete(file: FileItemDto) {
         val state = _uiState.value
-        if (state.canDelete(file) && file.id != null) openDeletion(DeleteTarget.File(file))
+        if (state.canDelete(file) && file.id != null) openDeletion(LibraryItem.File(file))
     }
 
     fun startDelete(folder: FolderDto) {
-        if (_uiState.value.canDelete(folder)) openDeletion(DeleteTarget.Folder(folder))
+        if (_uiState.value.canDelete(folder)) openDeletion(LibraryItem.Folder(folder))
     }
 
     /** Пока запрос выполняется, диалог не закрывается: его итог должен дойти до списка. */
@@ -435,8 +452,8 @@ class LibraryViewModel @Inject constructor(
         updateDeletion { it.copy(deleting = true, error = null) }
         viewModelScope.launch {
             val result = when (val target = deletion.target) {
-                is DeleteTarget.File -> repository.deleteFile(target.file.id ?: return@launch)
-                is DeleteTarget.Folder -> repository.deleteFolder(target.folder.id)
+                is LibraryItem.File -> repository.deleteFile(target.file.id ?: return@launch)
+                is LibraryItem.Folder -> repository.deleteFolder(target.folder.id)
             }
             // Сменилась сессия: состояние уже сброшено, интерфейс другого аккаунта не меняется.
             if (_uiState.value.deletion?.id != deletion.id) return@launch
@@ -464,7 +481,7 @@ class LibraryViewModel @Inject constructor(
         refresh()
     }
 
-    private fun openDeletion(target: DeleteTarget) {
+    private fun openDeletion(target: LibraryItem) {
         val state = _uiState.value
         val parent = state.currentFolder ?: return
         if (state.edit != null || state.deletion != null || state.picking) return
@@ -483,9 +500,180 @@ class LibraryViewModel @Inject constructor(
         )
     }
 
-    private fun deletedText(target: DeleteTarget): String = when (target) {
-        is DeleteTarget.File -> "Файл «${target.name}» удалён"
-        is DeleteTarget.Folder -> "Папка «${target.name}» удалена"
+    private fun deletedText(target: LibraryItem): String = when (target) {
+        is LibraryItem.File -> "Файл «${target.name}» удалён"
+        is LibraryItem.Folder -> "Папка «${target.name}» удалена"
+    }
+
+    // --- Множественное выделение и групповые операции ---
+
+    /**
+     * Долгое нажатие и нажатие в режиме выделения: первый объект открывает режим, следующие переключаются.
+     * Недоступные групповым операциям объекты не выделяются.
+     */
+    fun toggleSelection(folder: FolderDto) {
+        val state = _uiState.value
+        if (state.canSelect(folder)) updateSelection(state) { it.toggle(folder) }
+    }
+
+    fun toggleSelection(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.canSelect(file)) updateSelection(state) { it.toggle(file) }
+    }
+
+    /** Только уже загруженные строки: каталог ради выделения не догружается. */
+    fun selectLoaded() {
+        val state = _uiState.value
+        if (state.selection == null) return
+        updateSelection(state) { selection ->
+            selection.plus(state.folders.filter(state::canSelect), state.files.filter(state::canSelect))
+        }
+    }
+
+    fun clearSelection() {
+        _uiState.update { state -> state.selection?.let { state.copy(selection = Selection(it.folderId)) } ?: state }
+    }
+
+    fun exitSelection() {
+        _uiState.update { it.copy(selection = null) }
+    }
+
+    fun startGroupMove() {
+        val state = _uiState.value
+        val selection = state.selection ?: return
+        if (state.groupMoveProblem == null) startRelocation(Relocated.Group(selection.items, copy = false))
+    }
+
+    fun startGroupCopy() {
+        val state = _uiState.value
+        val selection = state.selection ?: return
+        if (state.groupCopyProblem == null) startRelocation(Relocated.Group(selection.items, copy = true))
+    }
+
+    fun requestGroupDelete() {
+        _uiState.update { state ->
+            val selection = state.selection?.takeIf { !it.isEmpty } ?: return@update state
+            state.copy(selection = selection.copy(confirmingDelete = true))
+        }
+    }
+
+    fun dismissGroupDelete() {
+        _uiState.update { state -> state.selection?.let { state.copy(selection = it.copy(confirmingDelete = false)) } ?: state }
+    }
+
+    /** До подтверждения ничего не отправляется; число в подтверждении — выделенные объекты, без их содержимого. */
+    fun confirmGroupDelete() {
+        val state = _uiState.value
+        val selection = state.selection ?: return
+        if (!selection.confirmingDelete || selection.isEmpty || state.batch != null) return
+        startBatch(BatchKind.DELETE, selection.items, state.path, targetPath = null)
+    }
+
+    /** «Остановить»: следующие объекты не отправляются, уже отправленный запрос завершается и учитывается. */
+    fun stopBatch() = updateBatch { if (it.running) it.copy(stopRequested = true) else it }
+
+    /** Закрытие итога. Если Server отказал в доступе, Library предлагает вход. */
+    fun dismissBatch() {
+        val batch = _uiState.value.batch ?: return
+        if (batch.running) return
+        _uiState.update { it.copy(batch = null) }
+        if (batch.sessionLost) applyFailure(LibraryResult.Unauthorized, _uiState.value.path)
+    }
+
+    /** Проверка назначения после неизвестного результата: папка открывается заново с первой страницы. */
+    fun openBatchTarget() {
+        val batch = _uiState.value.batch ?: return
+        val target = batch.targetPath ?: return
+        if (batch.running || batch.sessionLost) return
+        _uiState.update { it.copy(batch = null) }
+        loadFolder(target)
+    }
+
+    private fun updateSelection(state: LibraryUiState, change: (Selection) -> Selection) {
+        val folderId = state.currentFolder?.id ?: return
+        if (state.edit != null || state.deletion != null) return
+        val selection = state.selection ?: Selection(folderId)
+        _uiState.update { it.copy(selection = change(selection), notice = null, info = null) }
+    }
+
+    private fun updateBatch(change: (Batch) -> Batch) {
+        _uiState.update { state -> state.batch?.let { state.copy(batch = change(it)) } ?: state }
+    }
+
+    /** Набор и сессия фиксируются до первого запроса; выделение закрывается, итог показывается до закрытия. */
+    private fun startBatch(kind: BatchKind, items: List<LibraryItem>, sourcePath: List<FolderDto>, targetPath: List<FolderDto>?) {
+        val session = context ?: return
+        val batch = Batch(++batchSerial, kind, sourcePath, targetPath, items.map { BatchEntry(it) })
+        _uiState.update { it.copy(batch = batch, selection = null, notice = null, info = null) }
+        viewModelScope.launch { runBatch(batch.id, session) }
+    }
+
+    /**
+     * Последовательные одиночные запросы. Определённый отказ объекта не мешает остальным; неизвестный результат
+     * и отказ в доступе останавливают пакет. Повторов и отката нет.
+     */
+    private suspend fun runBatch(id: Int, session: LibrarySession) {
+        val count = _uiState.value.batch?.takeIf { it.id == id }?.total ?: return
+        for (index in 0 until count) {
+            val batch = _uiState.value.batch?.takeIf { it.id == id } ?: return
+            // Сессия сменилась: состояние сброшено, запросы старой сессии не отправляются.
+            if (context != session) return
+            if (batch.stopRequested) break
+            val entry = batch.entries[index]
+            val result = perform(batch, entry.item)
+            if (_uiState.value.batch?.id != id) return
+            val (outcome, reason) = batchOutcome(batch.kind, result)
+            updateBatch { current ->
+                current.copy(entries = current.entries.toMutableList().also { it[index] = entry.copy(outcome = outcome, reason = reason) })
+            }
+            when (result) {
+                // 5xx не гарантирует, что операция не выполнена: как и потерянный ответ, останавливает пакет.
+                is LibraryResult.NetworkError, is LibraryResult.UnknownResult, is LibraryResult.ServerError -> {
+                    updateBatch { it.copy(haltReason = "Результат последней операции неизвестен: пакет остановлен") }
+                    break
+                }
+                LibraryResult.Unauthorized -> {
+                    updateBatch { it.copy(haltReason = "Server отказал в доступе: пакет остановлен", sessionLost = true) }
+                    break
+                }
+                else -> Unit
+            }
+        }
+        val batch = _uiState.value.batch?.takeIf { it.id == id } ?: return
+        updateBatch { it.copy(running = false) }
+        // Копия создаётся в другой папке: исходная не изменилась.
+        if (!batch.sessionLost && batch.kind != BatchKind.COPY && batch.processed > 0) loadFolder(batch.sourcePath)
+    }
+
+    private suspend fun perform(batch: Batch, item: LibraryItem): LibraryResult<*> {
+        val target = batch.targetPath?.last()
+        return when (item) {
+            is LibraryItem.File -> {
+                val id = item.file.id ?: return LibraryResult.Rejected("Нет ID файла")
+                when (batch.kind) {
+                    BatchKind.DELETE -> repository.deleteFile(id)
+                    BatchKind.MOVE -> repository.moveFile(id, target!!.id)
+                    // Копия получает исходное имя; совпадение — отказ этого объекта, без суффиксов.
+                    BatchKind.COPY -> repository.copyFile(id, target!!.id, item.file.originalFilename.orEmpty())
+                }
+            }
+            is LibraryItem.Folder -> when (batch.kind) {
+                BatchKind.DELETE -> repository.deleteFolder(item.folder.id)
+                BatchKind.MOVE -> repository.moveFolder(item.folder.id, target!!.id)
+                BatchKind.COPY -> LibraryResult.Rejected("Копирования папок на Server нет")
+            }
+        }
+    }
+
+    private fun batchOutcome(kind: BatchKind, result: LibraryResult<*>): Pair<BatchOutcome, String?> = when (result) {
+        is LibraryResult.Success -> BatchOutcome.SUCCESS to null
+        is LibraryResult.NetworkError -> BatchOutcome.UNKNOWN to "Связь прервалась (${result.message})"
+        is LibraryResult.UnknownResult -> BatchOutcome.UNKNOWN to "Ответ сервера не разобран (${result.message})"
+        is LibraryResult.ServerError -> BatchOutcome.UNKNOWN to "Ошибка сервера (${result.message})"
+        LibraryResult.Unauthorized -> BatchOutcome.FAILED to "Сервер отказал в доступе"
+        LibraryResult.NotFound -> BatchOutcome.FAILED to
+            if (kind == BatchKind.DELETE) "Не найден: возможно, уже удалён" else "Объект или папка назначения не найдены"
+        is LibraryResult.Failure -> BatchOutcome.FAILED to failureText(result)
     }
 
     fun download(file: FileItemDto) {
@@ -583,7 +771,10 @@ class LibraryViewModel @Inject constructor(
                 relocation = it.relocation.takeIf { keepRelocation },
                 // Обновление той же папки (например, после ручной загрузки) не закрывает открытый диалог.
                 edit = it.edit?.takeIf { edit -> edit.parent.id == path.lastOrNull()?.id },
-                deletion = it.deletion?.takeIf { deletion -> deletion.parent.id == path.lastOrNull()?.id }
+                deletion = it.deletion?.takeIf { deletion -> deletion.parent.id == path.lastOrNull()?.id },
+                // Переход в другую папку сбрасывает выделение, обновление той же — нет.
+                selection = it.selection?.takeIf { selection -> selection.folderId == path.lastOrNull()?.id },
+                batch = it.batch
             )
         }
         return generation

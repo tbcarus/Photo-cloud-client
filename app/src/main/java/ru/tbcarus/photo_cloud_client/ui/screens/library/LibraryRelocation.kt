@@ -20,6 +20,17 @@ sealed interface Relocated {
     data class MoveFolder(val folder: FolderDto) : Relocated {
         override val name: String get() = folder.name
     }
+
+    /** Групповое перемещение или копирование выделенных объектов одной папки; копируются только файлы. */
+    data class Group(val items: List<LibraryItem>, val copy: Boolean) : Relocated {
+        override val name: String get() = objectsCount(items.size)
+    }
+}
+
+/** Одиночная операция того же вида для объекта группы: правила назначения у группы те же, что у каждого объекта. */
+private fun LibraryItem.relocated(copy: Boolean): Relocated = when (this) {
+    is LibraryItem.File -> if (copy) Relocated.CopyFile(file) else Relocated.MoveFile(file)
+    is LibraryItem.Folder -> Relocated.MoveFolder(folder)
 }
 
 /**
@@ -47,6 +58,18 @@ data class Relocation(
  * Повторяет проверенные правила Server, окончательно решает Server.
  */
 fun destinationProblem(relocation: Relocation, targetPath: List<FolderDto>): String? {
+    val group = relocation.item as? Relocated.Group
+    if (group != null) {
+        // Копия группы в исходную папку совпала бы по именам: другое имя задаёт только одиночное копирование.
+        if (group.copy && targetPath.last().id == relocation.sourceFolder.id) {
+            return "Копии в той же папке совпадут по именам: используйте одиночное копирование с другим именем"
+        }
+        // Назначение должно подходить каждому объекту, иначе пакет не начинается.
+        return group.items.firstNotNullOfOrNull { item ->
+            destinationProblem(relocation.copy(item = item.relocated(group.copy)), targetPath)
+                ?.let { problem -> if (group.items.size > 1) "«${item.name}»: $problem" else problem }
+        }
+    }
     val target = targetPath.last()
     val source = relocation.sourceFolder
     if (targetPath.any { it.isActiveBackupSource }) return "Папку изменяет только автоматическое резервирование"
@@ -69,6 +92,7 @@ fun destinationProblem(relocation: Relocation, targetPath: List<FolderDto>): Str
             target.isCamera -> "Копия в Camera совпадёт с исходным файлом по содержимому"
             else -> null
         }
+        is Relocated.Group -> null
     }
 }
 
@@ -77,8 +101,13 @@ fun destinationProblem(relocation: Relocation, targetPath: List<FolderDto>): Str
  * даже если сами не подходят (например, AutoUploads с отключёнными источниками).
  */
 fun blockedFolderProblem(relocation: Relocation, path: List<FolderDto>, folder: FolderDto): String? {
-    val closed = folder.isCamera || folder.isActiveBackupSource ||
-        (relocation.item as? Relocated.MoveFolder)?.folder?.id == folder.id
+    val item = relocation.item
+    val moved = when (item) {
+        is Relocated.MoveFolder -> item.folder.id == folder.id
+        is Relocated.Group -> !item.copy && item.items.any { it is LibraryItem.Folder && it.folder.id == folder.id }
+        else -> false
+    }
+    val closed = folder.isCamera || folder.isActiveBackupSource || moved
     return if (closed) destinationProblem(relocation, path + folder) else null
 }
 

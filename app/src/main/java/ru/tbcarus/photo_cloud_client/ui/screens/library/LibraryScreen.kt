@@ -3,7 +3,9 @@ package ru.tbcarus.photo_cloud_client.ui.screens.library
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,10 +25,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
@@ -41,6 +46,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -66,6 +73,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -85,6 +93,7 @@ import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 // Следующая страница запрашивается заранее, до появления последней строки.
 private const val LOAD_MORE_THRESHOLD = 10
 private const val DISABLED_ALPHA = 0.38f
+private const val ITEM_NAMES_SHOWN = 5
 
 @Composable
 fun LibraryScreen(
@@ -130,9 +139,13 @@ fun LibraryScreen(
 
     // Статус, а не вход на экран: адрес может восстановиться уже при открытом экране.
     LaunchedEffect(state.status) { viewModel.ensureLoaded() }
-    // При выборе назначения Back поднимается по папкам, а в корне отменяет выбор.
-    BackHandler(enabled = state.canGoUp || state.picking) {
-        if (state.canGoUp) viewModel.navigateUp() else viewModel.cancelRelocation()
+    // Back сначала закрывает выделение; при выборе назначения поднимается по папкам, а в корне отменяет выбор.
+    BackHandler(enabled = state.canGoUp || state.picking || state.selecting) {
+        when {
+            state.selecting -> viewModel.exitSelection()
+            state.canGoUp -> viewModel.navigateUp()
+            else -> viewModel.cancelRelocation()
+        }
     }
 
     // Вне LazyColumn: при загрузке списка нет, а положение нужно сохранить при смене вкладки.
@@ -188,7 +201,23 @@ fun LibraryScreen(
                 )
             }
         }
-        if (state.isSourceRoot && !state.picking) SourceRootPanel(state, onDisable = viewModel::disableSource)
+        state.selection?.let { selection ->
+            SelectionPanel(state, selection, viewModel)
+            if (selection.confirmingDelete) {
+                GroupDeleteDialog(selection, onConfirm = viewModel::confirmGroupDelete, onDismiss = viewModel::dismissGroupDelete)
+            }
+        }
+        state.batch?.let { batch ->
+            BatchDialog(
+                batch = batch,
+                onStop = viewModel::stopBatch,
+                onClose = viewModel::dismissBatch,
+                onOpenTarget = viewModel::openBatchTarget
+            )
+        }
+        if (state.isSourceRoot && !state.picking && !state.selecting) {
+            SourceRootPanel(state, onDisable = viewModel::disableSource)
+        }
         state.notice?.let { notice ->
             Text(
                 text = notice,
@@ -352,6 +381,7 @@ private fun LibraryList(
 
     val inCamera = state.currentFolder?.isCamera == true
     val relocation = state.relocation
+    val selection = state.selection
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(state.folders, key = { "folder-${it.id}" }) { folder ->
             // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
@@ -363,11 +393,24 @@ private fun LibraryList(
                 }).takeIf { state.canMove(folder) },
                 RowAction("Удалить", { viewModel.startDelete(folder) }, destructive = true).takeIf { state.canDelete(folder) }
             )
+            val selectable = state.canSelect(folder)
             FolderRow(
                 folder = folder,
-                actions = actions,
+                actions = if (selection != null) emptyList() else actions,
                 blocked = relocation?.let { blockedFolderProblem(it, state.path, folder) },
-                onClick = { viewModel.openFolder(folder) }
+                // В режиме выделения нажатие переключает отметку; невыделяемые папки не открываются, чтобы не сбросить выбор.
+                selected = selection?.takeIf { selectable }?.contains(folder),
+                onClick = {
+                    when {
+                        selection == null -> viewModel.openFolder(folder)
+                        selectable -> viewModel.toggleSelection(folder)
+                    }
+                },
+                onLongClick = if (selectable) {
+                    { viewModel.toggleSelection(folder) }
+                } else {
+                    null
+                }
             )
             HorizontalDivider()
         }
@@ -386,7 +429,24 @@ private fun LibraryList(
                 }).takeIf { state.canCopy(file) },
                 RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
             )
-            FileRow(file = file, inCamera = inCamera, actions = actions, dimmed = state.picking)
+            val selectable = state.canSelect(file)
+            FileRow(
+                file = file,
+                inCamera = inCamera,
+                actions = if (selection != null) emptyList() else actions,
+                dimmed = state.picking,
+                selected = selection?.takeIf { selectable }?.contains(file),
+                onClick = if (selection != null && selectable) {
+                    { viewModel.toggleSelection(file) }
+                } else {
+                    null
+                },
+                onLongClick = if (selectable) {
+                    { viewModel.toggleSelection(file) }
+                } else {
+                    null
+                }
+            )
             HorizontalDivider()
         }
         if (state.isLoadingMore) {
@@ -418,14 +478,25 @@ private fun LibraryList(
     }
 }
 
-/** [blocked] — причина, по которой при выборе назначения в папку нет смысла входить. */
+/**
+ * [blocked] — причина, по которой при выборе назначения в папку нет смысла входить.
+ * [selected] — отметка в режиме выделения; null — строка не выделяется.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FolderRow(folder: FolderDto, actions: List<RowAction>, blocked: String?, onClick: () -> Unit) {
+private fun FolderRow(
+    folder: FolderDto,
+    actions: List<RowAction>,
+    blocked: String?,
+    selected: Boolean?,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = blocked == null, onClick = onClick)
+            .combinedClickable(enabled = blocked == null, onClick = onClick, onLongClick = onLongClick)
             .alpha(if (blocked == null) 1f else DISABLED_ALPHA)
             .padding(vertical = 4.dp)
     ) {
@@ -446,17 +517,27 @@ private fun FolderRow(folder: FolderDto, actions: List<RowAction>, blocked: Stri
                 Text(text = it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        ActionsMenu(actions)
+        if (selected != null) Checkbox(checked = selected, onCheckedChange = { onClick() }) else ActionsMenu(actions)
     }
 }
 
-// Нажатие на строку оставлено для будущего просмотра; действия — в меню строки.
+// Вне режима выделения нажатие на строку ничего не делает (оставлено для будущего просмотра); действия — в меню строки.
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FileRow(file: FileItemDto, inCamera: Boolean, actions: List<RowAction>, dimmed: Boolean) {
+private fun FileRow(
+    file: FileItemDto,
+    inCamera: Boolean,
+    actions: List<RowAction>,
+    dimmed: Boolean,
+    selected: Boolean?,
+    onClick: (() -> Unit)?,
+    onLongClick: (() -> Unit)?
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .combinedClickable(enabled = onClick != null || onLongClick != null, onClick = { onClick?.invoke() }, onLongClick = onLongClick)
             .alpha(if (dimmed) DISABLED_ALPHA else 1f)
             .padding(vertical = 4.dp)
     ) {
@@ -484,7 +565,7 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean, actions: List<RowActio
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        ActionsMenu(actions)
+        if (selected != null) Checkbox(checked = selected, onCheckedChange = { onClick?.invoke() }) else ActionsMenu(actions)
     }
 }
 
@@ -627,10 +708,13 @@ private fun RelocationPanel(
     onCancel: () -> Unit,
     onRefresh: () -> Unit
 ) {
-    val (title, confirm) = when (relocation.item) {
-        is Relocated.MoveFile -> "Перемещение файла" to "Переместить сюда"
-        is Relocated.CopyFile -> "Копирование файла" to "Копировать сюда"
-        is Relocated.MoveFolder -> "Перемещение папки" to "Переместить сюда"
+    val (title, confirm) = when (val item = relocation.item) {
+        is Relocated.MoveFile -> "Перемещение файла «${item.name}»" to "Переместить сюда"
+        is Relocated.CopyFile -> "Копирование файла «${item.name}»" to "Копировать сюда"
+        is Relocated.MoveFolder -> "Перемещение папки «${item.name}»" to "Переместить сюда"
+        is Relocated.Group ->
+            (if (item.copy) "Копирование: ${item.name}" else "Перемещение: ${item.name}") to
+                (if (item.copy) "Копировать сюда" else "Переместить сюда")
     }
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -641,7 +725,7 @@ private fun RelocationPanel(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                text = "$title «${relocation.item.name}»",
+                text = title,
                 style = MaterialTheme.typography.titleSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -682,10 +766,12 @@ private fun RelocationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val (title, confirm, subject) = when (relocation.item) {
+    val (title, confirm, subject) = when (val item = relocation.item) {
         is Relocated.MoveFile -> Triple("Переместить файл?", "Переместить", "Файл")
         is Relocated.CopyFile -> Triple("Копировать файл?", "Копировать", "Файл")
         is Relocated.MoveFolder -> Triple("Переместить папку?", "Переместить", "Папка")
+        is Relocated.Group ->
+            if (item.copy) Triple("Копировать файлы?", "Копировать", "Объекты") else Triple("Переместить объекты?", "Переместить", "Объекты")
     }
     var field by remember(relocation.id) {
         val name = relocation.copyName
@@ -700,6 +786,7 @@ private fun RelocationDialog(
         text = {
             Column {
                 Text("$subject: ${relocation.item.name}", style = MaterialTheme.typography.bodyMedium)
+                (relocation.item as? Relocated.Group)?.let { group -> ItemNames(group.items.map { it.name }) }
                 Text("Из: ${libraryPathLabel(relocation.sourcePath)}", style = MaterialTheme.typography.bodyMedium)
                 Text("В: ${libraryPathLabel(target)}", style = MaterialTheme.typography.bodyMedium)
                 if (relocation.item is Relocated.CopyFile) {
@@ -747,8 +834,8 @@ private fun RelocationDialog(
 @Composable
 private fun DeleteDialog(deletion: Deletion, onConfirm: () -> Unit, onRefresh: () -> Unit, onDismiss: () -> Unit) {
     val (title, question) = when (deletion.target) {
-        is DeleteTarget.File -> "Удалить файл?" to "Удалить файл «${deletion.target.name}»?"
-        is DeleteTarget.Folder ->
+        is LibraryItem.File -> "Удалить файл?" to "Удалить файл «${deletion.target.name}»?"
+        is LibraryItem.Folder ->
             "Удалить папку?" to "Удалить папку «${deletion.target.name}» вместе со всеми вложенными папками и файлами?"
     }
     AlertDialog(
@@ -765,7 +852,7 @@ private fun DeleteDialog(deletion: Deletion, onConfirm: () -> Unit, onRefresh: (
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 // Server не сообщает Android об удалении: резервирование Camera фото повторно не отправит.
-                if (deletion.target is DeleteTarget.File && deletion.parent.isCamera) {
+                if (deletion.target is LibraryItem.File && deletion.parent.isCamera) {
                     Text(
                         "Фото на телефоне останется, повторно автоматически оно не загрузится.",
                         style = MaterialTheme.typography.bodySmall,
@@ -797,6 +884,191 @@ private fun DeleteDialog(deletion: Deletion, onConfirm: () -> Unit, onRefresh: (
             }
         }
     )
+}
+
+/** Панель режима выделения: число выбранных, выход, команды выделения и групповые операции. */
+@Composable
+private fun SelectionPanel(state: LibraryUiState, selection: Selection, viewModel: LibraryViewModel) {
+    var menu by remember { mutableStateOf(false) }
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = viewModel::exitSelection) {
+                    Icon(Icons.Default.Close, contentDescription = "Закрыть выделение")
+                }
+                Text("Выбрано: ${selection.size}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Box {
+                    IconButton(onClick = { menu = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Команды выделения")
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Выделить загруженные") }, onClick = {
+                            menu = false
+                            viewModel.selectLoaded()
+                        })
+                        DropdownMenuItem(text = { Text("Снять выделение") }, enabled = !selection.isEmpty, onClick = {
+                            menu = false
+                            viewModel.clearSelection()
+                        })
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = viewModel::startGroupMove, enabled = state.groupMoveProblem == null) { Text("Переместить") }
+                TextButton(onClick = viewModel::startGroupCopy, enabled = state.groupCopyProblem == null) { Text("Копировать") }
+                TextButton(onClick = viewModel::requestGroupDelete, enabled = !selection.isEmpty) {
+                    Text("Удалить", color = if (selection.isEmpty) Color.Unspecified else MaterialTheme.colorScheme.error)
+                }
+            }
+            // Причина недоступной операции; пустое выделение объяснять не нужно.
+            if (!selection.isEmpty) {
+                (state.groupCopyProblem ?: state.groupMoveProblem)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Подтверждение группового удаления: число — выделенные объекты, без подсчёта содержимого папок. */
+@Composable
+private fun GroupDeleteDialog(selection: Selection, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Удалить выбранное?") },
+        text = {
+            Column {
+                Text("Удалить ${selectedObjectsCount(selection.size)}?", style = MaterialTheme.typography.bodyMedium)
+                ItemNames(selection.items.map { it.name })
+                Spacer(Modifier.height(8.dp))
+                if (selection.hasFolders) {
+                    Text(
+                        "Все файлы и вложенные папки внутри выбранных каталогов также будут удалены.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Text(
+                    "Восстановление через корзину не предусмотрено.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Удалить", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }
+    )
+}
+
+/** Прогресс пакета, затем итог по объектам. Повторить всё нельзя: сначала сверка состояния Server. */
+@Composable
+private fun BatchDialog(batch: Batch, onStop: () -> Unit, onClose: () -> Unit, onOpenTarget: () -> Unit) {
+    val operation = when (batch.kind) {
+        BatchKind.MOVE -> "Перемещение"
+        BatchKind.COPY -> "Копирование"
+        BatchKind.DELETE -> "Удаление"
+    }
+    val unknown = batch.count(BatchOutcome.UNKNOWN)
+    val title = when {
+        batch.running -> operation
+        batch.count(BatchOutcome.SUCCESS) == batch.total -> "$operation завершено"
+        unknown > 0 -> "$operation: результат неизвестен"
+        batch.stopRequested -> "$operation остановлено"
+        else -> "$operation: есть ошибки"
+    }
+    AlertDialog(
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+        title = { Text(title) },
+        text = {
+            Column {
+                Text("Обработано: ${batch.processed} из ${batch.total}", style = MaterialTheme.typography.bodyMedium)
+                if (batch.running) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { batch.processed.toFloat() / batch.total.coerceAtLeast(1) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    batch.current?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (batch.stopRequested) {
+                        Text("Остановка после текущего объекта…", style = MaterialTheme.typography.bodySmall)
+                    }
+                } else {
+                    Text("Успешно: ${batch.count(BatchOutcome.SUCCESS)}", style = MaterialTheme.typography.bodyMedium)
+                    Text("Ошибок: ${batch.count(BatchOutcome.FAILED)}", style = MaterialTheme.typography.bodyMedium)
+                    if (unknown > 0) Text("Результат неизвестен: $unknown", style = MaterialTheme.typography.bodyMedium)
+                    val notProcessed = batch.count(BatchOutcome.NOT_PROCESSED)
+                    if (notProcessed > 0) Text("Не обработано: $notProcessed", style = MaterialTheme.typography.bodyMedium)
+                    batch.haltReason?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    val problems = batch.entries.filter { it.outcome == BatchOutcome.FAILED || it.outcome == BatchOutcome.UNKNOWN }
+                    if (problems.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 200.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            problems.forEach { entry ->
+                                Text(
+                                    "${entry.item.name}: ${entry.reason.orEmpty()}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                    if (unknown > 0) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Server мог выполнить операцию. Проверьте исходную папку и папку назначения, прежде чем повторять.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (batch.running) {
+                TextButton(onClick = onStop, enabled = !batch.stopRequested) { Text("Остановить") }
+            } else {
+                TextButton(onClick = onClose) { Text("Закрыть") }
+            }
+        },
+        dismissButton = {
+            if (!batch.running && unknown > 0 && batch.targetPath != null && !batch.sessionLost) {
+                TextButton(onClick = onOpenTarget) { Text("Открыть назначение") }
+            }
+        }
+    )
+}
+
+/** Имена объектов операции: первые несколько, остальные — числом. */
+@Composable
+private fun ItemNames(names: List<String>) {
+    val shown = names.take(ITEM_NAMES_SHOWN)
+    shown.forEach {
+        Text("• $it", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    if (names.size > shown.size) {
+        Text("и ещё ${names.size - shown.size}", style = MaterialTheme.typography.bodySmall)
+    }
 }
 
 @Composable

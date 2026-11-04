@@ -1484,7 +1484,7 @@ class LibraryViewModelTest {
         opened().openFolder(alpha)
 
         viewModel.startDelete(state.files.first())
-        assertEquals(DeleteTarget.File(file(10)), state.deletion!!.target)
+        assertEquals(LibraryItem.File(file(10)), state.deletion!!.target)
         // До подтверждения запросов нет, строка на месте.
         repository.setFiles(alpha, 0, page(listOf(file(11))))
         repository.calls.clear()
@@ -1727,6 +1727,400 @@ class LibraryViewModelTest {
 
         assertNull(state.deletion)
         assertTrue(repository.calls.none { it.startsWith("delete") })
+    }
+
+    // --- Множественное выделение и групповые операции (этап 6.4) ---
+
+    private val gamma = FolderDto(6, 1, "Gamma", "USER")
+
+    private fun outcomes(): List<BatchOutcome> = state.batch!!.entries.map { it.outcome }
+
+    /** alpha с файлами 10, 11, 12; в корне ещё beta и gamma. */
+    private fun openAlphaWithFiles() {
+        repository.setChildren(root, alpha, beta, gamma)
+        repository.setChildren(alpha, nested)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11), file(12))))
+        opened().openFolder(alpha)
+    }
+
+    private fun selectFiles(vararg ids: Long) = ids.forEach { id -> viewModel.toggleSelection(state.files.first { it.id == id }) }
+
+    @Test
+    fun longPressEntersSelectionAndTapsToggle() {
+        openAlphaWithFiles()
+
+        viewModel.toggleSelection(state.files[0])
+        assertTrue(state.selecting)
+        assertEquals(setOf(10L), state.selection!!.files.keys)
+        viewModel.toggleSelection(state.files[1])
+        viewModel.toggleSelection(nested)
+        assertEquals(3, state.selection!!.size)
+        viewModel.toggleSelection(state.files[0])
+        assertEquals(setOf(11L), state.selection!!.files.keys)
+        // Одиночные меню в режиме выделения недоступны.
+        assertFalse(state.canRename(state.files[0]))
+
+        viewModel.clearSelection()
+        assertTrue(state.selecting)
+        assertTrue(state.selection!!.isEmpty)
+        viewModel.exitSelection()
+        assertNull(state.selection)
+        assertTrue(repository.calls.none { it.startsWith("move") || it.startsWith("copy") || it.startsWith("delete") })
+    }
+
+    @Test
+    fun selectionSurvivesPagingAndSelectsOnlyLoaded() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(root, 0, page(listOf(file(10), file(11)), hasNext = true))
+        repository.setFiles(root, 1, page(listOf(file(11), file(12)), hasNext = true))
+        opened()
+        viewModel.toggleSelection(state.files[0])
+
+        viewModel.loadNextPage()
+        assertEquals(setOf(10L), state.selection!!.files.keys)
+
+        repository.calls.clear()
+        viewModel.selectLoaded()
+        // Только загруженное, без догрузки; повтор ID на соседних страницах не удваивает счёт.
+        assertTrue(repository.calls.isEmpty())
+        assertEquals(setOf(10L, 11L, 12L), state.selection!!.files.keys)
+        assertEquals(setOf(alpha.id), state.selection!!.folders.keys)
+        assertEquals(4, state.selection!!.size)
+    }
+
+    @Test
+    fun navigationAndSessionResetSelection() {
+        openAlphaWithFiles()
+        viewModel.toggleSelection(state.files[0])
+        // Обновление той же папки выделение сохраняет.
+        viewModel.refresh()
+        assertEquals(setOf(10L), state.selection!!.files.keys)
+
+        viewModel.navigateUp()
+        assertNull(state.selection)
+
+        viewModel.toggleSelection(alpha)
+        tokens.saveTokens(tokensOf("bob"))
+        assertNull(state.selection)
+
+        viewModel.ensureLoaded()
+        viewModel.toggleSelection(alpha)
+        baseUrlProvider.baseUrl = SERVER_B
+        assertNull(state.selection)
+    }
+
+    @Test
+    fun systemFoldersAndActiveTreeAreNotSelected() {
+        val (autoUploads, source, nestedSource) = openSourceRoot()
+        repository.setFiles(source, 0, page(listOf(file(40))))
+        viewModel.refresh()
+        viewModel.toggleSelection(nestedSource)
+        viewModel.toggleSelection(state.files.single())
+        assertNull(state.selection)
+        viewModel.navigateUp()
+        viewModel.toggleSelection(source)
+        viewModel.navigateUp()
+        viewModel.toggleSelection(camera)
+        viewModel.toggleSelection(autoUploads)
+        assertNull(state.selection)
+    }
+
+    @Test
+    fun groupMoveOfFilesRunsOneRequestPerObject() {
+        openAlphaWithFiles()
+        selectFiles(10, 11)
+        viewModel.startGroupMove()
+        assertTrue(state.picking)
+        assertNull(state.selection)
+        assertEquals("«file10.txt»: Файл уже находится здесь", state.pickProblem)
+
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        repository.setFiles(alpha, 0, page(listOf(file(12))))
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+
+        assertEquals(
+            listOf("moveFile:10:${beta.id}", "moveFile:11:${beta.id}", "children:${alpha.id}", "files:${alpha.id}:0"),
+            repository.calls
+        )
+        val batch = state.batch!!
+        assertFalse(batch.running)
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.SUCCESS), outcomes())
+        assertEquals(BatchKind.MOVE, batch.kind)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf(12L), fileIds())
+        assertNull(state.relocation)
+        assertNull(state.selection)
+
+        viewModel.dismissBatch()
+        assertNull(state.batch)
+    }
+
+    @Test
+    fun groupMoveOfFilesAndFolderTogether() {
+        openAlphaWithFiles()
+        viewModel.toggleSelection(nested)
+        selectFiles(12)
+        viewModel.startGroupMove()
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertTrue(repository.calls.contains("moveFolder:${nested.id}:${beta.id}"))
+        assertTrue(repository.calls.contains("moveFile:12:${beta.id}"))
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.SUCCESS), outcomes())
+    }
+
+    @Test
+    fun invalidDestinationForOneObjectBlocksWholeGroup() {
+        openAlphaWithFiles()
+        viewModel.navigateUp()
+        viewModel.toggleSelection(alpha)
+        viewModel.toggleSelection(beta)
+        viewModel.startGroupMove()
+
+        // Внутрь alpha нельзя переместить саму alpha, хотя beta туда подходит.
+        assertNotNull(blockedFolderProblem(state.relocation!!, state.path, alpha))
+        viewModel.openFolder(gamma)
+        assertNull(state.pickProblem)
+        viewModel.navigateUp()
+        viewModel.openFolder(alpha)
+        assertEquals("«Alpha»: Нельзя переместить папку в саму себя или во вложенную папку", state.pickProblem)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertNull(state.batch)
+        assertTrue(repository.calls.none { it.startsWith("moveFolder") })
+    }
+
+    @Test
+    fun groupCopyOfFilesKeepsSourceWithoutReload() {
+        openAlphaWithFiles()
+        selectFiles(10, 12)
+        viewModel.startGroupCopy()
+        viewModel.requestRelocationConfirm()
+        assertFalse(state.relocation!!.confirming)
+        moveTo(beta)
+        viewModel.requestRelocationConfirm()
+        repository.calls.clear()
+        viewModel.confirmRelocation()
+
+        // Копии с исходными именами; исходная папка не меняется и не перечитывается.
+        assertEquals(listOf("copyFile:10:${beta.id}:file10.txt", "copyFile:12:${beta.id}:file12.txt"), repository.calls)
+        assertEquals(listOf(10L, 11L, 12L), fileIds())
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(BatchKind.COPY, state.batch!!.kind)
+    }
+
+    @Test
+    fun groupWithFolderCannotBeCopied() {
+        openAlphaWithFiles()
+        viewModel.toggleSelection(nested)
+        selectFiles(10)
+
+        viewModel.startGroupCopy()
+
+        assertNull(state.relocation)
+        assertEquals("Копировать можно только файлы: копирования папок на Server нет", state.groupCopyProblem)
+    }
+
+    @Test
+    fun groupDeleteNeedsConfirmationAndHandlesMixedSet() {
+        openAlphaWithFiles()
+        viewModel.toggleSelection(nested)
+        selectFiles(10, 11)
+        repository.calls.clear()
+
+        viewModel.requestGroupDelete()
+        assertTrue(state.selection!!.confirmingDelete)
+        viewModel.dismissGroupDelete()
+        assertTrue(repository.calls.isEmpty())
+        assertEquals(3, state.selection!!.size)
+
+        viewModel.requestGroupDelete()
+        repository.setChildren(alpha)
+        repository.setFiles(alpha, 0, page(listOf(file(12))))
+        viewModel.confirmGroupDelete()
+
+        assertEquals(
+            listOf("deleteFolder:${nested.id}", "deleteFile:10", "deleteFile:11", "children:${alpha.id}", "files:${alpha.id}:0"),
+            repository.calls
+        )
+        assertEquals(List(3) { BatchOutcome.SUCCESS }, outcomes())
+        assertTrue(state.folders.isEmpty())
+        assertEquals(listOf(12L), fileIds())
+    }
+
+    @Test
+    fun definiteRefusalOfOneObjectDoesNotStopOthers() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.startGroupMove()
+        moveTo(beta)
+        repository.fail("moveFile:11:${beta.id}", LibraryResult.NameTaken)
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        val batch = state.batch!!
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.FAILED, BatchOutcome.SUCCESS), outcomes())
+        assertEquals("Имя уже занято файлом или папкой", batch.entries[1].reason)
+        assertEquals(2, batch.count(BatchOutcome.SUCCESS))
+        assertEquals(1, batch.count(BatchOutcome.FAILED))
+        assertNull(batch.haltReason)
+        assertEquals(1, repository.calls.count { it == "moveFile:11:${beta.id}" })
+    }
+
+    @Test
+    fun unknownResultStopsBatchWithoutRepeat() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.requestGroupDelete()
+        // Server удалил 11, но ответ потерян.
+        repository.fail("deleteFile:11", LibraryResult.NetworkError("timeout"))
+        repository.setFiles(alpha, 0, page(listOf(file(12))))
+        viewModel.confirmGroupDelete()
+
+        val batch = state.batch!!
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.UNKNOWN, BatchOutcome.NOT_PROCESSED), outcomes())
+        assertEquals("Результат последней операции неизвестен: пакет остановлен", batch.haltReason)
+        assertFalse(batch.running)
+        assertEquals(1, repository.calls.count { it == "deleteFile:11" })
+        assertTrue(repository.calls.none { it == "deleteFile:12" })
+        // Исходная папка перечитана: видно фактическое состояние.
+        assertEquals(listOf(12L), fileIds())
+    }
+
+    @Test
+    fun serverErrorStopsBatchAsUnknownWithoutRepeat() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.requestGroupDelete()
+        repository.fail("deleteFile:11", LibraryResult.ServerError("Physical storage operation failed"))
+        repository.calls.clear()
+
+        viewModel.confirmGroupDelete()
+
+        val batch = state.batch!!
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.UNKNOWN, BatchOutcome.NOT_PROCESSED), outcomes())
+        assertEquals("Ошибка сервера (Physical storage operation failed)", batch.entries[1].reason)
+        assertEquals("Результат последней операции неизвестен: пакет остановлен", batch.haltReason)
+        assertFalse(batch.running)
+        assertEquals(2, batch.processed)
+        assertEquals(1, batch.count(BatchOutcome.SUCCESS))
+        assertEquals(0, batch.count(BatchOutcome.FAILED))
+        assertEquals(1, batch.count(BatchOutcome.UNKNOWN))
+        assertEquals(1, batch.count(BatchOutcome.NOT_PROCESSED))
+        // Каждый объект — не больше одного запроса, третий не отправлялся.
+        assertEquals(1, repository.calls.count { it == "deleteFile:10" })
+        assertEquals(1, repository.calls.count { it == "deleteFile:11" })
+        assertTrue(repository.calls.none { it == "deleteFile:12" })
+    }
+
+    @Test
+    fun badRequestOfOneObjectStillContinues() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.startGroupMove()
+        moveTo(beta)
+        repository.fail("moveFile:11:${beta.id}", LibraryResult.Rejected("Cannot move file between Camera and library folders"))
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.FAILED, BatchOutcome.SUCCESS), outcomes())
+        assertNull(state.batch!!.haltReason)
+    }
+
+    @Test
+    fun lostMoveResponseLeadsToTargetCheck() {
+        openAlphaWithFiles()
+        selectFiles(10, 11)
+        viewModel.startGroupMove()
+        moveTo(beta)
+        repository.fail("moveFile:10:${beta.id}", LibraryResult.UnknownResult("malformed"))
+        repository.setFiles(beta, 0, page(listOf(file(10))))
+        viewModel.requestRelocationConfirm()
+        viewModel.confirmRelocation()
+
+        assertEquals(listOf(BatchOutcome.UNKNOWN, BatchOutcome.NOT_PROCESSED), outcomes())
+        repository.calls.clear()
+        viewModel.openBatchTarget()
+
+        assertNull(state.batch)
+        assertEquals(listOf(root, beta), state.path)
+        assertEquals(listOf(10L), fileIds())
+        assertTrue(repository.calls.none { it.startsWith("moveFile") })
+    }
+
+    @Test
+    fun stopKeepsResultOfRequestInFlight() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.requestGroupDelete()
+        val gate = repository.hold("deleteFile:11")
+        viewModel.confirmGroupDelete()
+        assertTrue(state.batch!!.running)
+        assertEquals(1, state.batch!!.processed)
+
+        viewModel.stopBatch()
+        viewModel.dismissBatch()
+        assertNotNull(state.batch)
+        gate.complete(Unit)
+
+        assertEquals(listOf(BatchOutcome.SUCCESS, BatchOutcome.SUCCESS, BatchOutcome.NOT_PROCESSED), outcomes())
+        assertTrue(state.batch!!.stopRequested)
+        assertFalse(state.batch!!.running)
+        assertTrue(repository.calls.none { it == "deleteFile:12" })
+    }
+
+    @Test
+    fun refusedAccessStopsBatchAndThenAsksToLogIn() {
+        openAlphaWithFiles()
+        selectFiles(10, 11)
+        viewModel.requestGroupDelete()
+        repository.fail("deleteFile:10", LibraryResult.Unauthorized)
+        repository.calls.clear()
+        viewModel.confirmGroupDelete()
+
+        assertEquals(listOf(BatchOutcome.FAILED, BatchOutcome.NOT_PROCESSED), outcomes())
+        assertTrue(state.batch!!.sessionLost)
+        assertEquals(listOf("deleteFile:10"), repository.calls)
+
+        viewModel.dismissBatch()
+        assertEquals(LibraryStatus.NoSession, state.status)
+    }
+
+    @Test
+    fun sessionChangeDuringBatchStopsIt() {
+        openAlphaWithFiles()
+        selectFiles(10, 11, 12)
+        viewModel.requestGroupDelete()
+        val gate = repository.hold("deleteFile:10")
+        viewModel.confirmGroupDelete()
+
+        tokens.saveTokens(tokensOf("bob"))
+        repository.calls.clear()
+        gate.complete(Unit)
+
+        assertNull(state.batch)
+        assertEquals(LibraryStatus.Idle, state.status)
+        assertTrue(repository.calls.isEmpty())
+    }
+
+    @Test
+    fun cancelledDestinationReturnsSelection() {
+        openAlphaWithFiles()
+        selectFiles(10, 11)
+        viewModel.startGroupMove()
+        moveTo(beta)
+        repository.calls.clear()
+
+        viewModel.cancelRelocation()
+
+        assertTrue(repository.calls.isEmpty())
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(setOf(10L, 11L), state.selection!!.files.keys)
+        assertNull(state.batch)
     }
 
     // Room отвечает на своём потоке: итог отключения приходит асинхронно.
