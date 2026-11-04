@@ -34,7 +34,8 @@ class BackupSourceRepository @Inject constructor(
     private val dao: BackupSourceDao,
     private val remote: BackupSourceRemote,
     private val access: SourceAccessChecker,
-    private val accounts: BackupAccountProvider
+    private val accounts: BackupAccountProvider,
+    private val scheduler: FolderBackupScheduler
 ) {
 
     internal companion object {
@@ -47,6 +48,7 @@ class BackupSourceRepository @Inject constructor(
         const val ACCOUNT_CHANGED = "Аккаунт сменился во время подключения. Повторите"
         const val MISMATCHED_RESPONSE = "Ответ сервера не соответствует запросу. Повторите"
         const val UNKNOWN_SUFFIX = ". Результат неизвестен — повторите с тем же именем"
+        const val REMOTE_DISABLED = "Источник отключён на сервере: повторная регистрация не выполняется"
     }
 
     // Одна регистрация одновременно: двойное нажатие не отправит два запроса одного источника.
@@ -94,6 +96,7 @@ class BackupSourceRepository @Inject constructor(
     suspend fun retry(id: Long, serverName: String? = null): SourceActionResult {
         val source = dao.get(id) ?: return SourceActionResult.Done
         if (source.registrationState == RegistrationState.ACTIVE) return SourceActionResult.Done
+        if (source.registrationState == RegistrationState.REMOTE_DISABLED) return SourceActionResult.Failed(REMOTE_DISABLED)
         if (serverName != null && serverName != source.serverName) {
             if (source.registrationState != RegistrationState.REGISTRATION_FAILED) {
                 return SourceActionResult.Failed(NAME_LOCKED)
@@ -120,6 +123,7 @@ class BackupSourceRepository @Inject constructor(
     private suspend fun register(id: Long): SourceActionResult = mutex.withLock {
         val source = dao.get(id) ?: return SourceActionResult.Done
         if (source.registrationState == RegistrationState.ACTIVE) return SourceActionResult.Done
+        if (source.registrationState == RegistrationState.REMOTE_DISABLED) return SourceActionResult.Failed(REMOTE_DISABLED)
         val account = accounts.current() ?: return SourceActionResult.Failed(NO_ACCOUNT)
         if (account != source.account) return SourceActionResult.Failed(OTHER_ACCOUNT)
 
@@ -142,6 +146,9 @@ class BackupSourceRepository @Inject constructor(
                     return SourceActionResult.Failed(MISMATCHED_RESPONSE)
                 }
                 dao.markActive(id, folder.id)
+                // Подключённый источник сразу начинает резервирование, не дожидаясь periodic.
+                scheduler.enqueuePeriodic()
+                scheduler.enqueue()
                 SourceActionResult.Done
             }
             is RegistrationOutcome.Rejected -> {

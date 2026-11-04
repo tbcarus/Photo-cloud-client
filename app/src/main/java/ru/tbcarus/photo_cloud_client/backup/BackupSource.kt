@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.backup
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -23,7 +24,14 @@ data class BackupSource(
     val registrationState: RegistrationState,
     val registrationError: String?,    // последняя причина неуспеха регистрации
     val accessState: SourceAccess,
-    val createdAt: Long
+    val createdAt: Long,
+    // Номер текущего обхода дерева; 0 — обхода ещё не было.
+    @ColumnInfo(defaultValue = "0")
+    val scanGeneration: Int = 0,
+    // Папки, которые не удалось прочитать в текущем обходе: неполный обход не отмечает файлы исчезнувшими.
+    @ColumnInfo(defaultValue = "0")
+    val scanErrors: Int = 0,
+    val lastScanAt: Long? = null       // завершение последнего полного обхода по часам устройства
 )
 
 enum class RegistrationState {
@@ -34,7 +42,13 @@ enum class RegistrationState {
     REGISTRATION_FAILED,
 
     /** Server подтвердил источник, serverRootFolderId сохранён. */
-    ACTIVE
+    ACTIVE,
+
+    /**
+     * Server больше не считает папку активным источником (снят backupSource или папки нет): резервирование
+     * остановлено, повторной регистрации нет — включить заново можно только отдельным действием пользователя.
+     */
+    REMOTE_DISABLED
 }
 
 enum class SourceAccess {

@@ -55,11 +55,7 @@ class FailedHttp400MigrationTest {
             old.insertRow(6, "PENDING_UPLOAD", null, "eee", retryCount = 0)
             old.version = 3
         }
-        db = Room.databaseBuilder(context, AppDatabase::class.java, DB_NAME)
-            .addMigrations(AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5)
-            .fallbackToDestructiveMigration(dropAllTables = true)
-            .allowMainThreadQueries()
-            .build()
+        db = AppDatabase.build(context, DB_NAME)
     }
 
     @After
@@ -73,7 +69,7 @@ class FailedHttp400MigrationTest {
         val rows = db.mediaFileDao().getAll().first().associateBy { it.mediaStoreId }
 
         assertEquals(6, rows.size)
-        assertEquals(5, db.openHelper.readableDatabase.version)
+        assertEquals(6, db.openHelper.readableDatabase.version)
         val restored = rows.getValue(1)
         assertEquals(MediaFileStatus.CHECKSUM_READY, restored.status)
         assertNull(restored.failureReason)

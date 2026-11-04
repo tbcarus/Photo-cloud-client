@@ -26,6 +26,15 @@ class FakeAccounts(initial: BackupAccount?) :
     override fun observe(): Flow<BackupAccount?> = account
 }
 
+/** Планировщик без WorkManager: тесты регистрации проверяют только факт постановки. */
+class FakeScheduler(context: Context) : FolderBackupScheduler(context) {
+    var enqueued = 0
+    var periodic = 0
+    override fun enqueue() { enqueued++ }
+    override fun enqueuePeriodic() { periodic++ }
+    override fun cancelPeriodic() { periodic = 0 }
+}
+
 /** Разрешения SAF без провайдера: какие деревья удалось сохранить и что вернёт проверка доступа. */
 class FakeAccess(context: Context) : SourceAccessChecker(context) {
     var persistAllowed = true

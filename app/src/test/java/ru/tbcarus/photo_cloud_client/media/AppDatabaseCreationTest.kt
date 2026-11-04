@@ -39,7 +39,7 @@ class AppDatabaseCreationTest {
         db.mediaFileDao().insert(file)
 
         assertEquals(listOf(file), db.mediaFileDao().getAll().first())
-        assertEquals(5, db.openHelper.readableDatabase.version)
+        assertEquals(6, db.openHelper.readableDatabase.version)
         val columns = db.openHelper.readableDatabase.query("PRAGMA table_info(media_files)").use { c ->
             buildList { while (c.moveToNext()) add(c.getString(c.getColumnIndexOrThrow("name"))) }
         }

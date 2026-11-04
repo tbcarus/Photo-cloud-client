@@ -44,6 +44,7 @@ class BackupSourceRepositoryTest {
     private lateinit var accounts: FakeAccounts
     private lateinit var access: FakeAccess
     private lateinit var repository: BackupSourceRepository
+    private lateinit var scheduler: FakeScheduler
 
     @Before
     fun setUp() {
@@ -60,11 +61,13 @@ class BackupSourceRepositoryTest {
         dao = db.backupSourceDao()
         accounts = FakeAccounts(accountA)
         access = FakeAccess(context)
+        scheduler = FakeScheduler(context)
         repository = BackupSourceRepository(
             dao,
             BackupSourceRemote(ApiServiceFactory(baseUrlProvider, client, client, client)),
             access,
-            accounts
+            accounts,
+            scheduler
         )
     }
 
@@ -90,6 +93,22 @@ class BackupSourceRepositoryTest {
         assertEquals("Documents", request.getString("name"))
         assertEquals(source.sourceUuid, request.getString("sourceUuid"))
         assertNull(source.registrationError)
+        // Подключённый источник сразу ставит резервирование.
+        assertEquals(1, scheduler.enqueued)
+        assertEquals(1, scheduler.periodic)
+    }
+
+    @Test
+    fun remotelyDisabledSourceIsNeverRegisteredAgain() = runBlocking {
+        repository.connect(tree, "Documents", "Documents")
+        val source = single(accountA)
+        dao.markRemoteDisabled(source.id, "Источник отключён на сервере")
+
+        assertEquals(SourceActionResult.Failed(BackupSourceRepository.REMOTE_DISABLED), repository.retry(source.id))
+        assertEquals(SourceActionResult.Failed(BackupSourceRepository.REMOTE_DISABLED), repository.retry(source.id, "Другое"))
+
+        assertEquals(1, fakeServer.requests.size)
+        assertEquals(RegistrationState.REMOTE_DISABLED, single(accountA).registrationState)
     }
 
     @Test

@@ -23,4 +23,13 @@ object SyncConfig {
      * Запас до системного окна выполнения (~10 минут) — на уже начатую операцию с одним файлом.
      */
     const val WORKER_TIME_BUDGET_MS = 420_000L
+
+    /** Папок дерева, читаемых за один ход по источнику FolderBackupWorker; источники чередуются ходами. */
+    const val FOLDER_SCAN_PER_TURN = 20
+
+    /** Папок, создаваемых на Server за один ход по источнику. */
+    const val FOLDER_CREATE_PER_TURN = 20
+
+    /** Файлов, отправляемых за один ход по источнику: большой источник не задерживает следующие. */
+    const val FOLDER_FILES_PER_TURN = 10
 }

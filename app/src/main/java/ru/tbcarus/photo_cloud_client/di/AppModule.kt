@@ -9,6 +9,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceDao
+import ru.tbcarus.photo_cloud_client.backup.BackupTreeDao
 import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.media.MediaFileDao
 import ru.tbcarus.photo_cloud_client.media.SyncClock
@@ -31,6 +32,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideBackupSourceDao(db: AppDatabase): BackupSourceDao = db.backupSourceDao()
+
+    @Provides
+    @Singleton
+    fun provideBackupTreeDao(db: AppDatabase): BackupTreeDao = db.backupTreeDao()
 
     @Provides
     fun provideSyncClock(): SyncClock = SyncClock.SYSTEM

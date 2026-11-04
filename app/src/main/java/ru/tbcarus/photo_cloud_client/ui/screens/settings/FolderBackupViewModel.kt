@@ -20,6 +20,8 @@ import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupAccountProvider
 import ru.tbcarus.photo_cloud_client.backup.BackupSource
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
+import ru.tbcarus.photo_cloud_client.backup.BackupTreeDao
+import ru.tbcarus.photo_cloud_client.backup.SourceFileCounters
 import ru.tbcarus.photo_cloud_client.backup.SourceActionResult
 import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
 import javax.inject.Inject
@@ -31,6 +33,8 @@ data class FolderBackupUiState(
     /** null — нет входа или адреса Server: источники не показываются и не подключаются. */
     val account: BackupAccount? = null,
     val sources: List<BackupSource> = emptyList(),
+    /** Сводка файлов по ID источника; источника без файлов в ней нет. */
+    val counters: Map<Long, SourceFileCounters> = emptyMap(),
     val picked: PickedFolder? = null,
     val busy: Boolean = false,
     val message: String? = null
@@ -42,7 +46,8 @@ data class FolderBackupUiState(
 class FolderBackupViewModel @Inject constructor(
     private val repository: BackupSourceRepository,
     private val accounts: BackupAccountProvider,
-    private val documents: LocalDocuments
+    private val documents: LocalDocuments,
+    tree: BackupTreeDao
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FolderBackupUiState())
@@ -52,6 +57,9 @@ class FolderBackupViewModel @Inject constructor(
         // Адрес восстанавливается из сохранённых настроек: Settings может открыться раньше Network.
         viewModelScope.launch { accounts.current() }
         viewModelScope.launch {
+            tree.observeCounters().collect { list -> _uiState.update { it.copy(counters = list.associateBy { c -> c.sourceId }) } }
+        }
+        viewModelScope.launch {
             accounts.observe()
                 .flatMapLatest { account ->
                     if (account == null) flowOf(null to emptyList()) else repository.observe(account).map { account to it }
@@ -59,7 +67,8 @@ class FolderBackupViewModel @Inject constructor(
                 .collect { (account, sources) ->
                     val changed = account != _uiState.value.account
                     _uiState.update {
-                        if (changed) FolderBackupUiState(account = account, sources = sources) else it.copy(sources = sources)
+                        if (changed) FolderBackupUiState(account = account, sources = sources, counters = it.counters)
+                        else it.copy(sources = sources)
                     }
                     if (changed && account != null) repository.refreshAccess(account)
                 }

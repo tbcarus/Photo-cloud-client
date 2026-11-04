@@ -27,9 +27,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import ru.tbcarus.photo_cloud_client.backup.BackupSource
 import ru.tbcarus.photo_cloud_client.backup.RegistrationState
 import ru.tbcarus.photo_cloud_client.backup.SourceAccess
+import ru.tbcarus.photo_cloud_client.backup.SourceFileCounters
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 
-/** Подключение Android-папок как источников автоматической загрузки. Сами файлы на этом этапе не передаются. */
+/** Подключение Android-папок как источников автоматической загрузки и их состояние. */
 @Composable
 fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
     val state by viewModel.uiState.collectAsState()
@@ -41,8 +45,8 @@ fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
     Text("Автоматическая загрузка папок", style = MaterialTheme.typography.titleMedium)
     Spacer(Modifier.height(4.dp))
     Text(
-        "Подключённая папка получает свою папку на сервере в AutoUploads. Сейчас выполняется только подключение: " +
-            "файлы папки ещё не загружаются.",
+        "Подключённая папка получает свою папку на сервере в AutoUploads: новые файлы и папки загружаются автоматически. " +
+            "Файлы, изменённые после загрузки, пока не отправляются — сервер хранит их прежнюю версию.",
         style = MaterialTheme.typography.bodySmall
     )
     Spacer(Modifier.height(8.dp))
@@ -91,6 +95,7 @@ fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
         SourceCard(
             source = source,
             busy = state.busy,
+            counters = state.counters[source.id],
             onRetry = { name -> viewModel.retry(source.id, name) },
             onCancel = { viewModel.cancelFailed(source.id) }
         )
@@ -98,7 +103,13 @@ fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
 }
 
 @Composable
-private fun SourceCard(source: BackupSource, busy: Boolean, onRetry: (String?) -> Unit, onCancel: () -> Unit) {
+private fun SourceCard(
+    source: BackupSource,
+    busy: Boolean,
+    counters: SourceFileCounters?,
+    onRetry: (String?) -> Unit,
+    onCancel: () -> Unit
+) {
     // Черновик имени нужен только после окончательного отказа Server.
     var draft by rememberSaveable(source.id, source.serverName) { mutableStateOf(source.serverName) }
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -106,15 +117,17 @@ private fun SourceCard(source: BackupSource, busy: Boolean, onRetry: (String?) -
             Text(source.serverName, style = MaterialTheme.typography.titleSmall)
             Text("Папка на устройстве: ${source.localName}", style = MaterialTheme.typography.bodySmall)
             Text(serverFolderText(source), style = MaterialTheme.typography.bodySmall)
-            Text(registrationText(source.registrationState), style = MaterialTheme.typography.bodySmall)
-            accessText(source.accessState)?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(sourceStateText(source), style = MaterialTheme.typography.bodySmall)
+            if (source.registrationState == RegistrationState.ACTIVE || source.registrationState == RegistrationState.REMOTE_DISABLED) {
+                Text(lastScanText(source.lastScanAt), style = MaterialTheme.typography.bodySmall)
+                Text(countersText(counters), style = MaterialTheme.typography.bodySmall)
+                changedText(counters)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             }
             source.registrationError?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             when (source.registrationState) {
-                RegistrationState.ACTIVE -> Unit
+                RegistrationState.ACTIVE, RegistrationState.REMOTE_DISABLED -> Unit
                 RegistrationState.PENDING_REGISTRATION -> {
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = { onRetry(null) }, enabled = !busy) { Text("Повторить") }
@@ -145,14 +158,29 @@ internal fun serverFolderText(source: BackupSource): String = when (val id = sou
     else -> "На сервере: AutoUploads/${source.serverName} (ID $id)"
 }
 
-internal fun registrationText(state: RegistrationState): String = when (state) {
-    RegistrationState.ACTIVE -> "Подключена"
+/** Одно состояние источника: регистрация важнее доступа, доступ — только у активного. */
+internal fun sourceStateText(source: BackupSource): String = when (source.registrationState) {
     RegistrationState.PENDING_REGISTRATION -> "Ожидает подтверждения сервера"
     RegistrationState.REGISTRATION_FAILED -> "Не подключена: сервер отклонил имя"
+    RegistrationState.REMOTE_DISABLED -> "Отключён на сервере: файлы больше не отправляются"
+    RegistrationState.ACTIVE -> when (source.accessState) {
+        SourceAccess.AVAILABLE -> "Активен"
+        SourceAccess.UNAVAILABLE -> "Недоступен: папка на устройстве сейчас не отвечает"
+        SourceAccess.PERMISSION_LOST -> "Нет доступа к папке (PERMISSION_LOST)"
+    }
 }
 
-internal fun accessText(access: SourceAccess): String? = when (access) {
-    SourceAccess.AVAILABLE -> null
-    SourceAccess.UNAVAILABLE -> "Папка на устройстве сейчас недоступна"
-    SourceAccess.PERMISSION_LOST -> "Доступ к папке потерян (PERMISSION_LOST)"
+private val scanTimeFormat = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
+
+internal fun lastScanText(at: Long?): String =
+    if (at == null) "Сканирование ещё не завершалось"
+    else "Последнее сканирование: " + scanTimeFormat.format(Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()))
+
+internal fun countersText(counters: SourceFileCounters?): String {
+    val c = counters ?: SourceFileCounters(0, 0, 0, 0, 0, 0)
+    return "Загружено: ${c.synced} · Ожидают: ${c.pending} · Ошибок: ${c.failed} · Пропущено: ${c.skipped}"
 }
+
+/** Изменённые после отправки файлы не перезаписываются: прежнюю версию сохранит следующий этап. */
+internal fun changedText(counters: SourceFileCounters?): String? =
+    counters?.changed?.takeIf { it > 0 }?.let { "Изменены после загрузки и пока не отправлены: $it" }

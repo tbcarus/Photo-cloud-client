@@ -80,9 +80,10 @@ class FolderBackupViewModelTest {
             db.backupSourceDao(),
             BackupSourceRemote(ApiServiceFactory(baseUrlProvider, client, client, client)),
             access,
-            accounts
+            accounts,
+            ru.tbcarus.photo_cloud_client.backup.FakeScheduler(context)
         )
-        viewModel = FolderBackupViewModel(repository, accounts, documents)
+        viewModel = FolderBackupViewModel(repository, accounts, documents, db.backupTreeDao())
     }
 
     @After

@@ -39,8 +39,12 @@ data class DocumentRow(
     val name: String?,
     val mimeType: String?,
     val size: Long?,
-    val flags: Int
-)
+    val flags: Int,
+    val lastModified: Long? = null
+) {
+    val isDirectory: Boolean get() = mimeType == Document.MIME_TYPE_DIR
+    val isVirtual: Boolean get() = flags and Document.FLAG_VIRTUAL_DOCUMENT != 0
+}
 
 /** Документы, выбранные пользователем через Storage Access Framework. Прямые файловые пути не используются. */
 @Singleton
@@ -50,6 +54,14 @@ open class LocalDocuments @Inject constructor(
 
     private companion object {
         const val TAG = "LocalDocuments"
+        val ROW_PROJECTION = arrayOf(
+            Document.COLUMN_DOCUMENT_ID,
+            Document.COLUMN_DISPLAY_NAME,
+            Document.COLUMN_MIME_TYPE,
+            Document.COLUMN_SIZE,
+            Document.COLUMN_FLAGS,
+            Document.COLUMN_LAST_MODIFIED
+        )
     }
 
     private val resolver get() = context.contentResolver
@@ -110,36 +122,42 @@ open class LocalDocuments @Inject constructor(
         }
     }
 
-    private fun children(treeUri: Uri, parentId: String): List<DocumentRow>? {
-        val projection = arrayOf(
-            Document.COLUMN_DOCUMENT_ID,
-            Document.COLUMN_DISPLAY_NAME,
-            Document.COLUMN_MIME_TYPE,
-            Document.COLUMN_SIZE,
-            Document.COLUMN_FLAGS
-        )
-        return try {
-            resolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId), projection, null, null, null)
-                ?.use { cursor ->
-                    buildList {
-                        while (cursor.moveToNext()) {
-                            val id = cursor.stringOrNull(Document.COLUMN_DOCUMENT_ID) ?: continue
-                            add(
-                                DocumentRow(
-                                    id = id,
-                                    name = cursor.stringOrNull(Document.COLUMN_DISPLAY_NAME),
-                                    mimeType = cursor.stringOrNull(Document.COLUMN_MIME_TYPE),
-                                    size = cursor.longOrNull(Document.COLUMN_SIZE),
-                                    flags = cursor.longOrNull(Document.COLUMN_FLAGS)?.toInt() ?: 0
-                                )
-                            )
-                        }
+    /** Прямые потомки одной папки дерева; null — папку прочитать нельзя. В памяти — только этот каталог. */
+    open fun children(treeUri: Uri, parentId: String): List<DocumentRow>? = try {
+        resolver.query(DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId), ROW_PROJECTION, null, null, null)
+            ?.use { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) {
+                        add(cursor.toRow() ?: continue)
                     }
                 }
-        } catch (e: Exception) {
-            Log.w(TAG, "Не удалось прочитать папку: ${e.message}")
-            null
-        }
+            }
+    } catch (e: Exception) {
+        Log.w(TAG, "Не удалось прочитать папку: ${e.message}")
+        null
+    }
+
+    /** Текущие сведения одного документа дерева; null — документа нет или он не читается. */
+    open fun stat(treeUri: Uri, documentId: String): DocumentRow? = try {
+        resolver.query(DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId), ROW_PROJECTION, null, null, null)
+            ?.use { if (it.moveToFirst()) it.toRow() else null }
+    } catch (e: Exception) {
+        null
+    }
+
+    open fun documentUri(treeUri: Uri, documentId: String): Uri =
+        DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+
+    private fun Cursor.toRow(): DocumentRow? {
+        val id = stringOrNull(Document.COLUMN_DOCUMENT_ID) ?: return null
+        return DocumentRow(
+            id = id,
+            name = stringOrNull(Document.COLUMN_DISPLAY_NAME),
+            mimeType = stringOrNull(Document.COLUMN_MIME_TYPE),
+            size = longOrNull(Document.COLUMN_SIZE),
+            flags = longOrNull(Document.COLUMN_FLAGS)?.toInt() ?: 0,
+            lastModified = longOrNull(Document.COLUMN_LAST_MODIFIED)
+        )
     }
 
     private fun Cursor.stringOrNull(column: String): String? {

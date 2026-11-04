@@ -41,6 +41,15 @@ public interface FileService {
             @Part("folderId") RequestBody folderId
     );
 
+    /** Upload механизма резервирования в дерево активного источника: backupSource — UUID этого источника. */
+    @Multipart
+    @POST(ApiPaths.FILES_UPLOAD)
+    Call<FileItemDto> uploadBackupFile(
+            @Part MultipartBody.Part file,
+            @Part("folderId") RequestBody folderId,
+            @Part("backupSource") RequestBody backupSource
+    );
+
     /** Байты файла потоком: без @Streaming Retrofit прочитал бы весь ответ в память. */
     @Streaming
     @GET(ApiPaths.FILES_DOWNLOAD)

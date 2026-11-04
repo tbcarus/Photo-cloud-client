@@ -37,19 +37,43 @@ interface BackupSourceDao {
     @Query("""
         UPDATE backup_sources
         SET registrationState = 'ACTIVE', serverRootFolderId = :serverRootFolderId, registrationError = NULL
-        WHERE id = :id AND registrationState != 'ACTIVE'
+        WHERE id = :id AND registrationState IN ('PENDING_REGISTRATION', 'REGISTRATION_FAILED')
     """)
     suspend fun markActive(id: Long, serverRootFolderId: Long): Int
 
-    /** Подтверждённый источник не возвращается в ожидание: повторной регистрации у него нет. */
+    /** Подтверждённый или отключённый на Server источник не возвращается в ожидание: повторной регистрации у него нет. */
     @Query("""
         UPDATE backup_sources SET registrationState = :state, registrationError = :error
-        WHERE id = :id AND registrationState != 'ACTIVE'
+        WHERE id = :id AND registrationState IN ('PENDING_REGISTRATION', 'REGISTRATION_FAILED')
     """)
     suspend fun markNotRegistered(id: Long, state: RegistrationState, error: String?): Int
 
     @Query("UPDATE backup_sources SET accessState = :accessState WHERE id = :id")
     suspend fun updateAccess(id: Long, accessState: SourceAccess)
+
+    /** Активные источники аккаунта в порядке подключения: их обрабатывает FolderBackupWorker. */
+    @Query("""
+        SELECT * FROM backup_sources
+        WHERE serverUrl = :serverUrl AND accountId = :accountId AND registrationState = 'ACTIVE'
+        ORDER BY createdAt, id
+    """)
+    suspend fun listActive(serverUrl: String, accountId: String): List<BackupSource>
+
+    /** Удалённое отключение фиксируется один раз; запись и связи сохраняются. */
+    @Query("""
+        UPDATE backup_sources SET registrationState = 'REMOTE_DISABLED', registrationError = :reason
+        WHERE id = :id AND registrationState = 'ACTIVE'
+    """)
+    suspend fun markRemoteDisabled(id: Long, reason: String): Int
+
+    @Query("UPDATE backup_sources SET scanGeneration = :generation, scanErrors = 0 WHERE id = :id")
+    suspend fun startScan(id: Long, generation: Int)
+
+    @Query("UPDATE backup_sources SET scanErrors = scanErrors + 1 WHERE id = :id")
+    suspend fun countScanError(id: Long)
+
+    @Query("UPDATE backup_sources SET lastScanAt = :at WHERE id = :id")
+    suspend fun finishScan(id: Long, at: Long)
 
     /** Удаляет только запись, которую Server окончательно отклонил: на Server такого источника нет. */
     @Query("DELETE FROM backup_sources WHERE id = :id AND registrationState = 'REGISTRATION_FAILED'")
