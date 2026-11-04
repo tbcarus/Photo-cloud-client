@@ -15,8 +15,23 @@ private val shortExtension = Regex("[\\p{L}\\p{N}]{1,8}")
 fun libraryPathLabel(path: List<FolderDto>): String =
     path.mapIndexed { index, folder -> if (index == 0) "Корень" else folder.name }.joinToString(" / ")
 
-/** Пояснение к системному контейнеру и активному источнику; у обычных папок его нет. */
+/** Вид значка папки в списке. */
+enum class FolderKind { CAMERA, AUTO_UPLOADS, ACTIVE_SOURCE, FOLDER }
+
+/**
+ * Отличается только корень активного источника: вложенные папки и отключённый источник backupSource не имеют
+ * и выглядят как обычные.
+ */
+fun folderKind(folder: FolderDto): FolderKind = when {
+    folder.isCamera -> FolderKind.CAMERA
+    folder.isAutoUploads -> FolderKind.AUTO_UPLOADS
+    folder.isActiveBackupSource -> FolderKind.ACTIVE_SOURCE
+    else -> FolderKind.FOLDER
+}
+
+/** Пояснение к системным папкам и активному источнику; у обычных папок его нет. */
 fun folderSubtitle(folder: FolderDto): String? = when {
+    folder.isCamera -> "Резервные копии фото"
     folder.isAutoUploads -> "Автоматическая загрузка папок"
     folder.isActiveBackupSource -> "Источник автоматической загрузки"
     else -> null

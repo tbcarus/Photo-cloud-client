@@ -14,5 +14,6 @@ data class FolderDto(
     val isCamera: Boolean get() = folderType == "CAMERA"
     val isRoot: Boolean get() = folderType == "ROOT"
     val isAutoUploads: Boolean get() = folderType == "AUTO_UPLOADS"
+    val isUser: Boolean get() = folderType == "USER"
     val isActiveBackupSource: Boolean get() = backupSource != null
 }

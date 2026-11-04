@@ -667,6 +667,345 @@ class LibraryViewModelTest {
         assertEquals(RegistrationState.REMOTE_DISABLED, db.backupSourceDao().get(id)!!.registrationState)
     }
 
+    @Test
+    fun createdFolderAppearsAfterServerConfirmation() {
+        repository.setChildren(root, alpha)
+        repository.setChildren(alpha, nested)
+        opened().openFolder(alpha)
+
+        viewModel.startCreateFolder()
+        assertEquals(NameTarget.NewFolder, state.edit?.target)
+        assertEquals("", state.edit?.name)
+        viewModel.onEditNameChange("Архив")
+        // До ответа Server папка в списке не появляется.
+        val created = FolderDto(30, alpha.id, "Архив", "USER")
+        repository.setChildren(alpha, created, nested)
+        val gate = repository.hold("create:${alpha.id}:Архив")
+        repository.calls.clear()
+        viewModel.submitEdit()
+        assertTrue(state.edit!!.saving)
+        assertEquals(listOf(nested), state.folders)
+
+        gate.complete(Unit)
+
+        assertNull(state.edit)
+        assertEquals(listOf("create:${alpha.id}:Архив", "children:${alpha.id}", "files:${alpha.id}:0"), repository.calls)
+        assertEquals(listOf(root, alpha), state.path)
+        assertEquals(listOf(created, nested), state.folders)
+    }
+
+    @Test
+    fun nameConflictKeepsDialogAndTypedName() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.fail("create:${root.id}:Alpha", LibraryResult.NameTaken)
+
+        viewModel.startCreateFolder()
+        viewModel.onEditNameChange("Alpha")
+        repository.calls.clear()
+        viewModel.submitEdit()
+
+        val edit = state.edit!!
+        assertEquals("Alpha", edit.name)
+        assertFalse(edit.saving)
+        assertEquals("Имя уже занято файлом или папкой", edit.error)
+        // Список не перечитывается, автоматического переименования нет.
+        assertEquals(listOf("create:${root.id}:Alpha"), repository.calls)
+        assertEquals(listOf(alpha), state.folders)
+
+        // Исправленное имя отправляется без повторного открытия диалога.
+        viewModel.onEditNameChange("Alpha 2")
+        assertNull(state.edit!!.error)
+        viewModel.submitEdit()
+        assertNull(state.edit)
+        assertEquals("create:${root.id}:Alpha 2", repository.calls[1])
+    }
+
+    @Test
+    fun renameFileReloadsFirstPageInServerOrder() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(alpha, 0, page(listOf(file(10), file(11)), hasNext = true))
+        repository.setFiles(alpha, 1, page(listOf(file(12))))
+        opened().openFolder(alpha)
+        viewModel.loadNextPage()
+        assertEquals(listOf(10L, 11L, 12L), fileIds())
+
+        val target = state.files.first { it.id == 12L }
+        viewModel.startRename(target)
+        assertEquals("file12.txt", state.edit?.name)
+        viewModel.onEditNameChange("a.TXT")
+        // Server сортирует по имени: переименованный файл переходит в начало первой страницы.
+        repository.setFiles(alpha, 0, page(listOf(file(12).copy(originalFilename = "a.TXT"), file(10)), hasNext = true))
+        repository.setFiles(alpha, 1, page(listOf(file(11))))
+        repository.calls.clear()
+
+        viewModel.submitEdit()
+
+        assertNull(state.edit)
+        // Без загрузки всех страниц: только первая, дальше — обычная пагинация.
+        assertEquals(listOf("renameFile:12:a.TXT", "children:${alpha.id}", "files:${alpha.id}:0"), repository.calls)
+        assertEquals(listOf(12L, 10L), fileIds())
+        assertEquals("a.TXT", state.files.first().originalFilename)
+        assertTrue(state.hasNext)
+        assertEquals(listOf(root, alpha), state.path)
+
+        viewModel.loadNextPage()
+        assertEquals(listOf(12L, 10L, 11L), fileIds())
+    }
+
+    @Test
+    fun renameFolderKeepsItsIdAndNavigation() {
+        repository.setChildren(root, alpha)
+        repository.setChildren(alpha, nested)
+        opened().openFolder(alpha)
+
+        viewModel.startRename(nested)
+        assertEquals("Nested", state.edit?.name)
+        viewModel.onEditNameChange("Вложенная")
+        val renamed = nested.copy(name = "Вложенная")
+        repository.setChildren(alpha, renamed)
+        viewModel.submitEdit()
+
+        assertNull(state.edit)
+        assertTrue(repository.calls.contains("renameFolder:${nested.id}:Вложенная"))
+        assertEquals(listOf(renamed), state.folders)
+        assertEquals(listOf(root, alpha), state.path)
+
+        viewModel.openFolder(renamed)
+        assertEquals(listOf(root, alpha, renamed), state.path)
+    }
+
+    @Test
+    fun unchangedNameClosesDialogWithoutRequest() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.calls.clear()
+
+        viewModel.startRename(alpha)
+        viewModel.submitEdit()
+
+        assertNull(state.edit)
+        assertTrue(repository.calls.isEmpty())
+    }
+
+    @Test
+    fun invalidNameIsRejectedBeforeRequest() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.calls.clear()
+
+        viewModel.startCreateFolder()
+        viewModel.submitEdit()
+        assertEquals("Пустое имя", state.edit?.error)
+
+        viewModel.onEditNameChange("a/b")
+        viewModel.submitEdit()
+        assertTrue(state.edit!!.error!!.startsWith("Имя содержит"))
+
+        viewModel.onEditNameChange("camera")
+        viewModel.submitEdit()
+        assertEquals("Имя Camera в корне зарезервировано", state.edit?.error)
+        assertEquals("camera", state.edit?.name)
+
+        assertTrue(repository.calls.isEmpty())
+    }
+
+    @Test
+    fun networkErrorDoesNotChangeListAndRetryUsesSameName() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.fail("renameFolder:${alpha.id}:Альфа", LibraryResult.NetworkError("timeout"))
+        val before = state.folders
+        val version = state.contentVersion
+
+        viewModel.startRename(alpha)
+        viewModel.onEditNameChange("Альфа")
+        repository.calls.clear()
+        viewModel.submitEdit()
+
+        assertEquals("Нет связи с сервером: timeout", state.edit?.error)
+        assertEquals("Альфа", state.edit?.name)
+        assertEquals(before, state.folders)
+        assertEquals(version, state.contentVersion)
+        assertEquals(listOf("renameFolder:${alpha.id}:Альфа"), repository.calls)
+
+        repository.succeed("renameFolder:${alpha.id}:Альфа")
+        repository.setChildren(root, alpha.copy(name = "Альфа"))
+        viewModel.submitEdit()
+
+        assertNull(state.edit)
+        assertEquals(listOf(alpha.copy(name = "Альфа")), state.folders)
+    }
+
+    @Test
+    fun repeatedConfirmationWhileSavingSendsOneRequest() {
+        opened()
+        viewModel.startCreateFolder()
+        viewModel.onEditNameChange("Новая")
+        val gate = repository.hold("create:${root.id}:Новая")
+        repository.calls.clear()
+
+        viewModel.submitEdit()
+        viewModel.submitEdit()
+        // Во время запроса имя не меняется и диалог не закрывается.
+        viewModel.onEditNameChange("Другая")
+        viewModel.dismissEdit()
+        assertEquals("Новая", state.edit?.name)
+        repository.setChildren(root, FolderDto(30, root.id, "Новая", "USER"))
+        gate.complete(Unit)
+
+        assertEquals(1, repository.calls.count { it.startsWith("create:") })
+        assertNull(state.edit)
+        assertEquals(listOf(30L), state.folders.map { it.id })
+    }
+
+    @Test
+    fun managedAndRejectedRefusalsAreExplained() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.fail("renameFolder:${alpha.id}:X", LibraryResult.Managed)
+        viewModel.startRename(alpha)
+        viewModel.onEditNameChange("X")
+        viewModel.submitEdit()
+        assertEquals("Папку изменяет только автоматическое резервирование", state.edit?.error)
+
+        repository.fail("renameFolder:${alpha.id}:Y", LibraryResult.Rejected("Cannot rename system folder"))
+        viewModel.onEditNameChange("Y")
+        viewModel.submitEdit()
+        assertEquals("Сервер отклонил операцию: Cannot rename system folder", state.edit?.error)
+
+        repository.fail("renameFolder:${alpha.id}:Z", LibraryResult.ServerError("boom"))
+        viewModel.onEditNameChange("Z")
+        viewModel.submitEdit()
+        assertEquals("Ошибка сервера: boom", state.edit?.error)
+        assertEquals(listOf(alpha), state.folders)
+    }
+
+    @Test
+    fun missingObjectClosesDialogAndReloadsFolderWithNotice() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        repository.fail("renameFile:10:new.txt", LibraryResult.NotFound)
+        viewModel.startRename(state.files.single())
+        viewModel.onEditNameChange("new.txt")
+        repository.setFiles(root, 0, page(emptyList()))
+        repository.calls.clear()
+
+        viewModel.submitEdit()
+
+        assertNull(state.edit)
+        assertEquals("Файл «file10.txt» не найден: возможно, он удалён или перемещён", state.notice)
+        assertEquals(listOf("renameFile:10:new.txt", "children:1", "files:1:0"), repository.calls)
+        assertTrue(state.files.isEmpty())
+        assertEquals(listOf(root), state.path)
+    }
+
+    @Test
+    fun rejectedSessionDuringChangeAsksToLogIn() {
+        repository.setChildren(root, alpha)
+        opened()
+        repository.fail("renameFolder:${alpha.id}:X", LibraryResult.Unauthorized)
+        viewModel.startRename(alpha)
+        viewModel.onEditNameChange("X")
+
+        viewModel.submitEdit()
+
+        assertEquals(LibraryStatus.NoSession, state.status)
+        assertNull(state.edit)
+    }
+
+    @Test
+    fun changesAreNotOfferedInsideActiveSourceOrForSystemFolders() {
+        val (autoUploads, source, nestedSource) = openSourceRoot()
+        repository.setFiles(nestedSource, 0, page(listOf(file(40))))
+        viewModel.navigateUp()
+        assertEquals(listOf(root, autoUploads), state.path)
+        viewModel.startRename(source)
+        viewModel.startCreateFolder()
+        assertNull(state.edit)
+
+        viewModel.openFolder(source)
+        viewModel.startRename(nestedSource)
+        viewModel.startCreateFolder()
+        assertNull(state.edit)
+
+        viewModel.openFolder(nestedSource)
+        viewModel.startRename(state.files.single())
+        viewModel.startCreateFolder()
+        viewModel.submitEdit()
+        assertNull(state.edit)
+
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        viewModel.navigateUp()
+        assertEquals(listOf(root), state.path)
+        viewModel.startRename(camera)
+        assertNull(state.edit)
+        viewModel.startRename(autoUploads)
+        assertNull(state.edit)
+
+        assertTrue(repository.calls.none { it.startsWith("create") || it.startsWith("rename") })
+    }
+
+    @Test
+    fun disabledSourceAllowsOrdinaryChanges() {
+        val autoUploads = FolderDto(20, 1, "AutoUploads", "AUTO_UPLOADS")
+        val disabled = FolderDto(21, 20, "Documents", "USER")
+        repository.setChildren(root, autoUploads)
+        repository.setChildren(autoUploads, disabled)
+        repository.setFiles(disabled, 0, page(listOf(file(40))))
+        opened().openFolder(autoUploads)
+
+        viewModel.startRename(disabled)
+        viewModel.onEditNameChange("Документы")
+        viewModel.submitEdit()
+        assertTrue(repository.calls.contains("renameFolder:${disabled.id}:Документы"))
+
+        viewModel.openFolder(disabled)
+        viewModel.startCreateFolder()
+        viewModel.onEditNameChange("Новая")
+        viewModel.submitEdit()
+        viewModel.startRename(state.files.single())
+        viewModel.onEditNameChange("file40.md")
+        viewModel.submitEdit()
+
+        assertTrue(repository.calls.contains("create:${disabled.id}:Новая"))
+        assertTrue(repository.calls.contains("renameFile:40:file40.md"))
+        assertNull(state.edit)
+    }
+
+    @Test
+    fun folderRefreshDuringOpenDialogKeepsTypedName() {
+        repository.setChildren(root, alpha)
+        opened()
+        viewModel.startCreateFolder()
+        viewModel.onEditNameChange("Черновик")
+
+        viewModel.refresh()
+
+        assertEquals("Черновик", state.edit?.name)
+        assertEquals(LibraryStatus.Content, state.status)
+    }
+
+    @Test
+    fun sessionChangeDuringChangeDropsLateResult() {
+        repository.setChildren(root, alpha)
+        opened()
+        viewModel.startCreateFolder()
+        viewModel.onEditNameChange("Новая")
+        val gate = repository.hold("create:${root.id}:Новая")
+        viewModel.submitEdit()
+
+        tokens.saveTokens(tokensOf("bob"))
+        repository.calls.clear()
+        gate.complete(Unit)
+
+        assertNull(state.edit)
+        assertEquals(LibraryStatus.Idle, state.status)
+        assertTrue(repository.calls.isEmpty())
+    }
+
     // Room отвечает на своём потоке: итог отключения приходит асинхронно.
     private fun awaitState(condition: (LibraryUiState) -> Boolean) {
         val deadline = System.currentTimeMillis() + 5_000
@@ -747,6 +1086,16 @@ class LibraryViewModelTest {
             val key = "files:${folder.id}:$page"
             return answer(key, files[key] ?: FilePageDto(items = emptyList()))
         }
+
+        // Изменения отвечают описанием объекта; новое содержимое папки задаёт тест через setChildren/setFiles.
+        override suspend fun createFolder(parentId: Long, name: String): LibraryResult<FolderDto> =
+            answer("create:$parentId:$name", FolderDto(1000, parentId, name, "USER"))
+
+        override suspend fun renameFolder(folderId: Long, name: String): LibraryResult<FolderDto> =
+            answer("renameFolder:$folderId:$name", FolderDto(folderId, null, name, "USER"))
+
+        override suspend fun renameFile(fileId: Long, name: String): LibraryResult<FileItemDto> =
+            answer("renameFile:$fileId:$name", FileItemDto(id = fileId, originalFilename = name))
 
         private suspend fun <T> answer(key: String, value: T): LibraryResult<T> {
             calls += key

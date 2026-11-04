@@ -23,6 +23,8 @@ import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.LibrarySession
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.transfer.isReservedRootName
+import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
 import ru.tbcarus.photo_cloud_client.transfer.TransferKind
 import ru.tbcarus.photo_cloud_client.transfer.TransferManager
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
@@ -58,6 +60,8 @@ class LibraryViewModel @Inject constructor(
 
     // Итог передачи, по которому папка уже обновлена.
     private var handledTransfer = -1L
+
+    private var editSerial = 0
 
     var scrollIndex = 0
         private set
@@ -182,6 +186,99 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    /** «Создать папку» в открытой папке: только там, где Server принимает обычное создание. */
+    fun startCreateFolder() {
+        val state = _uiState.value
+        val folder = state.currentFolder ?: return
+        if (state.canCreateFolder && state.edit == null) openEdit(NameTarget.NewFolder, folder, name = "")
+    }
+
+    fun startRename(folder: FolderDto) {
+        val state = _uiState.value
+        val parent = state.currentFolder ?: return
+        if (state.canRename(folder) && state.edit == null) openEdit(NameTarget.Folder(folder), parent, folder.name)
+    }
+
+    fun startRename(file: FileItemDto) {
+        val state = _uiState.value
+        val parent = state.currentFolder ?: return
+        if (state.canRename(file) && state.edit == null) {
+            openEdit(NameTarget.File(file), parent, file.originalFilename.orEmpty())
+        }
+    }
+
+    fun onEditNameChange(name: String) = updateEdit { if (it.saving) it else it.copy(name = name, error = null) }
+
+    /** Пока запрос выполняется, диалог не закрывается: его итог должен дойти до списка. */
+    fun dismissEdit() {
+        _uiState.update { if (it.edit?.saving == true) it else it.copy(edit = null) }
+    }
+
+    /**
+     * Имя отправляется как введено: Server не исправляет его, совпадение не разрешается автоматически.
+     * Объект появляется в списке только после ответа Server, перечитыванием открытой папки.
+     */
+    fun submitEdit() {
+        val edit = _uiState.value.edit ?: return
+        if (edit.saving) return
+        if (edit.name == edit.currentName) {
+            dismissEdit()
+            return
+        }
+        val problem = libraryNameProblem(edit.name)
+            ?: "Имя Camera в корне зарезервировано".takeIf { edit.parent.isRoot && isReservedRootName(edit.name) }
+        if (problem != null) {
+            updateEdit { it.copy(error = problem) }
+            return
+        }
+        val target = edit.target
+        val fileId = (target as? NameTarget.File)?.file?.id
+        if (target is NameTarget.File && fileId == null) return
+        updateEdit { it.copy(saving = true, error = null) }
+        viewModelScope.launch {
+            val result = when (target) {
+                NameTarget.NewFolder -> repository.createFolder(edit.parent.id, edit.name)
+                is NameTarget.Folder -> repository.renameFolder(target.folder.id, edit.name)
+                is NameTarget.File -> repository.renameFile(fileId!!, edit.name)
+            }
+            // Сменилась сессия: состояние уже сброшено, диалога нет.
+            if (_uiState.value.edit?.id != edit.id) return@launch
+            when (result) {
+                is LibraryResult.Success -> {
+                    _uiState.update { it.copy(edit = null) }
+                    reloadParent(edit.parent, notice = null)
+                }
+                LibraryResult.Unauthorized -> applyFailure(LibraryResult.Unauthorized, _uiState.value.path)
+                // Объекта или папки уже нет: список устарел, перечитывается.
+                LibraryResult.NotFound -> {
+                    _uiState.update { it.copy(edit = null) }
+                    reloadParent(edit.parent, notFoundText(target))
+                }
+                is LibraryResult.Failure -> updateEdit { it.copy(saving = false, error = failureText(result)) }
+            }
+        }
+    }
+
+    private fun openEdit(target: NameTarget, parent: FolderDto, name: String) {
+        _uiState.update { it.copy(edit = NameEdit(++editSerial, target, parent, name)) }
+    }
+
+    private fun updateEdit(change: (NameEdit) -> NameEdit) {
+        _uiState.update { state -> state.edit?.let { state.copy(edit = change(it)) } ?: state }
+    }
+
+    // Только первая страница с начала: новое место объекта задаёт сортировка Server.
+    private fun reloadParent(parent: FolderDto, notice: String?) {
+        val state = _uiState.value
+        if (state.currentFolder?.id == parent.id) loadFolder(state.path, notice)
+    }
+
+    private fun notFoundText(target: NameTarget): String = when (target) {
+        NameTarget.NewFolder -> "Папка не найдена"
+        is NameTarget.Folder -> "Папка «${target.folder.name}» не найдена: возможно, она удалена или перемещена"
+        is NameTarget.File -> "Файл «${target.file.originalFilename.orEmpty()}» не найден: возможно, он удалён или перемещён"
+    }
+
     fun download(file: FileItemDto) {
         transfers.download(file)
     }
@@ -226,8 +323,8 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    private fun loadFolder(path: List<FolderDto>) {
-        val current = beginLoad(path, notice = null)
+    private fun loadFolder(path: List<FolderDto>, notice: String? = null) {
+        val current = beginLoad(path, notice)
         loadJob = viewModelScope.launch { loadContent(current, path) }
     }
 
@@ -267,7 +364,9 @@ class LibraryViewModel @Inject constructor(
                 status = LibraryStatus.Loading,
                 path = path,
                 notice = notice,
-                contentVersion = it.contentVersion + 1
+                contentVersion = it.contentVersion + 1,
+                // Обновление той же папки (например, после ручной загрузки) не закрывает открытый диалог.
+                edit = it.edit?.takeIf { edit -> edit.parent.id == path.lastOrNull()?.id }
             )
         }
         return generation
@@ -302,6 +401,9 @@ class LibraryViewModel @Inject constructor(
         is LibraryResult.ServerError -> "Ошибка сервера: ${failure.message}"
         LibraryResult.NotFound -> "Папка не найдена"
         LibraryResult.Unauthorized -> "Требуется вход"
+        LibraryResult.NameTaken -> "Имя уже занято файлом или папкой"
+        LibraryResult.Managed -> "Папку изменяет только автоматическое резервирование"
+        is LibraryResult.Rejected -> "Сервер отклонил операцию: ${failure.message}"
     }
 
     // Offset-пагинация при изменении каталога может вернуть файл повторно, а ключ строки уникален.

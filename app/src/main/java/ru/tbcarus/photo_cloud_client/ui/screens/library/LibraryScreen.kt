@@ -20,22 +20,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AudioFile
-import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -45,7 +48,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -58,10 +64,16 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
@@ -133,8 +145,17 @@ fun LibraryScreen(
             transferActive = transfer.isActive,
             onRefresh = viewModel::refresh,
             onUp = viewModel::navigateUp,
-            onUpload = ::startUpload
+            onUpload = ::startUpload,
+            onCreateFolder = viewModel::startCreateFolder
         )
+        state.edit?.let { edit ->
+            NameDialog(
+                edit = edit,
+                onNameChange = viewModel::onEditNameChange,
+                onSubmit = viewModel::submitEdit,
+                onDismiss = viewModel::dismissEdit
+            )
+        }
         if (state.isSourceRoot) SourceRootPanel(state, onDisable = viewModel::disableSource)
         state.notice?.let { notice ->
             Text(
@@ -186,7 +207,8 @@ private fun LibraryHeader(
     transferActive: Boolean,
     onRefresh: () -> Unit,
     onUp: () -> Unit,
-    onUpload: (folder: Boolean) -> Unit
+    onUpload: (folder: Boolean) -> Unit,
+    onCreateFolder: () -> Unit
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
@@ -194,7 +216,7 @@ private fun LibraryHeader(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.weight(1f)
         )
-        if (state.canUpload) UploadMenu(enabled = !transferActive, onUpload = onUpload)
+        if (state.canCreateFolder) AddMenu(uploadEnabled = state.canUpload && !transferActive, onUpload, onCreateFolder)
         val canRefresh = state.status != LibraryStatus.NoServer && state.status != LibraryStatus.NoSession
         IconButton(onClick = onRefresh, enabled = canRefresh) {
             Icon(Icons.Default.Refresh, contentDescription = "Обновить")
@@ -241,19 +263,24 @@ private fun SourceRootPanel(state: LibraryUiState, onDisable: () -> Unit) {
     }
 }
 
+/** Меню «+»: создание папки и ручная загрузка. Загрузка недоступна, пока идёт другая передача. */
 @Composable
-private fun UploadMenu(enabled: Boolean, onUpload: (folder: Boolean) -> Unit) {
+private fun AddMenu(uploadEnabled: Boolean, onUpload: (folder: Boolean) -> Unit, onCreateFolder: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { expanded = true }, enabled = enabled) {
-            Icon(Icons.Default.Upload, contentDescription = "Загрузить")
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.Add, contentDescription = "Добавить")
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(text = { Text("Загрузить файлы") }, onClick = {
+            DropdownMenuItem(text = { Text("Создать папку") }, onClick = {
+                expanded = false
+                onCreateFolder()
+            })
+            DropdownMenuItem(text = { Text("Загрузить файлы") }, enabled = uploadEnabled, onClick = {
                 expanded = false
                 onUpload(false)
             })
-            DropdownMenuItem(text = { Text("Загрузить папку") }, onClick = {
+            DropdownMenuItem(text = { Text("Загрузить папку") }, enabled = uploadEnabled, onClick = {
                 expanded = false
                 onUpload(true)
             })
@@ -283,11 +310,23 @@ private fun LibraryList(
     val inCamera = state.currentFolder?.isCamera == true
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
         items(state.folders, key = { "folder-${it.id}" }) { folder ->
-            FolderRow(folder, onClick = { viewModel.openFolder(folder) })
+            FolderRow(
+                folder = folder,
+                canRename = state.canRename(folder),
+                onClick = { viewModel.openFolder(folder) },
+                onRename = { viewModel.startRename(folder) }
+            )
             HorizontalDivider()
         }
         items(state.files, key = { "file-${it.id}" }) { file ->
-            FileRow(file, inCamera, downloadEnabled, onDownload = { viewModel.download(file) })
+            FileRow(
+                file = file,
+                inCamera = inCamera,
+                downloadEnabled = downloadEnabled,
+                canRename = state.canRename(file),
+                onDownload = { viewModel.download(file) },
+                onRename = { viewModel.startRename(file) }
+            )
             HorizontalDivider()
         }
         if (state.isLoadingMore) {
@@ -320,26 +359,21 @@ private fun LibraryList(
 }
 
 @Composable
-private fun FolderRow(folder: FolderDto, onClick: () -> Unit) {
+private fun FolderRow(folder: FolderDto, canRename: Boolean, onClick: () -> Unit, onRename: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp)
+            .padding(vertical = 4.dp)
     ) {
-        Icon(
-            imageVector = when {
-                folder.isCamera -> Icons.Default.PhotoCamera
-                folder.isAutoUploads -> Icons.Default.Backup
-                folder.isActiveBackupSource -> Icons.Default.CloudSync
-                else -> Icons.Default.Folder
-            },
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary
-        )
+        FolderIcon(folderKind(folder))
         Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 8.dp)
+        ) {
             Text(
                 text = folder.name,
                 style = MaterialTheme.typography.bodyLarge,
@@ -350,22 +384,26 @@ private fun FolderRow(folder: FolderDto, onClick: () -> Unit) {
                 Text(text = it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Icon(
-            imageVector = Icons.Default.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
+        ActionsMenu(if (canRename) listOf(RowAction("Переименовать", onRename)) else emptyList())
     }
 }
 
-// Нажатие на строку оставлено для будущего просмотра; скачивание — отдельной кнопкой.
+// Нажатие на строку оставлено для будущего просмотра; действия — в меню строки.
 @Composable
-private fun FileRow(file: FileItemDto, inCamera: Boolean, downloadEnabled: Boolean, onDownload: () -> Unit) {
+private fun FileRow(
+    file: FileItemDto,
+    inCamera: Boolean,
+    downloadEnabled: Boolean,
+    canRename: Boolean,
+    onDownload: () -> Unit,
+    onRename: () -> Unit
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp)
+            .padding(vertical = 4.dp)
     ) {
         Icon(
             imageVector = fileIcon(file.fileType),
@@ -373,7 +411,11 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean, downloadEnabled: Boole
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(vertical = 4.dp)
+        ) {
             Text(
                 text = file.originalFilename.orEmpty(),
                 style = MaterialTheme.typography.bodyMedium,
@@ -387,10 +429,127 @@ private fun FileRow(file: FileItemDto, inCamera: Boolean, downloadEnabled: Boole
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        IconButton(onClick = onDownload, enabled = downloadEnabled && file.id != null) {
-            Icon(Icons.Default.Download, contentDescription = "Скачать")
+        ActionsMenu(
+            listOfNotNull(
+                RowAction("Скачать", onDownload, enabled = downloadEnabled && file.id != null),
+                RowAction("Переименовать", onRename).takeIf { canRename }
+            )
+        )
+    }
+}
+
+private data class RowAction(val label: String, val onClick: () -> Unit, val enabled: Boolean = true)
+
+/** Кнопка «⋮» строки; без действий на её месте пустое поле той же ширины, чтобы строки не сдвигались. */
+@Composable
+private fun ActionsMenu(actions: List<RowAction>) {
+    if (actions.isEmpty()) {
+        Spacer(Modifier.width(48.dp))
+        return
+    }
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.MoreVert, contentDescription = "Действия")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            actions.forEach { action ->
+                DropdownMenuItem(text = { Text(action.label) }, enabled = action.enabled, onClick = {
+                    expanded = false
+                    action.onClick()
+                })
+            }
         }
     }
+}
+
+@Composable
+private fun FolderIcon(kind: FolderKind) {
+    val tint = MaterialTheme.colorScheme.primary
+    when (kind) {
+        FolderKind.CAMERA -> Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = tint)
+        FolderKind.AUTO_UPLOADS -> Icon(Icons.Default.CloudUpload, contentDescription = null, tint = tint)
+        FolderKind.FOLDER -> Icon(Icons.Default.Folder, contentDescription = null, tint = tint)
+        // В наборе значков Compose нет Folder Sync: папка с отметкой синхронизации.
+        FolderKind.ACTIVE_SOURCE -> Box(modifier = Modifier.size(24.dp)) {
+            Icon(Icons.Default.Folder, contentDescription = null, tint = tint)
+            Surface(
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surface,
+                modifier = Modifier
+                    .size(14.dp)
+                    .align(Alignment.BottomEnd)
+            ) {
+                Icon(Icons.Default.Sync, contentDescription = null, tint = tint, modifier = Modifier.padding(1.dp))
+            }
+        }
+    }
+}
+
+/**
+ * Ввод имени новой папки или нового имени объекта. У файла редактируется полное имя: выделена основа до расширения,
+ * но расширение не защищено и само не меняется.
+ */
+@Composable
+private fun NameDialog(
+    edit: NameEdit,
+    onNameChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var field by remember(edit.id) {
+        val stem = if (edit.target is NameTarget.File) edit.name.lastIndexOf('.').takeIf { it > 0 } else null
+        mutableStateOf(TextFieldValue(edit.name, TextRange(0, stem ?: edit.name.length)))
+    }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(edit.id) { focus.requestFocus() }
+    val (title, confirm) = when (edit.target) {
+        NameTarget.NewFolder -> "Новая папка" to "Создать"
+        is NameTarget.Folder -> "Переименовать папку" to "Сохранить"
+        is NameTarget.File -> "Переименовать файл" to "Сохранить"
+    }
+    val error = edit.error
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        // Пока запрос выполняется, диалог не закрывается: результат должен дойти до списка.
+        properties = DialogProperties(dismissOnBackPress = !edit.saving, dismissOnClickOutside = !edit.saving),
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = field,
+                onValueChange = {
+                    field = it
+                    onNameChange(it.text)
+                },
+                label = { Text("Имя") },
+                singleLine = true,
+                enabled = !edit.saving,
+                isError = error != null,
+                supportingText = if (error != null) {
+                    { Text(error) }
+                } else {
+                    null
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onSubmit() }),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focus)
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onSubmit, enabled = !edit.saving) {
+                if (edit.saving) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(confirm)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !edit.saving) { Text("Отмена") }
+        }
+    )
 }
 
 @Composable

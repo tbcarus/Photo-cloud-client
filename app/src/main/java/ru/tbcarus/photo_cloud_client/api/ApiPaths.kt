@@ -22,5 +22,6 @@ object ApiPaths {
     const val FOLDERS_CAMERA = "$FOLDERS/camera"
     const val FOLDERS_BACKUP = "$FOLDERS/backup"
     const val FOLDERS_CHILDREN = "$FOLDERS/{id}/children"
+    const val FOLDER_ID = "$FOLDERS/{id}"
     const val FOLDER_BACKUP_SOURCE = "$FOLDERS/{id}/backup"
 }

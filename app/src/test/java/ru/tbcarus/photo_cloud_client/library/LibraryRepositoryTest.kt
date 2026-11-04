@@ -222,6 +222,67 @@ class LibraryRepositoryTest {
         assertNull(result)
     }
 
+    @Test
+    fun createFolderPostsParentAndNameWithoutBackupSource() = runBlocking {
+        server.enqueue(json("""{"id":9,"parentId":3,"name":"Новая папка","folderType":"USER"}"""))
+
+        val result = repository.createFolder(3, "Новая папка")
+
+        assertEquals(LibraryResult.Success(FolderDto(9, 3, "Новая папка", "USER")), result)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/folders", request.path)
+        assertEquals("""{"parentId":3,"name":"Новая папка"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun renameFolderKeepsIdAndSendsOnlyName() = runBlocking {
+        server.enqueue(json("""{"id":3,"parentId":1,"name":"Поездки","folderType":"USER"}"""))
+
+        val result = repository.renameFolder(3, "Поездки")
+
+        assertEquals(LibraryResult.Success(FolderDto(3, 1, "Поездки", "USER")), result)
+        val request = server.takeRequest()
+        assertEquals("PATCH", request.method)
+        assertEquals("/api/v1/folders/3", request.path)
+        assertEquals("""{"name":"Поездки"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun renameFileSendsFullNameWithoutBackupSource() = runBlocking {
+        server.enqueue(json("""{"id":42,"folderId":3,"originalFilename":"План.PDF"}"""))
+
+        val result = repository.renameFile(42, "План.PDF")
+
+        assertEquals(42L, (result as LibraryResult.Success).value.id)
+        val request = server.takeRequest()
+        assertEquals("PATCH", request.method)
+        assertEquals("/api/v1/files/42", request.path)
+        assertEquals("""{"originalName":"План.PDF"}""", request.body.readUtf8())
+    }
+
+    @Test
+    fun changeRefusalsAreDistinguishedByStatusAndCode() = runBlocking {
+        server.enqueue(json("""{"code":"CONFLICT","message":"Folder with this name already exists"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"FOLDER_MANAGED","message":"Folder belongs to an active backup source"}""").setResponseCode(409))
+        server.enqueue(json("""{"code":"BAD_REQUEST","message":"Cannot rename system folder"}""").setResponseCode(400))
+        server.enqueue(json("""{"code":"NOT_FOUND","message":"Folder not found"}""").setResponseCode(404))
+        server.enqueue(json("""{"code":"INTERNAL_ERROR","message":"Physical storage operation failed"}""").setResponseCode(500))
+
+        assertEquals(LibraryResult.NameTaken, repository.createFolder(1, "Работа"))
+        assertEquals(LibraryResult.Managed, repository.renameFolder(6, "Проекты"))
+        assertEquals(LibraryResult.Rejected("Cannot rename system folder"), repository.renameFolder(2, "Фото"))
+        assertEquals(LibraryResult.NotFound, repository.renameFile(42, "a.txt"))
+        assertEquals(LibraryResult.ServerError("Physical storage operation failed"), repository.renameFile(42, "a.txt"))
+    }
+
+    @Test
+    fun readingKeepsConflictAsServerError() = runBlocking {
+        server.enqueue(json("""{"code":"CONFLICT","message":"Conflict"}""").setResponseCode(409))
+
+        assertEquals(LibraryResult.ServerError("Conflict"), repository.getChildren(1))
+    }
+
     private fun json(body: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(body)
 
     private fun filePage(hasNext: Boolean) = """

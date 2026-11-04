@@ -13,6 +13,33 @@ sealed interface LibraryStatus {
     data class Error(val message: String) : LibraryStatus
 }
 
+/** Объект диалога ввода имени. */
+sealed interface NameTarget {
+    data object NewFolder : NameTarget
+    data class Folder(val folder: FolderDto) : NameTarget
+    data class File(val file: FileItemDto) : NameTarget
+}
+
+/**
+ * Открытый диалог создания или переименования в папке [parent]. Введённое имя хранится здесь: после ошибки оно
+ * остаётся для правки и повтора. [id] отличает диалоги: ответ на запрос закрытого диалога не применяется к новому.
+ */
+data class NameEdit(
+    val id: Int,
+    val target: NameTarget,
+    val parent: FolderDto,
+    val name: String,
+    val saving: Boolean = false,
+    val error: String? = null
+) {
+    val currentName: String?
+        get() = when (target) {
+            NameTarget.NewFolder -> null
+            is NameTarget.Folder -> target.folder.name
+            is NameTarget.File -> target.file.originalFilename
+        }
+}
+
 data class LibraryUiState(
     val status: LibraryStatus = LibraryStatus.Idle,
     // Открытые папки от ROOT до текущей: API не отдаёт путь и не ищет папку по ID.
@@ -26,7 +53,8 @@ data class LibraryUiState(
     // Идёт отключение источника открытой папки: повторное нажатие не отправит второй запрос.
     val disabling: Boolean = false,
     // Меняется с каждой загрузкой каталога: новый список начинается с начала.
-    val contentVersion: Int = 0
+    val contentVersion: Int = 0,
+    val edit: NameEdit? = null
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
     val canGoUp: Boolean get() = path.size > 1
@@ -34,10 +62,24 @@ data class LibraryUiState(
      * AutoUploads и дерево активного источника меняет только автоматическое резервирование. Вложенные папки
      * backupSource не имеют: принадлежность дереву определяет корень источника на открытом пути.
      */
-    val inManagedTree: Boolean get() = currentFolder?.isAutoUploads == true || path.any { it.isActiveBackupSource }
+    val inManagedTree: Boolean get() = currentFolder?.isAutoUploads == true || inActiveSource
+    /** На открытом пути есть корень активного источника: всё ниже него меняет только резервирование. */
+    val inActiveSource: Boolean get() = path.any { it.isActiveBackupSource }
     /** Открыта сама корневая папка активного источника: только у неё Server хранит backupSource. */
     val isSourceRoot: Boolean get() = status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
     // В Camera файлы попадают только через backup Android.
     val canUpload: Boolean get() = status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree
+    /** Server создаёт папки только в ROOT и USER вне активного дерева: те же папки, что принимают ручную загрузку. */
+    val canCreateFolder: Boolean get() = canUpload
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
+
+    /**
+     * Системные папки (ROOT, Camera, AutoUploads) и корень активного источника не переименовываются, как и всё
+     * внутри активного дерева. Отключённый источник в AutoUploads — обычная USER-папка. Окончательно решает Server.
+     */
+    fun canRename(folder: FolderDto): Boolean =
+        status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+
+    /** Файл активного дерева меняет только резервирование; файлы Camera Server переименовывает по своим правилам. */
+    fun canRename(file: FileItemDto): Boolean = status == LibraryStatus.Content && file.id != null && !inActiveSource
 }

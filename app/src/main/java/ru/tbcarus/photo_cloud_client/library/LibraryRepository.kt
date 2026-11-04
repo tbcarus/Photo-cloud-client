@@ -5,9 +5,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import retrofit2.Call
+import retrofit2.Response
 import retrofit2.awaitResponse
+import ru.tbcarus.photo_cloud_client.api.models.CreateFolderRequest
+import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
+import ru.tbcarus.photo_cloud_client.api.models.RenameFolderRequest
 import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import java.io.IOException
@@ -23,9 +28,20 @@ sealed interface LibraryResult<out T> {
     data object NotFound : Failure
     data class NetworkError(val message: String) : Failure
     data class ServerError(val message: String) : Failure
+
+    // Отказы изменения библиотеки; запросы чтения отвечают ими как ServerError.
+    /** 409: имя занято файлом или папкой либо зарезервировано. */
+    data object NameTaken : Failure
+    /** 409 FOLDER_MANAGED: объект в дереве активного источника. */
+    data object Managed : Failure
+    /** 400: Server отклонил имя или операцию над объектом. */
+    data class Rejected(val message: String) : Failure
 }
 
-/** Чтение серверной библиотеки: только GET, папки не создаёт. С локальной очередью backup не связан. */
+/**
+ * Серверная библиотека: чтение и ручные изменения пользователя (создание папки, переименование).
+ * backupSource не передаётся: это запросы обычного пользователя, а не резервирования. С локальной очередью backup не связан.
+ */
 @Singleton
 open class LibraryRepository @Inject constructor(
     private val apiServiceFactory: ApiServiceFactory
@@ -34,6 +50,7 @@ open class LibraryRepository @Inject constructor(
     companion object {
         const val PAGE_SIZE = 50
         private const val SORT_BY_NAME = "name"
+        private const val FOLDER_MANAGED = "FOLDER_MANAGED"
     }
 
     open suspend fun getRoot(): LibraryResult<FolderDto> =
@@ -48,27 +65,48 @@ open class LibraryRepository @Inject constructor(
         return request { apiServiceFactory.authFileService().getFiles(folder.id, page, PAGE_SIZE, sort) }
     }
 
+    open suspend fun createFolder(parentId: Long, name: String): LibraryResult<FolderDto> =
+        request(change = true) { apiServiceFactory.authFolderService().createFolder(CreateFolderRequest(parentId, name)) }
+
+    open suspend fun renameFolder(folderId: Long, name: String): LibraryResult<FolderDto> =
+        request(change = true) { apiServiceFactory.authFolderService().renameFolder(folderId, RenameFolderRequest(name)) }
+
+    open suspend fun renameFile(fileId: Long, name: String): LibraryResult<FileItemDto> =
+        request(change = true) { apiServiceFactory.authFileService().renameFile(fileId, RenameFileRequest(name)) }
+
     // awaitResponse при отмене корутины прерывает и сам HTTP-запрос.
-    private suspend fun <T : Any> request(call: () -> Call<T>): LibraryResult<T> = withContext(Dispatchers.IO) {
-        try {
-            val response = call().awaitResponse()
-            val body = response.body()
-            when {
-                response.isSuccessful && body != null -> LibraryResult.Success(body)
-                response.isSuccessful -> LibraryResult.ServerError("Пустой ответ сервера")
-                response.code() == 401 || response.code() == 403 -> LibraryResult.Unauthorized
-                response.code() == 404 -> LibraryResult.NotFound
-                else -> LibraryResult.ServerError(ApiErrorParser.parse(response))
+    private suspend fun <T : Any> request(change: Boolean = false, call: () -> Call<T>): LibraryResult<T> =
+        withContext(Dispatchers.IO) {
+            try {
+                val response = call().awaitResponse()
+                val body = response.body()
+                when {
+                    response.isSuccessful && body != null -> LibraryResult.Success(body)
+                    response.isSuccessful -> LibraryResult.ServerError("Пустой ответ сервера")
+                    response.code() == 401 || response.code() == 403 -> LibraryResult.Unauthorized
+                    response.code() == 404 -> LibraryResult.NotFound
+                    else -> failure(response, change)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: MalformedJsonException) {
+                // Наследник IOException, но ответ получен: связь исправна.
+                LibraryResult.ServerError("Некорректный ответ сервера")
+            } catch (e: IOException) {
+                LibraryResult.NetworkError(e.message ?: "Сервер не отвечает")
+            } catch (e: RuntimeException) {
+                LibraryResult.ServerError(e.message ?: "Некорректный ответ сервера")
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: MalformedJsonException) {
-            // Наследник IOException, но ответ получен: связь исправна.
-            LibraryResult.ServerError("Некорректный ответ сервера")
-        } catch (e: IOException) {
-            LibraryResult.NetworkError(e.message ?: "Сервер не отвечает")
-        } catch (e: RuntimeException) {
-            LibraryResult.ServerError(e.message ?: "Некорректный ответ сервера")
+        }
+
+    // Код и текст ошибки берутся из одного чтения тела.
+    private fun failure(response: Response<*>, change: Boolean): LibraryResult.Failure {
+        val error = ApiErrorParser.read(response)
+        return when {
+            change && response.code() == 409 && error.code == FOLDER_MANAGED -> LibraryResult.Managed
+            change && response.code() == 409 -> LibraryResult.NameTaken
+            change && response.code() == 400 -> LibraryResult.Rejected(error.message)
+            else -> LibraryResult.ServerError(error.message)
         }
     }
 }
