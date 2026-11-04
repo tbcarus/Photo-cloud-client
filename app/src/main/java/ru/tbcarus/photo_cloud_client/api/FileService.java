@@ -7,6 +7,7 @@ import retrofit2.Call;
 import retrofit2.http.Body;
 import retrofit2.http.GET;
 import retrofit2.http.Multipart;
+import retrofit2.http.PATCH;
 import retrofit2.http.POST;
 import retrofit2.http.Part;
 import retrofit2.http.Path;
@@ -16,6 +17,7 @@ import ru.tbcarus.photo_cloud_client.api.models.ChecksumExistsRequest;
 import ru.tbcarus.photo_cloud_client.api.models.ChecksumExistsResponse;
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto;
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto;
+import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest;
 
 public interface FileService {
     /** Страница прямых файлов папки. sort = null — параметр не отправляется, порядок по дате. */
@@ -54,4 +56,12 @@ public interface FileService {
     @Streaming
     @GET(ApiPaths.FILES_DOWNLOAD)
     Call<ResponseBody> download(@Path("id") long id);
+
+    /** Карточка файла по ID: сверка прежней версии перед архивированием и после потерянного ответа. */
+    @GET(ApiPaths.FILE_ID)
+    Call<FileItemDto> getFile(@Path("id") long id);
+
+    /** Переименование с сохранением ID; backupSource — для файла активного дерева своего источника. */
+    @PATCH(ApiPaths.FILE_ID)
+    Call<FileItemDto> renameFile(@Path("id") long id, @Body RenameFileRequest request);
 }

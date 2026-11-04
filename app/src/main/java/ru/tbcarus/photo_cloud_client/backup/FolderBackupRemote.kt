@@ -18,6 +18,7 @@ import ru.tbcarus.photo_cloud_client.api.models.ErrorResponseDto
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import java.io.IOException
 import javax.inject.Inject
@@ -50,6 +51,11 @@ open class FolderBackupRemote @Inject constructor(
 
     open suspend fun files(folderId: Long, page: Int): BackupResult<FilePageDto> =
         request { apiServiceFactory.authFileService().getFiles(folderId, page, FILES_PAGE_SIZE, null) }
+
+    open suspend fun file(id: Long): BackupResult<FileItemDto> = request { apiServiceFactory.authFileService().getFile(id) }
+
+    open suspend fun rename(id: Long, name: String, backupSource: String): BackupResult<FileItemDto> =
+        request { apiServiceFactory.authFileService().renameFile(id, RenameFileRequest(name, backupSource)) }
 
     open suspend fun createFolder(parentId: Long, name: String, backupSource: String): BackupResult<FolderDto> =
         request { apiServiceFactory.authFolderService().createFolder(CreateFolderRequest(parentId, name, backupSource)) }

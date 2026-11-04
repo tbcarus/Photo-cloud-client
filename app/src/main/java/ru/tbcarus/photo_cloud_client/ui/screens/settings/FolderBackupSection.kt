@@ -31,6 +31,7 @@ import ru.tbcarus.photo_cloud_client.backup.SourceFileCounters
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 
 /** Подключение Android-папок как источников автоматической загрузки и их состояние. */
@@ -46,7 +47,7 @@ fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
     Spacer(Modifier.height(4.dp))
     Text(
         "Подключённая папка получает свою папку на сервере в AutoUploads: новые файлы и папки загружаются автоматически. " +
-            "Файлы, изменённые после загрузки, пока не отправляются — сервер хранит их прежнюю версию.",
+            "Изменённый файл загружается новой версией, а прежняя остаётся на сервере рядом с отметкой времени в имени.",
         style = MaterialTheme.typography.bodySmall
     )
     Spacer(Modifier.height(8.dp))
@@ -97,7 +98,8 @@ fun FolderBackupSection(viewModel: FolderBackupViewModel = hiltViewModel()) {
             busy = state.busy,
             counters = state.counters[source.id],
             onRetry = { name -> viewModel.retry(source.id, name) },
-            onCancel = { viewModel.cancelFailed(source.id) }
+            onCancel = { viewModel.cancelFailed(source.id) },
+            onDisable = { viewModel.disable(source) }
         )
     }
 }
@@ -108,10 +110,15 @@ private fun SourceCard(
     busy: Boolean,
     counters: SourceFileCounters?,
     onRetry: (String?) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onDisable: () -> Unit
 ) {
     // Черновик имени нужен только после окончательного отказа Server.
     var draft by rememberSaveable(source.id, source.serverName) { mutableStateOf(source.serverName) }
+    var confirmDisable by rememberSaveable(source.id) { mutableStateOf(false) }
+    if (confirmDisable) {
+        DisableSourceDialog(source.serverName, onConfirm = onDisable, onDismiss = { confirmDisable = false })
+    }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(source.serverName, style = MaterialTheme.typography.titleSmall)
@@ -127,7 +134,11 @@ private fun SourceCard(
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             when (source.registrationState) {
-                RegistrationState.ACTIVE, RegistrationState.REMOTE_DISABLED -> Unit
+                RegistrationState.ACTIVE -> {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = { confirmDisable = true }, enabled = !busy) { Text("Отключить резервирование") }
+                }
+                RegistrationState.REMOTE_DISABLED -> Unit
                 RegistrationState.PENDING_REGISTRATION -> {
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = { onRetry(null) }, enabled = !busy) { Text("Повторить") }
@@ -162,7 +173,8 @@ internal fun serverFolderText(source: BackupSource): String = when (val id = sou
 internal fun sourceStateText(source: BackupSource): String = when (source.registrationState) {
     RegistrationState.PENDING_REGISTRATION -> "Ожидает подтверждения сервера"
     RegistrationState.REGISTRATION_FAILED -> "Не подключена: сервер отклонил имя"
-    RegistrationState.REMOTE_DISABLED -> "Отключён на сервере: файлы больше не отправляются"
+    // Причина удалённого отключения показывается отдельно, в registrationError.
+    RegistrationState.REMOTE_DISABLED -> "Отключён: новые и изменённые файлы не отправляются, сохранённые остаются на сервере"
     RegistrationState.ACTIVE -> when (source.accessState) {
         SourceAccess.AVAILABLE -> "Активен"
         SourceAccess.UNAVAILABLE -> "Недоступен: папка на устройстве сейчас не отвечает"
@@ -183,4 +195,4 @@ internal fun countersText(counters: SourceFileCounters?): String {
 
 /** Изменённые после отправки файлы не перезаписываются: прежнюю версию сохранит следующий этап. */
 internal fun changedText(counters: SourceFileCounters?): String? =
-    counters?.changed?.takeIf { it > 0 }?.let { "Изменены после загрузки и пока не отправлены: $it" }
+    counters?.changed?.takeIf { it > 0 }?.let { "Изменённые файлы ждут сохранения новой версии: $it" }

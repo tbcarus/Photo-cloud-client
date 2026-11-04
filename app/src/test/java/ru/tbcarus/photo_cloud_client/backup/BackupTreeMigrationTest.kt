@@ -21,7 +21,8 @@ import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import java.io.File
 
 /**
- * Миграция 5→6 на файле БД версии 5 с очередью Camera и подключённым источником, открытом боевой конфигурацией;
+ * Миграции 5→6 и 6→7 на файлах БД прежних версий с очередью Camera, источником и состояниями файлов, открытых
+ * боевой конфигурацией;
  * без пути миграции БД не открывается и данные не удаляются.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -60,7 +61,7 @@ class BackupTreeMigrationTest {
 
         val db = AppDatabase.build(context, DB_NAME)
         try {
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(7, db.openHelper.readableDatabase.version)
             assertEquals(2, db.mediaFileDao().getAll().first().size)
             val source = db.backupSourceDao().list("http://10.0.2.2:8080/", "a@test.local").single()
             assertEquals(42L, source.serverRootFolderId)
@@ -81,6 +82,67 @@ class BackupTreeMigrationTest {
             } catch (e: SQLiteConstraintException) {
                 // ожидаемо
             }
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun archiveColumnsAppearAndBackupStatesSurvive() = runBlocking {
+        createFromSchema(6) { old ->
+            old.insertMedia(1, "SYNCED")
+            old.insertOrThrow("backup_sources", null, ContentValues().apply {
+                put("sourceUuid", "550e8400-e29b-41d4-a716-446655440000")
+                put("treeUri", "content://com.android.externalstorage.documents/tree/primary%3ADocs")
+                put("localName", "Docs")
+                put("serverName", "Docs")
+                put("serverRootFolderId", 42L)
+                put("serverUrl", "http://10.0.2.2:8080/")
+                put("accountId", "a@test.local")
+                put("registrationState", "ACTIVE")
+                put("accessState", "AVAILABLE")
+                put("createdAt", 1L)
+                put("scanGeneration", 3)
+                put("scanErrors", 0)
+                put("lastScanAt", 5L)
+            })
+            old.insertOrThrow("backup_folders", null, ContentValues().apply {
+                put("id", 1L); put("sourceId", 1L); put("name", "Docs"); put("relativePath", "")
+                put("documentId", "primary:Docs"); put("serverFolderId", 42L); put("seenGeneration", 3); put("listedGeneration", 3)
+            })
+            // Незавершённые состояния 5.3: изменённый после отправки файл и прерванная отправка.
+            old.insertV6File(1, "Synced.txt", "SYNCED", serverFileId = 44, checksum = "a", syncedChecksum = "a")
+            old.insertV6File(2, "Changed.txt", "CHANGED", serverFileId = 45, checksum = "b2", syncedChecksum = "b1")
+            old.insertV6File(3, "Sending.txt", "UPLOADING", serverFileId = null, checksum = "c", syncedChecksum = null)
+        }
+
+        val db = AppDatabase.build(context, DB_NAME)
+        try {
+            assertEquals(7, db.openHelper.readableDatabase.version)
+            assertEquals(1, db.mediaFileDao().getAll().first().size)
+            val source = db.backupSourceDao().list("http://10.0.2.2:8080/", "a@test.local").single()
+            assertEquals(3, source.scanGeneration)
+            assertEquals(42L, db.backupTreeDao().folderByPath(source.id, "")!!.serverFolderId)
+            val files = db.backupTreeDao().files(source.id).associateBy { it.name }
+            assertEquals(BackupFileStatus.SYNCED, files.getValue("Synced.txt").status)
+            assertEquals(44L, files.getValue("Synced.txt").serverFileId)
+            val changed = files.getValue("Changed.txt")
+            assertEquals(BackupFileStatus.CHANGED, changed.status)
+            assertEquals(45L, changed.serverFileId)
+            assertEquals("b1", changed.syncedChecksum)
+            assertNull(changed.archiveName)
+            assertNull(changed.archiveFileId)
+            assertEquals(BackupFileStatus.UPLOADING, files.getValue("Sending.txt").status)
+            // Изменённый файл 5.3 теперь в очереди архивирования.
+            assertEquals(listOf("Changed.txt"), db.backupTreeDao().filesToProcess(source.id, 10).map { it.name })
+
+            // Состояние архивирования записывается и читается.
+            db.backupTreeDao().updateFile(changed.copy(status = BackupFileStatus.ARCHIVING, archiveName = "Changed_20261104-120000.txt", archiveFileId = 45, archiveChecksum = "b1"))
+            val archiving = db.backupTreeDao().file(changed.id)!!
+            assertEquals(BackupFileStatus.ARCHIVING, archiving.status)
+            assertEquals("Changed_20261104-120000.txt", archiving.archiveName)
+            assertEquals(45L, archiving.archiveFileId)
+            assertEquals("b1", archiving.archiveChecksum)
         } finally {
             db.close()
         }
@@ -145,6 +207,15 @@ class BackupTreeMigrationTest {
             put("lastModified", 1L)
             put("status", status)
             put("retryCount", 0)
+        })
+    }
+
+    private fun SQLiteDatabase.insertV6File(id: Long, name: String, status: String, serverFileId: Long?, checksum: String, syncedChecksum: String?) {
+        insertOrThrow("backup_files", null, ContentValues().apply {
+            put("id", id); put("sourceId", 1L); put("folderId", 1L); put("name", name); put("relativePath", name)
+            put("documentId", "primary:Docs/$name"); put("mimeType", "text/plain"); put("size", 2L); put("lastModified", 1L)
+            put("checksum", checksum); put("serverFileId", serverFileId); put("syncedChecksum", syncedChecksum)
+            put("status", status); put("retryCount", 0); put("seenGeneration", 3)
         })
     }
 

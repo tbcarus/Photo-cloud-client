@@ -142,22 +142,26 @@ class FolderBackupEngineTest {
     }
 
     @Test
-    fun nameTakenByFolderIsConflictAndByOtherContentWaitsForArchiving() = runBlocking {
+    fun nameTakenByFolderOrUnknownContentIsConflictWithoutLink() = runBlocking {
         fake.add(serverRoot, "Report", "USER", null)
         val older = fake.putFile(serverRoot, "Notes.txt", "older version")
         tree.file("Report", "report")
         tree.file("Notes.txt", "notes")
 
         run()
+        run()
 
         val rows = db.backupTreeDao().files(sourceId).associateBy { it.name }
         assertEquals(BackupFileStatus.CONFLICT, rows.getValue("Report").status)
         assertEquals(FolderBackupEngine.FILE_NAME_TAKEN, rows.getValue("Report").failureReason)
-        // Имя в активном дереве занято прежней копией этого пути: она не заменяется и ждёт архивирования.
-        assertEquals(BackupFileStatus.CHANGED, rows.getValue("Notes.txt").status)
-        assertEquals(older.id, rows.getValue("Notes.txt").serverFileId)
+        // Совпало только имя: содержимое не читалось из этого файла, поэтому связи и архивирования нет.
+        assertEquals(BackupFileStatus.CONFLICT, rows.getValue("Notes.txt").status)
+        assertEquals(FolderBackupEngine.FILE_CONTENT_UNKNOWN, rows.getValue("Notes.txt").failureReason)
+        assertNull(rows.getValue("Notes.txt").serverFileId)
+        assertEquals("Notes.txt", fake.files.getValue(older.id).name)
         assertEquals("older version", String(fake.files.getValue(older.id).bytes))
         assertEquals(1, fake.files.size)
+        assertTrue(fake.renames.isEmpty())
     }
 
     @Test
@@ -186,7 +190,7 @@ class FolderBackupEngineTest {
     }
 
     @Test
-    fun fileChangedDuringUploadIsNotSyncedAndLaterWaitsForArchiving() = runBlocking {
+    fun fileChangedDuringUploadIsNotSyncedAndLaterArchived() = runBlocking {
         val node = tree.file("Notes.txt", "version 1")
         var opens = 0
         tree.onOpen = {
@@ -208,15 +212,17 @@ class FolderBackupEngineTest {
         tree.onOpen = {}
         run()
 
+        // Принятая версия 1 сохранена как прежняя, версия 2 — под исходным именем.
         val after = db.backupTreeDao().files(sourceId).single()
-        assertEquals(BackupFileStatus.CHANGED, after.status)
-        assertEquals("version 1", String(fake.files.values.single().bytes))
-        assertEquals(1, fake.uploads.size)
+        assertEquals(BackupFileStatus.SYNCED, after.status)
+        assertEquals("version 2", String(fake.fileAt(serverRoot, "Notes.txt")!!.bytes))
+        assertEquals(listOf("version 1", "version 2"), fake.files.values.map { String(it.bytes) })
+        assertEquals(2, fake.uploads.size)
         assertEquals(2L, node.lastModified)
     }
 
     @Test
-    fun changedAfterBackupIsNotUploadedAndTouchOnlyStaysSynced() = runBlocking {
+    fun changedAfterBackupIsArchivedAndTouchOnlyStaysSynced() = runBlocking {
         val notes = tree.file("Notes.txt", "notes")
         val plan = tree.file("Plan.txt", "plan")
         run()
@@ -227,10 +233,12 @@ class FolderBackupEngineTest {
         run()
 
         val rows = db.backupTreeDao().files(sourceId).associateBy { it.name }
-        assertEquals(BackupFileStatus.CHANGED, rows.getValue("Notes.txt").status)
+        assertEquals(BackupFileStatus.SYNCED, rows.getValue("Notes.txt").status)
         assertEquals(BackupFileStatus.SYNCED, rows.getValue("Plan.txt").status)
-        assertEquals(listOf("Notes.txt", "Plan.txt"), fake.uploads)
-        assertEquals("notes", String(fake.fileAt(serverRoot, "Notes.txt")!!.bytes))
+        assertEquals(listOf("Notes.txt", "Plan.txt", "Notes.txt"), fake.uploads)
+        assertEquals("notes v2", String(fake.fileAt(serverRoot, "Notes.txt")!!.bytes))
+        assertEquals(1, fake.renames.size)
+        assertEquals(3, fake.files.size)
     }
 
     @Test

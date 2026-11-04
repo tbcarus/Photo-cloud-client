@@ -86,10 +86,14 @@ interface BackupTreeDao {
     @Query("SELECT * FROM backup_files WHERE sourceId = :sourceId ORDER BY id")
     suspend fun files(sourceId: Long): List<BackupFile>
 
-    /** Очередь отправки: FIFO по ID, без исчезнувших файлов. */
+    /**
+     * Очередь: новые и изменённые файлы и незавершённые архивирования, FIFO по ID. Исчезнувшие файлы не
+     * отправляются, но начатое переименование доводится до определённого результата.
+     */
     @Query("""
         SELECT * FROM backup_files
-        WHERE sourceId = :sourceId AND status = 'PENDING' AND missingSince IS NULL
+        WHERE sourceId = :sourceId AND status IN ('PENDING', 'CHANGED', 'ARCHIVING', 'ARCHIVED')
+          AND (missingSince IS NULL OR status = 'ARCHIVING')
         ORDER BY id LIMIT :limit
     """)
     suspend fun filesToProcess(sourceId: Long, limit: Int): List<BackupFile>
@@ -107,7 +111,8 @@ interface BackupTreeDao {
 
     @Query("""
         SELECT COUNT(*) FROM backup_files
-        WHERE sourceId = :sourceId AND status = 'PENDING' AND missingSince IS NULL
+        WHERE sourceId = :sourceId AND status IN ('PENDING', 'CHANGED', 'ARCHIVING', 'ARCHIVED')
+          AND (missingSince IS NULL OR status = 'ARCHIVING')
     """)
     suspend fun countToProcess(sourceId: Long): Int
 
@@ -122,7 +127,7 @@ interface BackupTreeDao {
         SELECT sourceId,
             COUNT(CASE WHEN status = 'SYNCED' THEN 1 END) AS synced,
             COUNT(CASE WHEN status IN ('PENDING', 'UPLOADING') THEN 1 END) AS pending,
-            COUNT(CASE WHEN status = 'CHANGED' THEN 1 END) AS changed,
+            COUNT(CASE WHEN status IN ('CHANGED', 'ARCHIVING', 'ARCHIVED') THEN 1 END) AS changed,
             COUNT(CASE WHEN status IN ('FAILED', 'CONFLICT') THEN 1 END) AS failed,
             COUNT(CASE WHEN status = 'SKIPPED' THEN 1 END) AS skipped
         FROM backup_files

@@ -102,7 +102,7 @@ class FakeTree(context: Context, rootName: String) : LocalDocuments(context) {
 class FakeLibraryServer : Dispatcher() {
 
     class Folder(val id: Long, val parentId: Long?, val name: String, val type: String, var backupSource: String?)
-    class File(val id: Long, val folderId: Long, val name: String, val bytes: ByteArray) {
+    class File(val id: Long, val folderId: Long, var name: String, var bytes: ByteArray) {
         val checksum: String get() = sha256(bytes)
     }
 
@@ -111,11 +111,38 @@ class FakeLibraryServer : Dispatcher() {
     val files = LinkedHashMap<Long, File>()
     val requests = CopyOnWriteArrayList<String>()
     val uploads = CopyOnWriteArrayList<String>()
+    /** Имена из PATCH файлов в порядке запросов. */
+    val renames = CopyOnWriteArrayList<String>()
 
-    /** Ответ следующего upload теряется после сохранения файла. */
-    var dropNextUpload = false
+    /** Ответы стольких следующих upload теряются после сохранения файла. */
+    var dropUploads = 0
+    var dropNextUpload: Boolean
+        get() = dropUploads > 0
+        set(value) { dropUploads = if (value) 1 else 0 }
     var failUploadsWith: Int? = null
     var onUpload: (String) -> Unit = {}
+    /** После сохранения файла, до ответа: гибель клиента здесь теряет ответ успешного upload. */
+    var afterUpload: (File) -> Unit = {}
+
+    /** Ответ следующего PATCH теряется после переименования. */
+    var dropNextRename = false
+    /** Ошибка PATCH до переименования. */
+    var failRenamesWith: Int? = null
+    var afterRename: (File) -> Unit = {}
+    /** Столько следующих GET файла по ID отвечают 500. */
+    var failFileGets = 0
+    /** Столько следующих GET файла по ID обрываются до ответа. */
+    var disconnectFileGets = 0
+    var onFileGet: (Long) -> Unit = {}
+    /** Пути DELETE /folders/{id}/backup в порядке запросов. */
+    val disables = CopyOnWriteArrayList<String>()
+    /** Ошибка DELETE до отключения. */
+    var failDisablesWith: Int? = null
+    /** Следующий DELETE обрывается без обработки: Server ничего не меняет. */
+    var disconnectNextDisable = false
+    /** Ответ следующего DELETE теряется после отключения. */
+    var dropNextDisable = false
+    var onDisable: () -> Unit = {}
 
     val root: Folder = add(null, "root", "ROOT", null)
     val autoUploads: Folder = add(root.id, "AutoUploads", "AUTO_UPLOADS", null)
@@ -156,8 +183,68 @@ class FakeLibraryServer : Dispatcher() {
             request.method == "POST" && path == "/api/v1/folders" -> createFolder(JSONObject(request.body.readUtf8()))
             request.method == "POST" && path == "/api/v1/folders/backup" -> error(500, "UNEXPECTED")
             request.method == "POST" && path == "/api/v1/files/upload" -> upload(request)
+            request.method == "GET" && FILE_ID.matches(path) -> {
+                val id = path.substringAfterLast('/').toLong()
+                onFileGet(id)
+                if (disconnectFileGets > 0) {
+                    disconnectFileGets--
+                    return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                }
+                if (failFileGets > 0) {
+                    failFileGets--
+                    return error(500, "INTERNAL_ERROR")
+                }
+                files[id]?.let { json(fileJson(it).toString()) } ?: error(404, "FILE_ITEM_NOT_FOUND")
+            }
+            request.method == "DELETE" && SOURCE_BACKUP.matches(path) ->
+                disable(path.removePrefix("/api/v1/folders/").removeSuffix("/backup").toLong(), path)
+            request.method == "PATCH" && FILE_ID.matches(path) ->
+                rename(path.substringAfterLast('/').toLong(), JSONObject(request.body.readUtf8()))
             else -> error(404, "NOT_FOUND")
         }
+    }
+
+    /** Правила Server: корень источника — USER-папка в AutoUploads; повтор для отключённого тоже 204. */
+    private fun disable(id: Long, path: String): MockResponse {
+        disables += path
+        onDisable()
+        if (disconnectNextDisable) {
+            disconnectNextDisable = false
+            // DISCONNECT_AT_START из dispatch не действует: запрос уже прочитан.
+            return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+        }
+        failDisablesWith?.let { return error(it, "INTERNAL_ERROR") }
+        val folder = folders[id] ?: return error(404, "NOT_FOUND")
+        if (folder.type != "USER" || folder.parentId != autoUploads.id) return error(400, "BAD_REQUEST")
+        folder.backupSource = null
+        if (dropNextDisable) {
+            dropNextDisable = false
+            return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+        }
+        return MockResponse().setResponseCode(204)
+    }
+
+    /** Правила Server: ID сохраняется, имя свободно без учёта регистра, кроме собственного; запись в активное дерево — с его UUID. */
+    private fun rename(id: Long, body: JSONObject): MockResponse {
+        val name = body.getString("originalName")
+        renames += name
+        failRenamesWith?.let { return error(it, "INTERNAL_ERROR") }
+        val file = files[id] ?: return error(404, "FILE_ITEM_NOT_FOUND")
+        val backupSource = if (body.isNull("backupSource")) "" else body.getString("backupSource")
+        if (activeSourceOf(file.folderId) != backupSource) {
+            return error(409, "FOLDER_MANAGED")
+        }
+        if (name.isBlank() || name.contains('/')) return error(400, "BAD_REQUEST")
+        val taken = folders.values.any { it.parentId == file.folderId && it.name.equals(name, ignoreCase = true) } ||
+            files.values.any { it.id != id && it.folderId == file.folderId && it.name.equals(name, ignoreCase = true) }
+        if (taken) return error(409, "CONFLICT")
+        file.name = name
+        afterRename(file)
+        if (dropNextRename) {
+            dropNextRename = false
+            return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
+        }
+        return json(fileJson(file).toString())
     }
 
     private fun createFolder(body: JSONObject): MockResponse {
@@ -200,8 +287,9 @@ class FakeLibraryServer : Dispatcher() {
         val checksum = sha256(bytes)
         val file = fileAt(folderId, name)?.takeIf { it.checksum == checksum }
             ?: if (nameTaken(folderId, name)) return error(409, "CONFLICT") else File(nextId++, folderId, name, bytes).also { files[it.id] = it }
-        if (dropNextUpload) {
-            dropNextUpload = false
+        afterUpload(file)
+        if (dropUploads > 0) {
+            dropUploads--
             return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
         }
         return json(fileJson(file).toString())
@@ -236,6 +324,9 @@ class FakeLibraryServer : Dispatcher() {
             .setBody(JSONObject().put("code", code).put("message", code).toString())
 
     companion object {
+        private val FILE_ID = Regex("/api/v1/files/\\d+")
+        private val SOURCE_BACKUP = Regex("/api/v1/folders/\\d+/backup")
+
         fun sha256(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     }

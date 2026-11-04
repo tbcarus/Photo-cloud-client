@@ -34,7 +34,9 @@ data class FolderBackupRun(val progress: Boolean, val remaining: Boolean, val re
  * Обход дерева SAF идёт по поколениям через Room: за ход читается ограниченное число папок, прочитанная папка
  * отмечается в той же транзакции, поэтому прерванный обход продолжается с непрочитанных папок, а не с начала.
  * Источники обрабатываются ходами по очереди: большой первый источник не задерживает остальные.
- * Изменённые после прежней отправки файлы не отправляются: они ждут архивирования прежней версии (этап 5.4).
+ * Изменённый после отправки файл (этап 5.4): прежняя версия сверяется по ID и переименовывается с сохранением ID,
+ * затем новая загружается под исходным именем. Каждый этап записан в Room до запроса к Server, а неизвестный
+ * результат запроса определяется по состоянию Server, поэтому прерывание не создаёт дублей и повторных переименований.
  * Серверные файлы никогда не удаляются и не заменяются.
  */
 @Singleton
@@ -60,12 +62,23 @@ open class FolderBackupEngine @Inject constructor(
         const val PARENT_NOT_CREATED = "Родительская папка не создана на сервере"
         const val FOLDER_NAME_TAKEN = "Имя занято на сервере файлом или папкой с другим регистром"
         const val FILE_NAME_TAKEN = "Имя занято на сервере папкой"
+        const val FILE_CONTENT_UNKNOWN = "Имя занято на сервере файлом, содержимое которого не читалось из этого файла"
+        const val ARCHIVE_SOURCE_MISSING = "Прежняя версия не найдена на сервере"
+        const val ARCHIVE_MISMATCH = "Прежняя версия на сервере не совпала с ожидаемой: папка, имя или checksum"
+        const val ARCHIVE_NAME_TAKEN = "Не найдено свободное имя для прежней версии"
+        const val ARCHIVE_NAME_INVALID = "Для прежней версии нельзя составить допустимое имя"
         const val TOO_DEEP = "Слишком глубокая вложенность"
         const val SOURCE_DISABLED = "Источник отключён на сервере"
         const val SOURCE_GONE = "Папка источника не найдена на сервере"
     }
 
     private enum class Turn { PROGRESS, IDLE, STOP, RETRY, ACCOUNT_CHANGED }
+
+    /** Где прежняя версия на Server: под архивным именем, ещё под исходным, нет или не та; UNKNOWN — нет ответа. */
+    private enum class ArchiveState { DONE, ORIGINAL, MISSING, MISMATCH, UNKNOWN }
+
+    /** Время начала архивирования для имени прежней версии; в тестах подменяется. */
+    internal var wallClock: () -> Long = System::currentTimeMillis
 
     /** Состояние источника в пределах одного прогона. */
     private class SourceRun(val source: BackupSource, val treeUri: Uri, var generation: Int) {
@@ -124,6 +137,8 @@ open class FolderBackupEngine @Inject constructor(
         tree.countFolderWork(run.source.id, run.generation) > 0 || tree.countToProcess(run.source.id) > 0
 
     private suspend fun turn(run: SourceRun, account: BackupAccount, fullScan: Boolean, budget: WorkBudget): Turn {
+        // Отключение во время прогона уже записано в Room: новый ход не начинается. Запись внутри хода отклонит Server.
+        if (sources.get(run.source.id)?.registrationState != RegistrationState.ACTIVE) return Turn.STOP
         // Перед первой записью прогона: корень по-прежнему активный источник с этим UUID.
         if (!run.verified) {
             when (verifyActive(run)) {
@@ -292,7 +307,10 @@ open class FolderBackupEngine @Inject constructor(
     private fun rescanned(known: BackupFile, row: ru.tbcarus.photo_cloud_client.transfer.DocumentRow, generation: Int): BackupFile {
         val metadataChanged = row.size != known.size || row.lastModified != known.lastModified
         val unreliable = row.size == null || row.lastModified == null
+        val archiving = known.status == BackupFileStatus.ARCHIVING || known.status == BackupFileStatus.ARCHIVED
         val status = when {
+            // Начатое архивирование доводится до конца независимо от сведений обхода.
+            archiving -> known.status
             row.isVirtual -> BackupFileStatus.SKIPPED
             metadataChanged -> BackupFileStatus.PENDING
             unreliable && known.status == BackupFileStatus.SYNCED -> BackupFileStatus.PENDING
@@ -300,6 +318,7 @@ open class FolderBackupEngine @Inject constructor(
             else -> known.status
         }
         val reason = when {
+            archiving -> known.failureReason
             row.isVirtual -> VIRTUAL
             status == BackupFileStatus.PENDING -> null
             else -> known.failureReason
@@ -375,45 +394,58 @@ open class FolderBackupEngine @Inject constructor(
         return if (handled > 0) Turn.PROGRESS else Turn.IDLE
     }
 
-    /** PROGRESS — строка вышла из PENDING; остальные исходы возвращают её в PENDING и останавливают ход. */
+    /**
+     * PROGRESS — строка вышла из очереди или прошла этап; остальные исходы возвращают её в прежнее состояние
+     * очереди и останавливают ход.
+     */
     private suspend fun processFile(run: SourceRun, account: BackupAccount, file: BackupFile, budget: WorkBudget): Turn {
         val folder = tree.folder(file.folderId)
         val serverFolderId = folder?.serverFolderId
-            ?: return finish(file, BackupFileStatus.FAILED, folder?.problem?.let { "Папка не создана: $it" } ?: FOLDER_NOT_READY)
+        // Начатое переименование доводится до конца по состоянию Server: локальное содержимое для него не нужно.
+        if (file.status == BackupFileStatus.ARCHIVING) {
+            if (serverFolderId == null) return finish(file, BackupFileStatus.CONFLICT, ARCHIVE_MISMATCH)
+            return rename(run, account, file, serverFolderId, budget, atOriginal = false)
+        }
+        if (serverFolderId == null) {
+            return finish(file, BackupFileStatus.FAILED, folder?.problem?.let { "Папка не создана: $it" } ?: FOLDER_NOT_READY)
+        }
         libraryNameProblem(file.name)?.let { return finish(file, BackupFileStatus.SKIPPED, it) }
         if (file.size == 0L) return finish(file, BackupFileStatus.SKIPPED, EMPTY)
         if (file.size != null && file.size > MAX_BYTES) return finish(file, BackupFileStatus.SKIPPED, TOO_LARGE)
 
-        val uploading = file.copy(status = BackupFileStatus.UPLOADING)
-        tree.updateFile(uploading)
+        // CHANGED и ARCHIVED сохраняют свой этап на время чтения: гибель процесса его не теряет.
+        val working = if (file.status == BackupFileStatus.PENDING) file.copy(status = BackupFileStatus.UPLOADING) else file
+        if (working !== file) tree.updateFile(working)
         val uri = documents.documentUri(run.treeUri, file.documentId)
         val read = try {
             documents.open(uri).use(::digest)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // Недоступное содержимое не начинает архивирование, которое нельзя закончить.
             Log.w(TAG, "Файл источника не читается: ${e.message}")
-            return finish(uploading, BackupFileStatus.FAILED, UNREADABLE)
+            return finish(working, BackupFileStatus.FAILED, UNREADABLE)
         }
-        if (read.size == 0L) return finish(uploading, BackupFileStatus.SKIPPED, EMPTY)
-        if (read.size > MAX_BYTES) return finish(uploading, BackupFileStatus.SKIPPED, TOO_LARGE)
-        val hashed = uploading.copy(checksum = read.sha256)
+        if (read.size == 0L) return finish(working, BackupFileStatus.SKIPPED, EMPTY)
+        if (read.size > MAX_BYTES) return finish(working, BackupFileStatus.SKIPPED, TOO_LARGE)
+        // Прошлое прочитанное содержимое этого пути: после потерянного ответа upload оно опознаёт свою копию.
+        val prior = file.checksum
+        val hashed = working.copy(checksum = read.sha256)
 
-        // Путь уже связан с копией на Server: при другом содержимом новая версия ждёт архивирования прежней (5.4).
         if (hashed.serverFileId != null && hashed.syncedChecksum != null) {
-            val same = hashed.syncedChecksum.equals(read.sha256, ignoreCase = true)
-            return finish(hashed, if (same) BackupFileStatus.SYNCED else BackupFileStatus.CHANGED, null)
+            if (hashed.syncedChecksum.equals(read.sha256, ignoreCase = true)) return finish(hashed, BackupFileStatus.SYNCED, null)
+            return startArchive(run, account, hashed.copy(status = BackupFileStatus.CHANGED), serverFolderId, budget)
         }
 
-        if (accounts.current() != account) {
-            tree.updateFile(hashed.copy(status = BackupFileStatus.PENDING))
-            return Turn.ACCOUNT_CHANGED
-        }
+        // Новый файл или новая версия после архивирования прежней.
+        if (accounts.current() != account) return back(hashed, Turn.ACCOUNT_CHANGED)
+        // checksum отправляемого содержимого записывается до передачи.
+        tree.updateFile(hashed)
         return when (val result = send(run, hashed, serverFolderId, budget)) {
             is BackupResult.Ok -> uploaded(run, hashed, result.value)
             is BackupResult.Http -> when {
                 result.isFolderManaged -> back(hashed, recheck(run))
-                result.code == 409 -> occupied(hashed, serverFolderId)
+                result.code == 409 -> occupied(hashed, serverFolderId, prior)
                 result.code == 400 -> finish(hashed, BackupFileStatus.SKIPPED, "Сервер отклонил файл: ${result.message}")
                 result.code == 413 -> finish(hashed, BackupFileStatus.SKIPPED, TOO_LARGE)
                 result.code == 404 -> {
@@ -429,6 +461,130 @@ open class FolderBackupEngine @Inject constructor(
                 else -> back(hashed, Turn.RETRY)
             }
         }
+    }
+
+    // --- Архивирование прежней версии ---
+
+    /**
+     * Прежняя версия ищется по сохранённому ID, а не по имени: ID, папка, исходное имя и checksum должны совпасть
+     * с записанными в Room. Архивное имя записывается до PATCH.
+     */
+    private suspend fun startArchive(run: SourceRun, account: BackupAccount, file: BackupFile, serverFolderId: Long, budget: WorkBudget): Turn {
+        val oldId = file.serverFileId!!
+        val oldChecksum = file.syncedChecksum!!.lowercase()
+        if (accounts.current() != account) return back(file, Turn.ACCOUNT_CHANGED)
+        when (val result = remote.file(oldId)) {
+            is BackupResult.Ok -> {
+                val dto = result.value
+                val expected = dto.id == oldId && dto.folderId == serverFolderId && dto.originalFilename == file.name &&
+                    dto.checksum?.lowercase() == oldChecksum
+                if (!expected) return finish(file, BackupFileStatus.CONFLICT, ARCHIVE_MISMATCH)
+            }
+            is BackupResult.Http ->
+                return if (result.code == 404) finish(file, BackupFileStatus.CONFLICT, ARCHIVE_SOURCE_MISSING) else back(file, Turn.RETRY)
+            is BackupResult.Network -> return back(file, Turn.RETRY)
+        }
+        val name = ArchiveNames.name(file.name, ArchiveNames.stamp(wallClock()), 1)
+            ?: return finish(file, BackupFileStatus.CONFLICT, ARCHIVE_NAME_INVALID)
+        val archiving = file.copy(
+            status = BackupFileStatus.ARCHIVING, failureReason = null,
+            archiveName = name, archiveFileId = oldId, archiveChecksum = oldChecksum
+        )
+        tree.updateFile(archiving)
+        return rename(run, account, archiving, serverFolderId, budget, atOriginal = true)
+    }
+
+    /**
+     * PATCH прежней версии на сохранённое архивное имя; [atOriginal] — исходное имя только что подтверждено чтением.
+     * Неизвестный результат (обрыв, 5xx) решается чтением файла по ID. Занятое имя: сначала проверка, не переименован
+     * ли уже именно этот файл, затем следующее имя, записанное до PATCH.
+     */
+    private suspend fun rename(
+        run: SourceRun,
+        account: BackupAccount,
+        file: BackupFile,
+        serverFolderId: Long,
+        budget: WorkBudget,
+        atOriginal: Boolean
+    ): Turn {
+        var current = file
+        var confirmed = atOriginal
+        while (true) {
+            if (!confirmed) {
+                when (archiveState(current, serverFolderId)) {
+                    ArchiveState.DONE -> return archived(run, account, current, budget)
+                    ArchiveState.ORIGINAL -> Unit
+                    ArchiveState.MISSING -> return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_SOURCE_MISSING)
+                    ArchiveState.MISMATCH -> return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_MISMATCH)
+                    ArchiveState.UNKNOWN -> return back(current, Turn.RETRY)
+                }
+            }
+            if (accounts.current() != account) return back(current, Turn.ACCOUNT_CHANGED)
+            val result = remote.rename(current.archiveFileId!!, current.archiveName!!, run.source.sourceUuid)
+            when {
+                result is BackupResult.Ok -> {
+                    val dto = result.value
+                    if (dto.id == current.archiveFileId && dto.originalFilename == current.archiveName) {
+                        return archived(run, account, current, budget)
+                    }
+                    // Неожиданный ответ: следующий прогон решит по состоянию Server.
+                    return back(current, Turn.RETRY)
+                }
+                result is BackupResult.Http && result.isFolderManaged -> return back(current, recheck(run))
+                result is BackupResult.Http && result.code == 409 -> when (archiveState(current, serverFolderId)) {
+                    ArchiveState.DONE -> return archived(run, account, current, budget)
+                    ArchiveState.ORIGINAL -> {
+                        val next = ArchiveNames.next(current.name, current.archiveName!!)
+                            ?: return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_NAME_TAKEN)
+                        current = current.copy(archiveName = next)
+                        tree.updateFile(current)
+                        confirmed = true
+                    }
+                    ArchiveState.MISSING -> return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_SOURCE_MISSING)
+                    ArchiveState.MISMATCH -> return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_MISMATCH)
+                    ArchiveState.UNKNOWN -> return back(current, Turn.RETRY)
+                }
+                result is BackupResult.Http && result.code == 404 ->
+                    return finish(current, BackupFileStatus.CONFLICT, ARCHIVE_SOURCE_MISSING)
+                result is BackupResult.Http && result.code == 400 ->
+                    return finish(current, BackupFileStatus.CONFLICT, "Сервер отклонил имя прежней версии: ${result.message}")
+                else -> {
+                    // Результат PATCH неизвестен: ни успехом, ни отказом без чтения состояния Server он не считается.
+                    currentCoroutineContext().ensureActive()
+                    return if (archiveState(current, serverFolderId) == ArchiveState.DONE) archived(run, account, current, budget)
+                    else back(current, Turn.RETRY)
+                }
+            }
+        }
+    }
+
+    private suspend fun archiveState(file: BackupFile, serverFolderId: Long): ArchiveState =
+        when (val result = remote.file(file.archiveFileId!!)) {
+            is BackupResult.Ok -> {
+                val dto = result.value
+                when {
+                    dto.id != file.archiveFileId || dto.folderId != serverFolderId ||
+                        dto.checksum?.lowercase() != file.archiveChecksum -> ArchiveState.MISMATCH
+                    dto.originalFilename == file.archiveName -> ArchiveState.DONE
+                    dto.originalFilename == file.name -> ArchiveState.ORIGINAL
+                    else -> ArchiveState.MISMATCH
+                }
+            }
+            is BackupResult.Http -> if (result.code == 404) ArchiveState.MISSING else ArchiveState.UNKNOWN
+            is BackupResult.Network -> ArchiveState.UNKNOWN
+        }
+
+    /**
+     * Переименование подтверждено: связь с прежней версией снимается, поэтому повторного переименования не будет.
+     * Новая версия отправляется сразу; при сбое строка остаётся ARCHIVED.
+     */
+    private suspend fun archived(run: SourceRun, account: BackupAccount, file: BackupFile, budget: WorkBudget): Turn {
+        val archived = file.copy(status = BackupFileStatus.ARCHIVED, serverFileId = null, syncedChecksum = null, failureReason = null)
+        tree.updateFile(archived)
+        Log.i(TAG, "Прежняя версия ${file.archiveFileId} переименована в ${file.archiveName}")
+        // Исчезнувший локально файл новой версии не получит.
+        if (budget.isExhausted() || archived.missingSince != null) return Turn.PROGRESS
+        return processFile(run, account, archived, budget)
     }
 
     /** Одна немедленная повторная отправка после обрыва: повтор того же имени и содержимого Server не дублирует. */
@@ -454,28 +610,37 @@ open class FolderBackupEngine @Inject constructor(
         val accepted = dto.checksum?.lowercase()
         val after = documents.stat(run.treeUri, file.documentId)
         val stable = after != null && after.size == file.size && after.lastModified == file.lastModified
+        // Принятая копия — версия этого пути, даже если файл успел измениться: следующая итерация архивирует её.
+        val linked = file.copy(serverFileId = id, syncedChecksum = accepted, archiveName = null, archiveFileId = null, archiveChecksum = null)
         return if (accepted == file.checksum && stable) {
-            finish(file.copy(serverFileId = id, syncedChecksum = accepted), BackupFileStatus.SYNCED, null)
+            finish(linked, BackupFileStatus.SYNCED, null)
         } else {
-            finish(file.copy(serverFileId = id, syncedChecksum = accepted), BackupFileStatus.FAILED, CHANGED_DURING_UPLOAD)
+            finish(linked, BackupFileStatus.FAILED, CHANGED_DURING_UPLOAD)
         }
     }
 
     /**
-     * 409 без FOLDER_MANAGED: имя занято. В активное дерево пишет только резервирование этого источника, поэтому
-     * файл с тем же именем — прежняя копия этого пути: связь сохраняется, при другом содержимом строка ждёт 5.4.
-     * Имя, занятое папкой, — конфликт без изменений на Server.
+     * 409 без FOLDER_MANAGED: имя занято. Файл с тем же именем связывается, только если его содержимое читалось
+     * из этого пути: текущее чтение или прошлое (отправка, ответ на которую потерян). Одного совпадения имени
+     * недостаточно: файл с неизвестным содержимым или папка — конфликт без изменений на Server.
      */
-    private suspend fun occupied(file: BackupFile, folderId: Long): Turn {
+    private suspend fun occupied(file: BackupFile, folderId: Long, prior: String?): Turn {
         var page = 0
         while (true) {
             when (val result = remote.files(folderId, page)) {
                 is BackupResult.Ok -> {
                     val same = result.value.items.orEmpty().firstOrNull { it.originalFilename == file.name && (it.id ?: 0) > 0 }
                     if (same != null) {
-                        val linked = file.copy(serverFileId = same.id, syncedChecksum = same.checksum?.lowercase())
-                        val equal = linked.syncedChecksum == file.checksum
-                        return finish(linked, if (equal) BackupFileStatus.SYNCED else BackupFileStatus.CHANGED, null)
+                        val checksum = same.checksum?.lowercase()
+                        val linked = file.copy(
+                            serverFileId = same.id, syncedChecksum = checksum,
+                            archiveName = null, archiveFileId = null, archiveChecksum = null
+                        )
+                        return when {
+                            checksum != null && checksum == file.checksum -> finish(linked, BackupFileStatus.SYNCED, null)
+                            checksum != null && checksum.equals(prior, ignoreCase = true) -> finish(linked, BackupFileStatus.CHANGED, null)
+                            else -> finish(file, BackupFileStatus.CONFLICT, FILE_CONTENT_UNKNOWN)
+                        }
                     }
                     if (!result.value.hasNext) return finish(file, BackupFileStatus.CONFLICT, FILE_NAME_TAKEN)
                     page++
@@ -487,8 +652,10 @@ open class FolderBackupEngine @Inject constructor(
 
     private suspend fun finish(file: BackupFile, status: BackupFileStatus, reason: String?): Turn {
         val failed = status == BackupFileStatus.FAILED || status == BackupFileStatus.CONFLICT || status == BackupFileStatus.SKIPPED
+        // Подтверждённая версия завершает архивирование: сведения о прежней версии больше не нужны.
+        val settled = if (status == BackupFileStatus.SYNCED) file.copy(archiveName = null, archiveFileId = null, archiveChecksum = null) else file
         tree.updateFile(
-            file.copy(
+            settled.copy(
                 status = status,
                 failureReason = reason,
                 retryCount = if (failed) file.retryCount + 1 else 0,
@@ -498,9 +665,10 @@ open class FolderBackupEngine @Inject constructor(
         return Turn.PROGRESS
     }
 
-    /** Строка возвращается в очередь без изменения сведений; ход останавливается с исходом [turn]. */
+    /** Строка возвращается в очередь без изменения сведений и этапа архивирования; ход останавливается с исходом [turn]. */
     private suspend fun back(file: BackupFile, turn: Turn): Turn {
-        tree.updateFile(file.copy(status = BackupFileStatus.PENDING))
+        val queued = if (file.status == BackupFileStatus.UPLOADING) BackupFileStatus.PENDING else file.status
+        tree.updateFile(file.copy(status = queued))
         return if (turn == Turn.PROGRESS) Turn.RETRY else turn
     }
 

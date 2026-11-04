@@ -15,10 +15,12 @@ object ApiPaths {
     const val FILES_UPLOAD = "$FILES/upload"
     const val FILES_CHECKSUMS_EXISTS = "$FILES/checksums/exists"
     const val FILES_DOWNLOAD = "$FILES/{id}/download"
+    const val FILE_ID = "$FILES/{id}"
 
     const val FOLDERS = "$API_V1/folders"
     const val FOLDERS_ROOT = "$FOLDERS/root"
     const val FOLDERS_CAMERA = "$FOLDERS/camera"
     const val FOLDERS_BACKUP = "$FOLDERS/backup"
     const val FOLDERS_CHILDREN = "$FOLDERS/{id}/children"
+    const val FOLDER_BACKUP_SOURCE = "$FOLDERS/{id}/backup"
 }
