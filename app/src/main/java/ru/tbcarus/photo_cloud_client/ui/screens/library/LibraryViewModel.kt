@@ -47,6 +47,20 @@ class LibraryViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
 
+    // Вид — состояние экрана, а не каталога: загрузка папки и смена контекста его не сбрасывают. Только в памяти процесса.
+    private val _gridView = MutableStateFlow(false)
+    /** true — плитка, false — список (по умолчанию). */
+    val gridView: StateFlow<Boolean> = _gridView.asStateFlow()
+
+    /**
+     * Переключает вид. Индексы элементов в списке и плитке совпадают (папки, затем файлы), поэтому видимая строка
+     * сохраняется; смещение внутри строки у видов разное и сбрасывается. Каталог заново не запрашивается.
+     */
+    fun toggleView(firstVisibleIndex: Int) {
+        saveScroll(firstVisibleIndex, 0)
+        _gridView.value = !_gridView.value
+    }
+
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
 

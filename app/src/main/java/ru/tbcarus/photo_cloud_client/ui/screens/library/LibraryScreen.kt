@@ -1,5 +1,17 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.library
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,6 +34,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -106,20 +119,31 @@ import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 private const val LOAD_MORE_THRESHOLD = 10
 private const val DISABLED_ALPHA = 0.38f
 private val THUMBNAIL_SIZE = 48.dp
+private val ICON_SIZE = 24.dp
+private val TILE_MIN_WIDTH = 120.dp
+private val TILE_ICON_SIZE = 48.dp
+
+// Метки для UI-тестов: по ним проверяются вид, значки и миниатюры.
+internal const val GRID_TAG = "library-grid"
+internal const val LIST_TAG = "library-list"
+internal const val TILE_TAG_PREFIX = "tile-"
+internal const val THUMBNAIL_TAG_PREFIX = "thumbnail-"
+internal const val FILE_ICON_TAG_PREFIX = "file-icon-"
+internal const val FOLDER_ICON_TAG_PREFIX = "folder-icon-"
 private const val ITEM_NAMES_SHOWN = 5
 
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenNetwork: () -> Unit,
-    onOpenLogin: () -> Unit
+    onOpenLogin: () -> Unit,
+    thumbnails: LibraryThumbnails = rememberLibraryThumbnails()
 ) {
     val state by viewModel.uiState.collectAsState()
     val transfer by viewModel.transferState.collectAsState()
-    val appContext = LocalContext.current.applicationContext
-    val thumbnails = remember(appContext) {
-        EntryPointAccessors.fromApplication(appContext, ThumbnailsEntryPoint::class.java).libraryThumbnails()
-    }
+    val gridView by viewModel.gridView.collectAsState()
+    // Выбор назначения всегда показывается списком; выбранный вид возвращается после него.
+    val showGrid = gridView && !state.picking
 
     // Назначение запоминается до системного выбора: после гибели процесса открытая папка была бы уже другой.
     var destinationId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -166,9 +190,17 @@ fun LibraryScreen(
     }
 
     // Вне LazyColumn: при загрузке списка нет, а положение нужно сохранить при смене вкладки.
-    val listState = remember(state.contentVersion) { LazyListState(viewModel.scrollIndex, viewModel.scrollOffset) }
-    DisposableEffect(listState) {
-        onDispose { viewModel.saveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) }
+    // Состояние прокрутки своё у каждого вида; при переключении позицию передаёт toggleView.
+    val listState = remember(state.contentVersion, showGrid) { LazyListState(viewModel.scrollIndex, viewModel.scrollOffset) }
+    val gridState = remember(state.contentVersion, showGrid) { LazyGridState(viewModel.scrollIndex, viewModel.scrollOffset) }
+    DisposableEffect(listState, gridState) {
+        onDispose {
+            if (showGrid) {
+                viewModel.saveScroll(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+            } else {
+                viewModel.saveScroll(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+            }
+        }
     }
 
     Column(
@@ -179,6 +211,10 @@ fun LibraryScreen(
         LibraryHeader(
             state = state,
             transferActive = transfer.isActive,
+            gridView = gridView,
+            onToggleView = {
+                viewModel.toggleView(if (showGrid) gridState.firstVisibleItemIndex else listState.firstVisibleItemIndex)
+            },
             onRefresh = viewModel::refresh,
             onUp = viewModel::navigateUp,
             onUpload = ::startUpload,
@@ -280,7 +316,11 @@ fun LibraryScreen(
                     if (state.isEmpty) {
                         StateMessage(text = "Папка пуста")
                     } else {
-                        LibraryList(state, listState, viewModel, downloadEnabled = !transfer.isActive, thumbnails = thumbnails)
+                        if (showGrid) {
+                            LibraryGrid(state, gridState, viewModel, downloadEnabled = !transfer.isActive, thumbnails = thumbnails)
+                        } else {
+                            LibraryList(state, listState, viewModel, downloadEnabled = !transfer.isActive, thumbnails = thumbnails)
+                        }
                     }
             }
         }
@@ -291,6 +331,8 @@ fun LibraryScreen(
 private fun LibraryHeader(
     state: LibraryUiState,
     transferActive: Boolean,
+    gridView: Boolean,
+    onToggleView: () -> Unit,
     onRefresh: () -> Unit,
     onUp: () -> Unit,
     onUpload: (folder: Boolean) -> Unit,
@@ -303,6 +345,14 @@ private fun LibraryHeader(
             modifier = Modifier.weight(1f)
         )
         if (state.canCreateFolder) AddMenu(uploadEnabled = state.canUpload && !transferActive, onUpload, onCreateFolder)
+        // Значок показывает вид, в который переключит кнопка. Во время выбора назначения вид не меняется.
+        IconButton(onClick = onToggleView, enabled = !state.picking) {
+            if (gridView) {
+                Icon(Icons.AutoMirrored.Filled.ViewList, contentDescription = "Показать списком")
+            } else {
+                Icon(Icons.Default.GridView, contentDescription = "Показать плиткой")
+            }
+        }
         val canRefresh = state.status != LibraryStatus.NoServer && state.status != LibraryStatus.NoSession
         IconButton(onClick = onRefresh, enabled = canRefresh) {
             Icon(Icons.Default.Refresh, contentDescription = "Обновить")
@@ -401,17 +451,9 @@ private fun LibraryList(
     val inCamera = state.currentFolder?.isCamera == true
     val relocation = state.relocation
     val selection = state.selection
-    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag(LIST_TAG)) {
         items(state.folders, key = { "folder-${it.id}" }) { folder ->
-            // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
-            val actions = listOfNotNull(
-                RowAction("Переименовать", { viewModel.startRename(folder) }).takeIf { state.canRename(folder) },
-                RowAction("Переместить", {
-                    keepPosition()
-                    viewModel.startMove(folder)
-                }).takeIf { state.canMove(folder) },
-                RowAction("Удалить", { viewModel.startDelete(folder) }, destructive = true).takeIf { state.canDelete(folder) }
-            )
+            val actions = folderActions(state, folder, viewModel, ::keepPosition)
             val selectable = state.canSelect(folder)
             FolderRow(
                 folder = folder,
@@ -434,20 +476,7 @@ private fun LibraryList(
             HorizontalDivider()
         }
         items(state.files, key = { "file-${it.id}" }) { file ->
-            // При выборе назначения файлы видны для сверки имён, но действий с ними нет.
-            val actions = if (state.picking) emptyList() else listOfNotNull(
-                RowAction("Скачать", { viewModel.download(file) }, enabled = downloadEnabled && file.id != null),
-                RowAction("Переименовать", { viewModel.startRename(file) }).takeIf { state.canRename(file) },
-                RowAction("Переместить", {
-                    keepPosition()
-                    viewModel.startMove(file)
-                }).takeIf { state.canMove(file) },
-                RowAction("Копировать", {
-                    keepPosition()
-                    viewModel.startCopy(file)
-                }).takeIf { state.canCopy(file) },
-                RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
-            )
+            val actions = fileActions(state, file, viewModel, downloadEnabled, ::keepPosition)
             val selectable = state.canSelect(file)
             FileRow(
                 file = file,
@@ -473,30 +502,235 @@ private fun LibraryList(
             HorizontalDivider()
         }
         if (state.isLoadingMore) {
-            item(key = "loading-more") {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                }
-            }
+            item(key = "loading-more") { LoadingMore() }
         }
         state.loadMoreError?.let { error ->
-            item(key = "load-more-error") {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Text(text = error, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
-                    Spacer(Modifier.height(4.dp))
-                    OutlinedButton(onClick = viewModel::loadNextPage) { Text("Повторить") }
+            item(key = "load-more-error") { LoadMoreError(error, viewModel::loadNextPage) }
+        }
+    }
+}
+
+// Только разрешённые действия: у системных папок и папок активного дерева меню нет.
+private fun folderActions(
+    state: LibraryUiState,
+    folder: FolderDto,
+    viewModel: LibraryViewModel,
+    keepPosition: () -> Unit
+): List<RowAction> = listOfNotNull(
+    RowAction("Переименовать", { viewModel.startRename(folder) }).takeIf { state.canRename(folder) },
+    RowAction("Переместить", {
+        keepPosition()
+        viewModel.startMove(folder)
+    }).takeIf { state.canMove(folder) },
+    RowAction("Удалить", { viewModel.startDelete(folder) }, destructive = true).takeIf { state.canDelete(folder) }
+)
+
+// При выборе назначения файлы видны для сверки имён, но действий с ними нет.
+private fun fileActions(
+    state: LibraryUiState,
+    file: FileItemDto,
+    viewModel: LibraryViewModel,
+    downloadEnabled: Boolean,
+    keepPosition: () -> Unit
+): List<RowAction> = if (state.picking) emptyList() else listOfNotNull(
+    RowAction("Скачать", { viewModel.download(file) }, enabled = downloadEnabled && file.id != null),
+    RowAction("Переименовать", { viewModel.startRename(file) }).takeIf { state.canRename(file) },
+    RowAction("Переместить", {
+        keepPosition()
+        viewModel.startMove(file)
+    }).takeIf { state.canMove(file) },
+    RowAction("Копировать", {
+        keepPosition()
+        viewModel.startCopy(file)
+    }).takeIf { state.canCopy(file) },
+    RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
+)
+
+@Composable
+private fun LoadingMore() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+    }
+}
+
+@Composable
+private fun LoadMoreError(error: String, onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(text = error, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(4.dp))
+        OutlinedButton(onClick = onRetry) { Text("Повторить") }
+    }
+}
+
+/**
+ * Плитка того же каталога: те же элементы, ключи, порядок (папки, затем файлы), действия, выделение и подгрузка
+ * страниц, что у списка. Выбор назначения всегда показывается списком, поэтому здесь его нет.
+ */
+@Composable
+private fun LibraryGrid(
+    state: LibraryUiState,
+    gridState: LazyGridState,
+    viewModel: LibraryViewModel,
+    downloadEnabled: Boolean,
+    thumbnails: LibraryThumbnails
+) {
+    val thumbnailScope by thumbnails.currentScope.collectAsState()
+    val nearEnd by remember(gridState) {
+        derivedStateOf {
+            val layout = gridState.layoutInfo
+            val last = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
+            last >= 0 && last >= layout.totalItemsCount - LOAD_MORE_THRESHOLD
+        }
+    }
+    LaunchedEffect(nearEnd, state.hasNext, state.isLoadingMore, state.loadMoreError) {
+        if (nearEnd) viewModel.onListEndReached()
+    }
+
+    fun keepPosition() = viewModel.saveScroll(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+
+    val selection = state.selection
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(TILE_MIN_WIDTH),
+        state = gridState,
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(GRID_TAG),
+        contentPadding = PaddingValues(vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        gridItems(state.folders, key = { "folder-${it.id}" }) { folder ->
+            val selectable = state.canSelect(folder)
+            LibraryTile(
+                name = folder.name,
+                actions = if (selection != null) emptyList() else folderActions(state, folder, viewModel, ::keepPosition),
+                selected = selection?.takeIf { selectable }?.contains(folder),
+                onClick = {
+                    when {
+                        selection == null -> viewModel.openFolder(folder)
+                        selectable -> viewModel.toggleSelection(folder)
+                    }
+                },
+                onLongClick = if (selectable) {
+                    { viewModel.toggleSelection(folder) }
+                } else {
+                    null
                 }
+            ) {
+                FolderIcon(folderKind(folder), size = TILE_ICON_SIZE)
             }
+        }
+        gridItems(state.files, key = { "file-${it.id}" }) { file ->
+            val selectable = state.canSelect(file)
+            LibraryTile(
+                name = file.originalFilename.orEmpty(),
+                actions = if (selection != null) emptyList() else fileActions(state, file, viewModel, downloadEnabled, ::keepPosition),
+                selected = selection?.takeIf { selectable }?.contains(file),
+                // Вне выделения нажатие на файл ничего не открывает: просмотра пока нет.
+                onClick = if (selection != null && selectable) {
+                    { viewModel.toggleSelection(file) }
+                } else {
+                    null
+                },
+                onLongClick = if (selectable) {
+                    { viewModel.toggleSelection(file) }
+                } else {
+                    null
+                }
+            ) {
+                FileThumbnail(
+                    file = file,
+                    thumbnail = remember(file.id, file.checksum, file.mimeType, thumbnailScope) {
+                        Thumbnail.of(file, thumbnailScope)
+                    },
+                    thumbnails = thumbnails,
+                    modifier = Modifier.fillMaxSize(),
+                    iconSize = TILE_ICON_SIZE
+                )
+            }
+        }
+        if (state.isLoadingMore) {
+            item(key = "loading-more", span = { GridItemSpan(maxLineSpan) }) { LoadingMore() }
+        }
+        state.loadMoreError?.let { error ->
+            item(key = "load-more-error", span = { GridItemSpan(maxLineSpan) }) {
+                LoadMoreError(error, viewModel::loadNextPage)
+            }
+        }
+    }
+}
+
+/**
+ * Плитка объекта: квадратная область превью (миниатюра вписывается без искажения) и имя до двух строк.
+ * [selected] — отметка в режиме выделения, null — объект не выделяется; выделенная плитка обведена и подсвечена.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LibraryTile(
+    name: String,
+    actions: List<RowAction>,
+    selected: Boolean?,
+    onClick: (() -> Unit)?,
+    onLongClick: (() -> Unit)?,
+    preview: @Composable () -> Unit
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val border = if (selected == true) {
+        BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+    } else {
+        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .border(border, shape)
+            .background(
+                if (selected == true) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface
+            )
+            .combinedClickable(
+                enabled = onClick != null || onLongClick != null,
+                onClick = { onClick?.invoke() },
+                onLongClick = onLongClick
+            )
+            .testTag(TILE_TAG_PREFIX + name)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .padding(6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            preview()
+            if (selected != null) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onClick?.invoke() },
+                    modifier = Modifier.align(Alignment.TopStart)
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 8.dp)) {
+            Text(
+                text = name,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                minLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (selected == null) ActionsMenu(actions) else Spacer(Modifier.height(48.dp))
         }
     }
 }
@@ -632,20 +866,23 @@ private fun ActionsMenu(actions: List<RowAction>) {
 }
 
 @Composable
-private fun FolderIcon(kind: FolderKind) {
+private fun FolderIcon(kind: FolderKind, size: Dp = ICON_SIZE) {
     val tint = MaterialTheme.colorScheme.primary
+    val modifier = Modifier
+        .size(size)
+        .testTag(FOLDER_ICON_TAG_PREFIX + kind.name)
     when (kind) {
-        FolderKind.CAMERA -> Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = tint)
-        FolderKind.AUTO_UPLOADS -> Icon(Icons.Default.CloudUpload, contentDescription = null, tint = tint)
-        FolderKind.FOLDER -> Icon(Icons.Default.Folder, contentDescription = null, tint = tint)
+        FolderKind.CAMERA -> Icon(Icons.Default.PhotoCamera, contentDescription = null, tint = tint, modifier = modifier)
+        FolderKind.AUTO_UPLOADS -> Icon(Icons.Default.CloudUpload, contentDescription = null, tint = tint, modifier = modifier)
+        FolderKind.FOLDER -> Icon(Icons.Default.Folder, contentDescription = null, tint = tint, modifier = modifier)
         // В наборе значков Compose нет Folder Sync: папка с отметкой синхронизации.
-        FolderKind.ACTIVE_SOURCE -> Box(modifier = Modifier.size(24.dp)) {
-            Icon(Icons.Default.Folder, contentDescription = null, tint = tint)
+        FolderKind.ACTIVE_SOURCE -> Box(modifier = modifier) {
+            Icon(Icons.Default.Folder, contentDescription = null, tint = tint, modifier = Modifier.fillMaxSize())
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
                 color = MaterialTheme.colorScheme.surface,
                 modifier = Modifier
-                    .size(14.dp)
+                    .size(size * 14 / 24)
                     .align(Alignment.BottomEnd)
             ) {
                 Icon(Icons.Default.Sync, contentDescription = null, tint = tint, modifier = Modifier.padding(1.dp))
@@ -1109,16 +1346,30 @@ private fun StateMessage(text: String, action: String? = null, onAction: () -> U
     }
 }
 
+@Composable
+private fun rememberLibraryThumbnails(): LibraryThumbnails {
+    val appContext = LocalContext.current.applicationContext
+    return remember(appContext) {
+        EntryPointAccessors.fromApplication(appContext, ThumbnailsEntryPoint::class.java).libraryThumbnails()
+    }
+}
+
 /**
  * Слот 48 dp слева от имени файла: миниатюра JPEG/PNG/WebP с сохранением пропорций, пока она грузится —
  * нейтральная подложка, при ошибке и для остальных типов — значок типа. Нажатия обрабатывает строка.
  */
 @Composable
-private fun FileThumbnail(file: FileItemDto, thumbnail: Thumbnail?, thumbnails: LibraryThumbnails) {
-    Box(Modifier.size(THUMBNAIL_SIZE), contentAlignment = Alignment.Center) {
+private fun FileThumbnail(
+    file: FileItemDto,
+    thumbnail: Thumbnail?,
+    thumbnails: LibraryThumbnails,
+    modifier: Modifier = Modifier.size(THUMBNAIL_SIZE),
+    iconSize: Dp = ICON_SIZE
+) {
+    Box(modifier, contentAlignment = Alignment.Center) {
         // Неудача 404/415/422 запоминается до смены контекста: повторный показ строки не повторяет запрос.
         if (thumbnail == null || thumbnails.isFailed(thumbnail)) {
-            FileTypeIcon(file)
+            FileTypeIcon(file, iconSize)
             return@Box
         }
         val context = LocalContext.current
@@ -1127,20 +1378,23 @@ private fun FileThumbnail(file: FileItemDto, thumbnail: Thumbnail?, thumbnails: 
         if (loaded == null) {
             Box(
                 Modifier
-                    .size(THUMBNAIL_SIZE)
+                    .fillMaxSize()
                     .clip(RoundedCornerShape(4.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
             )
         }
         if (loaded == false) {
-            FileTypeIcon(file)
+            FileTypeIcon(file, iconSize)
         } else {
             AsyncImage(
                 model = request,
                 imageLoader = thumbnails.imageLoader,
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.size(THUMBNAIL_SIZE).clip(RoundedCornerShape(4.dp)),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(4.dp))
+                    .testTag(THUMBNAIL_TAG_PREFIX + file.id),
                 onState = { state ->
                     loaded = when (state) {
                         is AsyncImagePainter.State.Success -> true
@@ -1154,11 +1408,14 @@ private fun FileThumbnail(file: FileItemDto, thumbnail: Thumbnail?, thumbnails: 
 }
 
 @Composable
-private fun FileTypeIcon(file: FileItemDto) {
+private fun FileTypeIcon(file: FileItemDto, size: Dp = ICON_SIZE) {
     Icon(
         imageVector = fileIcon(file.fileType),
         contentDescription = null,
-        tint = MaterialTheme.colorScheme.onSurfaceVariant
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .size(size)
+            .testTag(FILE_ICON_TAG_PREFIX + file.id)
     )
 }
 
