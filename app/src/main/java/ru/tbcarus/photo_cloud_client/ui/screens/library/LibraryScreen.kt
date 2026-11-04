@@ -74,6 +74,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import coil3.compose.AsyncImage
+import coil3.compose.AsyncImagePainter
+import dagger.hilt.android.EntryPointAccessors
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -86,6 +94,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.library.thumbnail.LibraryThumbnails
+import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
+import ru.tbcarus.photo_cloud_client.library.thumbnail.ThumbnailScope
+import ru.tbcarus.photo_cloud_client.library.thumbnail.ThumbnailsEntryPoint
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
 import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
 import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
@@ -93,6 +105,7 @@ import ru.tbcarus.photo_cloud_client.ui.components.DisableSourceDialog
 // Следующая страница запрашивается заранее, до появления последней строки.
 private const val LOAD_MORE_THRESHOLD = 10
 private const val DISABLED_ALPHA = 0.38f
+private val THUMBNAIL_SIZE = 48.dp
 private const val ITEM_NAMES_SHOWN = 5
 
 @Composable
@@ -103,6 +116,10 @@ fun LibraryScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val transfer by viewModel.transferState.collectAsState()
+    val appContext = LocalContext.current.applicationContext
+    val thumbnails = remember(appContext) {
+        EntryPointAccessors.fromApplication(appContext, ThumbnailsEntryPoint::class.java).libraryThumbnails()
+    }
 
     // Назначение запоминается до системного выбора: после гибели процесса открытая папка была бы уже другой.
     var destinationId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -263,7 +280,7 @@ fun LibraryScreen(
                     if (state.isEmpty) {
                         StateMessage(text = "Папка пуста")
                     } else {
-                        LibraryList(state, listState, viewModel, downloadEnabled = !transfer.isActive)
+                        LibraryList(state, listState, viewModel, downloadEnabled = !transfer.isActive, thumbnails = thumbnails)
                     }
             }
         }
@@ -362,8 +379,10 @@ private fun LibraryList(
     state: LibraryUiState,
     listState: LazyListState,
     viewModel: LibraryViewModel,
-    downloadEnabled: Boolean
+    downloadEnabled: Boolean,
+    thumbnails: LibraryThumbnails
 ) {
+    val thumbnailScope by thumbnails.currentScope.collectAsState()
     val nearEnd by remember(listState) {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -432,6 +451,10 @@ private fun LibraryList(
             val selectable = state.canSelect(file)
             FileRow(
                 file = file,
+                thumbnail = remember(file.id, file.checksum, file.mimeType, thumbnailScope) {
+                    Thumbnail.of(file, thumbnailScope)
+                },
+                thumbnails = thumbnails,
                 inCamera = inCamera,
                 actions = if (selection != null) emptyList() else actions,
                 dimmed = state.picking,
@@ -500,7 +523,7 @@ private fun FolderRow(
             .alpha(if (blocked == null) 1f else DISABLED_ALPHA)
             .padding(vertical = 4.dp)
     ) {
-        FolderIcon(folderKind(folder))
+        Box(Modifier.width(THUMBNAIL_SIZE), contentAlignment = Alignment.Center) { FolderIcon(folderKind(folder)) }
         Spacer(Modifier.width(12.dp))
         Column(
             modifier = Modifier
@@ -526,6 +549,8 @@ private fun FolderRow(
 @Composable
 private fun FileRow(
     file: FileItemDto,
+    thumbnail: Thumbnail?,
+    thumbnails: LibraryThumbnails,
     inCamera: Boolean,
     actions: List<RowAction>,
     dimmed: Boolean,
@@ -541,11 +566,7 @@ private fun FileRow(
             .alpha(if (dimmed) DISABLED_ALPHA else 1f)
             .padding(vertical = 4.dp)
     ) {
-        Icon(
-            imageVector = fileIcon(file.fileType),
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        FileThumbnail(file, thumbnail, thumbnails)
         Spacer(Modifier.width(12.dp))
         Column(
             modifier = Modifier
@@ -1086,6 +1107,59 @@ private fun StateMessage(text: String, action: String? = null, onAction: () -> U
             Button(onClick = onAction) { Text(action) }
         }
     }
+}
+
+/**
+ * Слот 48 dp слева от имени файла: миниатюра JPEG/PNG/WebP с сохранением пропорций, пока она грузится —
+ * нейтральная подложка, при ошибке и для остальных типов — значок типа. Нажатия обрабатывает строка.
+ */
+@Composable
+private fun FileThumbnail(file: FileItemDto, thumbnail: Thumbnail?, thumbnails: LibraryThumbnails) {
+    Box(Modifier.size(THUMBNAIL_SIZE), contentAlignment = Alignment.Center) {
+        // Неудача 404/415/422 запоминается до смены контекста: повторный показ строки не повторяет запрос.
+        if (thumbnail == null || thumbnails.isFailed(thumbnail)) {
+            FileTypeIcon(file)
+            return@Box
+        }
+        val context = LocalContext.current
+        val request = remember(thumbnail) { thumbnails.request(context, thumbnail) }
+        var loaded by remember(thumbnail) { mutableStateOf<Boolean?>(null) }
+        if (loaded == null) {
+            Box(
+                Modifier
+                    .size(THUMBNAIL_SIZE)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+            )
+        }
+        if (loaded == false) {
+            FileTypeIcon(file)
+        } else {
+            AsyncImage(
+                model = request,
+                imageLoader = thumbnails.imageLoader,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(THUMBNAIL_SIZE).clip(RoundedCornerShape(4.dp)),
+                onState = { state ->
+                    loaded = when (state) {
+                        is AsyncImagePainter.State.Success -> true
+                        is AsyncImagePainter.State.Error -> false
+                        else -> loaded
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileTypeIcon(file: FileItemDto) {
+    Icon(
+        imageVector = fileIcon(file.fileType),
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 private fun fileIcon(fileType: String?): ImageVector = when (fileType) {

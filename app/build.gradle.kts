@@ -16,8 +16,8 @@ android {
         targetSdk = 35
         // Сборка: versionName = A<этап>.<номер сборки в этапе>, versionCode — сквозной номер, растёт с каждой сборкой.
         // Показывается на экране Network.
-        versionCode = 27
-        versionName = "A12.6"
+        versionCode = 28
+        versionName = "A13.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -70,6 +70,11 @@ dependencies {
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // Миниатюры Library. Coil 3.0.4 собран тем же Kotlin 2.0.21; новые версии требуют Kotlin 2.1+.
+    implementation("io.coil-kt.coil3:coil-compose:3.0.4")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
+    implementation("io.coil-kt.coil3:coil-network-cache-control:3.0.4")
 
     // Coroutines (если используешь suspend-функции)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
