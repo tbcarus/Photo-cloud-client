@@ -22,6 +22,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
 import ru.tbcarus.photo_cloud_client.ui.components.bottomNavItems
+import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryImageViewer
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryViewModel
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 
@@ -40,6 +41,7 @@ fun MainScreen(networkViewModel: NetworkViewModel, libraryViewModel: LibraryView
         onDispose { view.keepScreenOn = false }
     }
 
+    Box {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -63,5 +65,8 @@ fun MainScreen(networkViewModel: NetworkViewModel, libraryViewModel: LibraryView
                 libraryViewModel = libraryViewModel
             )
         }
+    }
+    // Полноэкранный просмотр поверх панелей приложения; Library под ним сохраняет папку, прокрутку и выделение.
+    LibraryImageViewer(libraryViewModel)
     }
 }

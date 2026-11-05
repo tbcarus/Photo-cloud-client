@@ -2,6 +2,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
 
 sealed interface LibraryStatus {
     /** Контекст пригоден, загрузка начнётся при открытии экрана. */
@@ -112,6 +113,8 @@ data class LibraryUiState(
     /** Server создаёт папки только в ROOT и USER вне активного дерева: те же папки, что принимают ручную загрузку. */
     val canCreateFolder: Boolean get() = canUpload
     val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
+    /** Последовательность полноэкранного просмотра: загруженные файлы папки, которые можно показать, в порядке Library. */
+    val viewerImages: List<FileItemDto> get() = files.filter(::isViewable)
 
     /**
      * Системные папки (ROOT, Camera, AutoUploads) и корень активного источника не переименовываются, как и всё
@@ -176,3 +179,7 @@ data class LibraryUiState(
             return destinationProblem(relocation, path)
         }
 }
+
+/** Просматриваются JPEG, PNG и WebP (MIME Server по содержимому) с ID и checksum: по нему кешируется оригинал. */
+fun isViewable(file: FileItemDto): Boolean =
+    Thumbnail.isSupported(file.mimeType) && (file.id ?: 0) > 0 && !file.checksum.isNullOrBlank()

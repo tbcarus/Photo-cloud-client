@@ -61,6 +61,33 @@ class LibraryViewModel @Inject constructor(
         _gridView.value = !_gridView.value
     }
 
+    // Открытый в полноэкранном просмотре файл; null — просмотр закрыт. Library под ним сохраняет папку и прокрутку.
+    private val _viewerFileId = MutableStateFlow<Long?>(null)
+    val viewerFileId: StateFlow<Long?> = _viewerFileId.asStateFlow()
+
+    /** Открывает просмотр изображения. В режиме выделения и при выборе назначения нажатие на файл работает по-прежнему. */
+    fun openViewer(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.selecting || state.picking || !isViewable(file)) return
+        _viewerFileId.value = file.id
+    }
+
+    /**
+     * Просмотр перешёл к [fileId]. Вблизи конца загруженной части подгружается следующая страница тем же механизмом,
+     * что у списка; ошибка подгрузки повторяется только кнопкой Library.
+     */
+    fun onViewerPage(fileId: Long) {
+        if (_viewerFileId.value == null) return
+        _viewerFileId.value = fileId
+        val images = _uiState.value.viewerImages
+        val index = images.indexOfFirst { it.id == fileId }
+        if (index >= 0 && images.size - index <= VIEWER_PREFETCH) onListEndReached()
+    }
+
+    fun closeViewer() {
+        _viewerFileId.value = null
+    }
+
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
 
@@ -102,6 +129,8 @@ class LibraryViewModel @Inject constructor(
         // Отказ Server при том же пользователе: после нового входа каталог снова можно запросить.
         if (newContext == context && _uiState.value.status != LibraryStatus.NoSession) return
         context = newContext
+        // Просмотр относится к прежнему серверу и пользователю: закрывается вместе с отменой его загрузки.
+        closeViewer()
         cancelLoads()
         relocationSource = null
         resetScroll()
@@ -835,6 +864,8 @@ class LibraryViewModel @Inject constructor(
         (loaded + page.orEmpty()).filter { it.id != null }.distinctBy { it.id }
 
     private companion object {
+        // За сколько изображений до конца загруженной части просмотр запрашивает следующую страницу.
+        const val VIEWER_PREFETCH = 3
         const val FOLDER_GONE_NOTICE = "Папка удалена или недоступна. Открыт корень."
         const val NOT_FOUND_TEXT = "Объект или папка назначения не найдены: возможно, они удалены или перемещены"
     }

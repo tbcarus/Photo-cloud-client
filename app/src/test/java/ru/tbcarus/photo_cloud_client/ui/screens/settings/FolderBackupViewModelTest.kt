@@ -84,6 +84,10 @@ class FolderBackupViewModelTest {
             ru.tbcarus.photo_cloud_client.backup.FakeScheduler(context)
         )
         viewModel = FolderBackupViewModel(repository, accounts, documents, db.backupTreeDao())
+        // Как на экране: «Добавить папку» доступна только после того, как ViewModel получила аккаунт и список
+        // источников. Первая выдача аккаунта заменяет состояние целиком, и выбор папки, сделанный раньше неё,
+        // стирался бы — под нагрузкой Room выдаёт список позже, чем Dispatchers.IO читает имя папки.
+        runBlocking { await { viewModel.uiState.value.account } }
     }
 
     @After

@@ -1,12 +1,7 @@
 package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import android.app.Application
-import android.content.ComponentName
-import android.content.Intent
-import android.content.IntentFilter
-import org.junit.rules.ExternalResource
 import org.junit.rules.RuleChain
-import org.robolectric.Shadows.shadowOf
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
@@ -89,20 +84,8 @@ class LibraryGridScreenTest {
 
     val compose = createAndroidComposeRule<ComponentActivity>()
 
-    // Без includeAndroidResources манифест ui-test-manifest в тест не попадает: тестовая активность регистрируется здесь.
     @get:Rule
-    val rules: RuleChain = RuleChain.outerRule(object : ExternalResource() {
-        override fun before() {
-            val app = ApplicationProvider.getApplicationContext<Application>()
-            val component = ComponentName(app, ComponentActivity::class.java)
-            val packageManager = shadowOf(app.packageManager)
-            packageManager.addActivityIfNotPresent(component)
-            packageManager.addIntentFilterForActivity(
-                component,
-                IntentFilter(Intent.ACTION_MAIN).apply { addCategory(Intent.CATEGORY_LAUNCHER) }
-            )
-        }
-    }).around(compose)
+    val rules: RuleChain = RuleChain.outerRule(ComposeTestSetup()).around(compose)
 
     private val context = ApplicationProvider.getApplicationContext<Application>()
     private val root = FolderDto(1, null, "root", "ROOT")
@@ -272,15 +255,37 @@ class LibraryGridScreenTest {
     }
 
     @Test
-    fun fileTapOutsideSelectionDoesNothing() {
+    fun tappingImageOpensViewerFromGridAndList() {
         toGrid()
         val before = repository.calls.toList()
 
         tile("photo.jpg").performClick()
         compose.waitForIdle()
+        assertEquals(jpeg.id, viewModel.viewerFileId.value)
+        viewModel.closeViewer()
+        // Документ и HEIC не открываются; запросов каталога нет.
+        tile("doc.pdf").performClick()
+        tile("fake.jpg").performClick()
+        compose.waitForIdle()
+        assertEquals(null, viewModel.viewerFileId.value)
 
+        compose.onNodeWithContentDescription("Показать списком").performClick()
+        compose.onNodeWithText("picture.png").performClick()
+        compose.waitForIdle()
+        assertEquals(png.id, viewModel.viewerFileId.value)
         assertEquals(before, repository.calls)
         compose.onNodeWithText("Выбрано", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun selectionModeTapTogglesInsteadOfOpeningViewer() {
+        toGrid()
+        tile("photo.jpg").performTouchInput { longClick() }
+        tile("picture.png").performClick()
+        compose.waitForIdle()
+
+        assertEquals(null, viewModel.viewerFileId.value)
+        compose.onNodeWithText("Выбрано: 2").assertExists()
     }
 
     @Test

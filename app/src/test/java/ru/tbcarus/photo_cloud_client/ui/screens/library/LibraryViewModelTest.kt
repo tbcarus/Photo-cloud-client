@@ -83,6 +83,8 @@ class LibraryViewModelTest {
 
     @After
     fun tearDown() {
+        // Незакрытая база оставляет фоновые задачи Room, которые мешают следующим тестам.
+        if (dbDelegate.isInitialized()) db.close()
         Dispatchers.resetMain()
     }
 
@@ -99,10 +101,11 @@ class LibraryViewModelTest {
     }
 
     private val disableRemote = FakeDisableRemote()
-    private val db by lazy {
+    private val dbDelegate = lazy {
         Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Application>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
     }
+    private val db by dbDelegate
     private val sources by lazy {
         val context = ApplicationProvider.getApplicationContext<Application>()
         BackupSourceRepository(
@@ -2143,6 +2146,89 @@ class LibraryViewModelTest {
         viewModel.openFolder(autoUploads)
         viewModel.openFolder(source)
         return Triple(autoUploads, source, nestedSource)
+    }
+
+    // --- Полноэкранный просмотр: состояние в ViewModel, Library под ним не меняется.
+
+    private fun photo(id: Long, mime: String = "image/jpeg") =
+        FileItemDto(id = id, originalFilename = "photo$id.jpg", mimeType = mime, checksum = "%064x".format(id))
+
+    @Test
+    fun viewerSequenceContainsOnlyViewableFilesInLibraryOrder() {
+        repository.setFiles(root, 0, page(listOf(photo(10), file(11), photo(12, "image/heic"), photo(13, "image/png"),
+            photo(14, "image/webp"), FileItemDto(id = 15, mimeType = "image/jpeg"))))
+        opened()
+
+        assertEquals(listOf(10L, 13L, 14L), state.viewerImages.map { it.id })
+    }
+
+    @Test
+    fun openingAndClosingViewerKeepsLibraryState() {
+        repository.setChildren(root, alpha)
+        repository.setFiles(root, 0, page(listOf(photo(10), file(11), photo(12))))
+        opened()
+        viewModel.saveScroll(2, 15)
+        val before = state
+        val calls = repository.calls.toList()
+
+        viewModel.openViewer(file(11))
+        assertNull(viewModel.viewerFileId.value)
+        viewModel.openViewer(photo(12))
+        assertEquals(12L, viewModel.viewerFileId.value)
+        viewModel.closeViewer()
+
+        assertNull(viewModel.viewerFileId.value)
+        assertEquals(before, state)
+        assertEquals(calls, repository.calls)
+        assertEquals(2, viewModel.scrollIndex)
+    }
+
+    @Test
+    fun selectionModeTogglesInsteadOfOpeningViewer() {
+        repository.setFiles(root, 0, page(listOf(photo(10), photo(12))))
+        opened()
+        viewModel.toggleSelection(photo(10))
+
+        viewModel.openViewer(photo(12))
+
+        assertNull(viewModel.viewerFileId.value)
+        assertEquals(setOf(10L), state.selection!!.files.keys)
+    }
+
+    @Test
+    fun viewerNearEndOfLoadedImagesLoadsNextPageOnce() {
+        repository.setFiles(root, 0, page((1L..10L).map { photo(it) }, hasNext = true))
+        repository.setFiles(root, 1, page((11L..12L).map { photo(it) }))
+        opened()
+        viewModel.openViewer(photo(1))
+
+        viewModel.onViewerPage(5)
+        assertFalse(repository.calls.contains("files:1:1"))
+        viewModel.onViewerPage(8)
+
+        assertEquals(1, repository.calls.count { it == "files:1:1" })
+        assertEquals((1L..12L).toList(), state.viewerImages.map { it.id })
+        assertEquals(8L, viewModel.viewerFileId.value)
+        viewModel.onViewerPage(11)
+        assertEquals(1, repository.calls.count { it == "files:1:1" })
+    }
+
+    @Test
+    fun accountOrServerChangeClosesViewer() {
+        repository.setFiles(root, 0, page(listOf(photo(10))))
+        opened()
+        viewModel.openViewer(photo(10))
+
+        tokens.saveTokens(tokensOf("bob"))
+        assertNull(viewModel.viewerFileId.value)
+
+        viewModel.ensureLoaded()
+        viewModel.openViewer(photo(10))
+        baseUrlProvider.baseUrl = SERVER_B
+        assertNull(viewModel.viewerFileId.value)
+        // Поздний переход страницы прежнего просмотра его не открывает.
+        viewModel.onViewerPage(10)
+        assertNull(viewModel.viewerFileId.value)
     }
 
     /** DELETE без HTTP: исход задаёт тест. */

@@ -488,11 +488,7 @@ private fun LibraryList(
                 actions = if (selection != null) emptyList() else actions,
                 dimmed = state.picking,
                 selected = selection?.takeIf { selectable }?.contains(file),
-                onClick = if (selection != null && selectable) {
-                    { viewModel.toggleSelection(file) }
-                } else {
-                    null
-                },
+                onClick = fileClick(state, file, selectable, viewModel),
                 onLongClick = if (selectable) {
                     { viewModel.toggleSelection(file) }
                 } else {
@@ -509,6 +505,23 @@ private fun LibraryList(
         }
     }
 }
+
+/**
+ * Нажатие на файл: в режиме выделения переключает отметку, иначе открывает просмотр изображения.
+ * При выборе назначения и у файлов, которые нельзя показать, нажатие ничего не делает.
+ */
+private fun fileClick(state: LibraryUiState, file: FileItemDto, selectable: Boolean, viewModel: LibraryViewModel): (() -> Unit)? =
+    when {
+        state.selection != null -> if (selectable) {
+            { viewModel.toggleSelection(file) }
+        } else {
+            null
+        }
+        !state.picking && isViewable(file) -> {
+            { viewModel.openViewer(file) }
+        }
+        else -> null
+    }
 
 // Только разрешённые действия: у системных папок и папок активного дерева меню нет.
 private fun folderActions(
@@ -636,12 +649,7 @@ private fun LibraryGrid(
                 name = file.originalFilename.orEmpty(),
                 actions = if (selection != null) emptyList() else fileActions(state, file, viewModel, downloadEnabled, ::keepPosition),
                 selected = selection?.takeIf { selectable }?.contains(file),
-                // Вне выделения нажатие на файл ничего не открывает: просмотра пока нет.
-                onClick = if (selection != null && selectable) {
-                    { viewModel.toggleSelection(file) }
-                } else {
-                    null
-                },
+                onClick = fileClick(state, file, selectable, viewModel),
                 onLongClick = if (selectable) {
                     { viewModel.toggleSelection(file) }
                 } else {
@@ -778,7 +786,7 @@ private fun FolderRow(
     }
 }
 
-// Вне режима выделения нажатие на строку ничего не делает (оставлено для будущего просмотра); действия — в меню строки.
+// Нажатие на строку открывает просмотр изображения, в режиме выделения — переключает отметку; действия — в меню строки.
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
@@ -1347,7 +1355,7 @@ private fun StateMessage(text: String, action: String? = null, onAction: () -> U
 }
 
 @Composable
-private fun rememberLibraryThumbnails(): LibraryThumbnails {
+internal fun rememberLibraryThumbnails(): LibraryThumbnails {
     val appContext = LocalContext.current.applicationContext
     return remember(appContext) {
         EntryPointAccessors.fromApplication(appContext, ThumbnailsEntryPoint::class.java).libraryThumbnails()
