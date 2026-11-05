@@ -23,6 +23,7 @@ import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
 import ru.tbcarus.photo_cloud_client.ui.components.bottomNavItems
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryImageViewer
+import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryVideoPlayer
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryViewModel
 import ru.tbcarus.photo_cloud_client.ui.screens.network.NetworkViewModel
 
@@ -68,5 +69,6 @@ fun MainScreen(networkViewModel: NetworkViewModel, libraryViewModel: LibraryView
     }
     // Полноэкранный просмотр поверх панелей приложения; Library под ним сохраняет папку, прокрутку и выделение.
     LibraryImageViewer(libraryViewModel)
+    LibraryVideoPlayer(libraryViewModel)
     }
 }

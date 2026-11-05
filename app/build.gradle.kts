@@ -16,8 +16,8 @@ android {
         targetSdk = 35
         // Сборка: versionName = A<этап>.<номер сборки в этапе>, versionCode — сквозной номер, растёт с каждой сборкой.
         // Показывается на экране Network.
-        versionCode = 30
-        versionName = "A13.3"
+        versionCode = 31
+        versionName = "A13.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -75,6 +75,12 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-compose:3.0.4")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.0.4")
     implementation("io.coil-kt.coil3:coil-network-cache-control:3.0.4")
+
+    // Потоковое видео Library. 1.9.4 — последняя линейка для compileSdk 35 и Kotlin 2.0: 1.10 требует compileSdk 36,
+    // 1.11 — Kotlin 2.2.
+    implementation("androidx.media3:media3-exoplayer:1.9.4")
+    implementation("androidx.media3:media3-ui:1.9.4")
+    implementation("androidx.media3:media3-datasource-okhttp:1.9.4")
 
     // Coroutines (если используешь suspend-функции)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")

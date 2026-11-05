@@ -2231,6 +2231,50 @@ class LibraryViewModelTest {
         assertNull(viewModel.viewerFileId.value)
     }
 
+    // --- Плеер видео: открывается только для video/*, вне выделения; Library под ним не меняется.
+
+    private fun video(id: Long, mime: String = "video/mp4") =
+        FileItemDto(id = id, originalFilename = "clip$id.mp4", mimeType = mime, checksum = "%064x".format(id))
+
+    @Test
+    fun videoOpensPlayerAndIsNotPartOfImageViewer() {
+        repository.setFiles(root, 0, page(listOf(photo(10), video(11, "video/quicktime"), file(12))))
+        opened()
+        val before = state
+
+        viewModel.openViewer(video(11, "video/quicktime"))
+        viewModel.openVideo(photo(10))
+        viewModel.openVideo(file(12))
+        assertNull(viewModel.viewerFileId.value)
+        assertNull(viewModel.videoFileId.value)
+        assertEquals(listOf(10L), state.viewerImages.map { it.id })
+
+        viewModel.openVideo(video(11, "video/quicktime"))
+        assertEquals(11L, viewModel.videoFileId.value)
+        viewModel.closeVideo()
+        assertNull(viewModel.videoFileId.value)
+        assertEquals(before, state)
+
+        viewModel.toggleSelection(photo(10))
+        viewModel.openVideo(video(11))
+        assertNull(viewModel.videoFileId.value)
+    }
+
+    @Test
+    fun accountOrServerChangeClosesPlayer() {
+        repository.setFiles(root, 0, page(listOf(video(11))))
+        opened()
+        viewModel.openVideo(video(11))
+
+        tokens.saveTokens(tokensOf("bob"))
+        assertNull(viewModel.videoFileId.value)
+
+        viewModel.ensureLoaded()
+        viewModel.openVideo(video(11))
+        baseUrlProvider.baseUrl = SERVER_B
+        assertNull(viewModel.videoFileId.value)
+    }
+
     /** DELETE без HTTP: исход задаёт тест. */
     private class FakeDisableRemote : BackupSourceRemote(mock(ApiServiceFactory::class.java)) {
         var outcome: DisableOutcome = DisableOutcome.Disabled

@@ -23,6 +23,7 @@ import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.LibrarySession
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.library.video.isPlayableVideo
 import ru.tbcarus.photo_cloud_client.transfer.isReservedRootName
 import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
 import ru.tbcarus.photo_cloud_client.transfer.TransferKind
@@ -88,6 +89,20 @@ class LibraryViewModel @Inject constructor(
         _viewerFileId.value = null
     }
 
+    // Видео, открытое во встроенном плеере; null — плеер закрыт.
+    private val _videoFileId = MutableStateFlow<Long?>(null)
+    val videoFileId: StateFlow<Long?> = _videoFileId.asStateFlow()
+
+    fun openVideo(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.selecting || state.picking || !isPlayableVideo(file)) return
+        _videoFileId.value = file.id
+    }
+
+    fun closeVideo() {
+        _videoFileId.value = null
+    }
+
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
 
@@ -131,6 +146,7 @@ class LibraryViewModel @Inject constructor(
         context = newContext
         // Просмотр относится к прежнему серверу и пользователю: закрывается вместе с отменой его загрузки.
         closeViewer()
+        closeVideo()
         cancelLoads()
         relocationSource = null
         resetScroll()

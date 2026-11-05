@@ -101,6 +101,7 @@ class LibraryGridScreenTest {
     private val webp = image(12, "image.webp", "image/webp")
     private val pdf = FileItemDto(id = 13, originalFilename = "doc.pdf", mimeType = "application/pdf", checksum = "c13", fileType = "DOCUMENT")
     private val heic = image(14, "fake.jpg", "image/heic")
+    private val clip = FileItemDto(id = 15, originalFilename = "clip.mp4", mimeType = "video/mp4", checksum = "c15", fileType = "VIDEO")
 
     private val server = MockWebServer()
     private val repository = FakeRepository(root)
@@ -125,7 +126,7 @@ class LibraryGridScreenTest {
 
         repository.children[root.id] = listOf(camera, autoUploads, alpha, many, empty)
         repository.children[autoUploads.id] = listOf(source)
-        repository.files["${root.id}:0"] = FilePageDto(items = listOf(jpeg, png, webp, pdf, heic))
+        repository.files["${root.id}:0"] = FilePageDto(items = listOf(jpeg, png, webp, pdf, heic, clip))
         repository.files["${source.id}:0"] = FilePageDto(items = listOf(image(20, "synced.jpg", "image/jpeg")))
         repository.files["${many.id}:0"] = FilePageDto(items = (100L until 150L).map { image(it, "n$it.jpg", "image/jpeg") }, hasNext = true)
         repository.files["${many.id}:1"] = FilePageDto(items = (150L until 160L).map { image(it, "n$it.jpg", "image/jpeg") })
@@ -214,7 +215,7 @@ class LibraryGridScreenTest {
         toGrid()
 
         assertEquals(
-            listOf("Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp", "doc.pdf", "fake.jpg")
+            listOf("Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp", "doc.pdf", "fake.jpg", "clip.mp4")
                 .map { TILE_TAG_PREFIX + it },
             gridTags()
         )
@@ -230,7 +231,7 @@ class LibraryGridScreenTest {
         val requested = (1..server.requestCount).map { server.takeRequest().path }.toSet()
         assertEquals(listOf(jpeg, png, webp).map { "/api/v1/files/${it.id}/thumbnail" }.toSet(), requested)
         // PDF и HEIC под именем .jpg — значок типа, миниатюра не запрашивается.
-        listOf(pdf, heic).forEach {
+        listOf(pdf, heic, clip).forEach {
             compose.onNodeWithTag(FILE_ICON_TAG_PREFIX + it.id, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(THUMBNAIL_TAG_PREFIX + it.id, useUnmergedTree = true).assertDoesNotExist()
         }
@@ -275,6 +276,25 @@ class LibraryGridScreenTest {
         assertEquals(png.id, viewModel.viewerFileId.value)
         assertEquals(before, repository.calls)
         compose.onNodeWithText("Выбрано", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun tappingVideoOpensPlayerFromGridAndList() {
+        toGrid()
+        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(10)
+
+        tile("clip.mp4").performClick()
+        compose.waitForIdle()
+        assertEquals(clip.id, viewModel.videoFileId.value)
+        assertEquals(null, viewModel.viewerFileId.value)
+        viewModel.closeVideo()
+
+        compose.onNodeWithContentDescription("Показать списком").performClick()
+        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(10)
+        compose.onNodeWithText("clip.mp4").performClick()
+        compose.waitForIdle()
+        assertEquals(clip.id, viewModel.videoFileId.value)
+        assertEquals(null, viewModel.viewerFileId.value)
     }
 
     @Test
