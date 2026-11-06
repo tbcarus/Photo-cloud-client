@@ -23,6 +23,7 @@ import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.LibrarySession
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.library.pdf.isPdf
 import ru.tbcarus.photo_cloud_client.library.video.isPlayableVideo
 import ru.tbcarus.photo_cloud_client.transfer.isReservedRootName
 import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
@@ -103,6 +104,20 @@ class LibraryViewModel @Inject constructor(
         _videoFileId.value = null
     }
 
+    // PDF, открытый во встроенном просмотре; null — просмотр закрыт.
+    private val _pdfFileId = MutableStateFlow<Long?>(null)
+    val pdfFileId: StateFlow<Long?> = _pdfFileId.asStateFlow()
+
+    fun openPdf(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.selecting || state.picking || !isPdf(file)) return
+        _pdfFileId.value = file.id
+    }
+
+    fun closePdf() {
+        _pdfFileId.value = null
+    }
+
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
 
@@ -147,6 +162,7 @@ class LibraryViewModel @Inject constructor(
         // Просмотр относится к прежнему серверу и пользователю: закрывается вместе с отменой его загрузки.
         closeViewer()
         closeVideo()
+        closePdf()
         cancelLoads()
         relocationSource = null
         resetScroll()

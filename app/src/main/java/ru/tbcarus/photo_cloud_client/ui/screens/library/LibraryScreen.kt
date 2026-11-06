@@ -111,6 +111,7 @@ import ru.tbcarus.photo_cloud_client.library.thumbnail.LibraryThumbnails
 import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
 import ru.tbcarus.photo_cloud_client.library.thumbnail.ThumbnailScope
 import ru.tbcarus.photo_cloud_client.library.thumbnail.ThumbnailsEntryPoint
+import ru.tbcarus.photo_cloud_client.library.pdf.isPdf
 import ru.tbcarus.photo_cloud_client.library.video.isPlayableVideo
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
 import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
@@ -508,7 +509,7 @@ private fun LibraryList(
 }
 
 /**
- * Нажатие на файл: в режиме выделения переключает отметку, иначе открывает просмотр изображения или плеер видео.
+ * Нажатие на файл: в режиме выделения переключает отметку, иначе открывает просмотр изображения, плеер видео или PDF.
  * При выборе назначения и у файлов, которые нельзя показать, нажатие ничего не делает.
  */
 private fun fileClick(state: LibraryUiState, file: FileItemDto, selectable: Boolean, viewModel: LibraryViewModel): (() -> Unit)? =
@@ -523,6 +524,9 @@ private fun fileClick(state: LibraryUiState, file: FileItemDto, selectable: Bool
         }
         !state.picking && isPlayableVideo(file) -> {
             { viewModel.openVideo(file) }
+        }
+        !state.picking && isPdf(file) -> {
+            { viewModel.openPdf(file) }
         }
         else -> null
     }

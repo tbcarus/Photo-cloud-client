@@ -298,6 +298,23 @@ class LibraryGridScreenTest {
     }
 
     @Test
+    fun tappingPdfOpensDocumentViewerFromGridAndList() {
+        toGrid()
+
+        tile("doc.pdf").performClick()
+        compose.waitForIdle()
+        assertEquals(pdf.id, viewModel.pdfFileId.value)
+        assertEquals(null, viewModel.viewerFileId.value)
+        assertEquals(null, viewModel.videoFileId.value)
+        viewModel.closePdf()
+
+        compose.onNodeWithContentDescription("Показать списком").performClick()
+        compose.onNodeWithText("doc.pdf").performClick()
+        compose.waitForIdle()
+        assertEquals(pdf.id, viewModel.pdfFileId.value)
+    }
+
+    @Test
     fun selectionModeTapTogglesInsteadOfOpeningViewer() {
         toGrid()
         tile("photo.jpg").performTouchInput { longClick() }

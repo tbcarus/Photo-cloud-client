@@ -2275,6 +2275,55 @@ class LibraryViewModelTest {
         assertNull(viewModel.videoFileId.value)
     }
 
+    // --- Просмотр PDF: открывается только для PDF, вне выделения; Library под ним не меняется.
+
+    private fun pdf(id: Long, mime: String = "application/pdf", name: String = "doc$id.pdf") =
+        FileItemDto(id = id, originalFilename = name, mimeType = mime, checksum = "%064x".format(id))
+
+    @Test
+    fun pdfOpensDocumentViewerOnly() {
+        repository.setFiles(root, 0, page(listOf(photo(10), video(11), pdf(12), pdf(13, "application/octet-stream", "Scan.PDF"))))
+        opened()
+        val before = state
+
+        viewModel.openPdf(photo(10))
+        viewModel.openPdf(video(11))
+        viewModel.openViewer(pdf(12))
+        viewModel.openVideo(pdf(12))
+        assertNull(viewModel.pdfFileId.value)
+        assertNull(viewModel.viewerFileId.value)
+        assertNull(viewModel.videoFileId.value)
+
+        viewModel.openPdf(pdf(13, "application/octet-stream", "Scan.PDF"))
+        assertEquals(13L, viewModel.pdfFileId.value)
+        viewModel.closePdf()
+        viewModel.openPdf(pdf(12))
+        assertEquals(12L, viewModel.pdfFileId.value)
+        viewModel.closePdf()
+        assertNull(viewModel.pdfFileId.value)
+        assertEquals(before, state)
+
+        viewModel.toggleSelection(photo(10))
+        viewModel.openPdf(pdf(12))
+        assertNull(viewModel.pdfFileId.value)
+        assertEquals(setOf(10L), state.selection!!.files.keys)
+    }
+
+    @Test
+    fun accountOrServerChangeClosesPdf() {
+        repository.setFiles(root, 0, page(listOf(pdf(12))))
+        opened()
+        viewModel.openPdf(pdf(12))
+
+        tokens.saveTokens(tokensOf("bob"))
+        assertNull(viewModel.pdfFileId.value)
+
+        viewModel.ensureLoaded()
+        viewModel.openPdf(pdf(12))
+        baseUrlProvider.baseUrl = SERVER_B
+        assertNull(viewModel.pdfFileId.value)
+    }
+
     /** DELETE без HTTP: исход задаёт тест. */
     private class FakeDisableRemote : BackupSourceRemote(mock(ApiServiceFactory::class.java)) {
         var outcome: DisableOutcome = DisableOutcome.Disabled
