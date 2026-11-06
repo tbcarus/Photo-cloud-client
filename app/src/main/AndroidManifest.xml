@@ -39,6 +39,17 @@
 
         <!-- Отключаем дефолтный авто-инициализатор WorkManager: используем on-demand
              инициализацию через App.Configuration.Provider + HiltWorkerFactory. -->
+        <!-- Временное чтение копии из кеша оригиналов внешним приложением; только каталог originals. -->
+        <provider
+            android:name=".library.external.OriginalsFileProvider"
+            android:authorities="${applicationId}.originals"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/originals_paths" />
+        </provider>
+
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"

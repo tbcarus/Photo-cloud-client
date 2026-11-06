@@ -16,8 +16,8 @@ android {
         targetSdk = 35
         // Сборка: versionName = A<этап>.<номер сборки в этапе>, versionCode — сквозной номер, растёт с каждой сборкой.
         // Показывается на экране Network.
-        versionCode = 32
-        versionName = "A13.5"
+        versionCode = 33
+        versionName = "A13.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

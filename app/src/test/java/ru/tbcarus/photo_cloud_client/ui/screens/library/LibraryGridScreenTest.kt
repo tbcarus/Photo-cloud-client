@@ -64,10 +64,14 @@ import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.library.external.ExternalFiles
+import ru.tbcarus.photo_cloud_client.library.original.OriginalCache
 import ru.tbcarus.photo_cloud_client.library.thumbnail.LibraryThumbnails
 import ru.tbcarus.photo_cloud_client.transfer.FakeDocuments
 import ru.tbcarus.photo_cloud_client.transfer.FakeTransferRemote
+import ru.tbcarus.photo_cloud_client.transfer.RemoteResult
 import ru.tbcarus.photo_cloud_client.transfer.TransferManager
+import java.io.IOException
 import java.nio.file.Files
 import java.util.Base64
 
@@ -140,7 +144,12 @@ class LibraryGridScreenTest {
             db.backupSourceDao(), FakeDisableRemote(), FakeAccess(context),
             FakeAccounts(BackupAccount(baseUrlProvider.baseUrl, "alice")), FakeScheduler(context)
         )
-        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers, sources)
+        // Внешнее открытие в этих тестах не доходит до Server: скачивание сразу отвечает отказом связи.
+        val originals = OriginalCache(
+            Files.createTempDirectory("originals").toFile(), Files.createTempDirectory("originals-tmp").toFile(),
+            OriginalCache.MAX_BYTES, { _, _ -> RemoteResult.NetworkError(IOException("offline")) }, { Long.MAX_VALUE }
+        )
+        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers, sources, ExternalFiles(originals))
         thumbnails = LibraryThumbnails(
             context, OkHttpClient(), librarySessionFlow(baseUrlProvider, tokens), UnconfinedTestDispatcher(),
             Files.createTempDirectory("thumbnails").toFile()

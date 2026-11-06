@@ -509,7 +509,8 @@ private fun LibraryList(
 }
 
 /**
- * Нажатие на файл: в режиме выделения переключает отметку, иначе открывает просмотр изображения, плеер видео или PDF.
+ * Нажатие на файл: в режиме выделения переключает отметку, иначе открывает просмотр изображения, плеер видео, PDF
+ * или — для остальных типов — внешнее приложение.
  * При выборе назначения и у файлов, которые нельзя показать, нажатие ничего не делает.
  */
 private fun fileClick(state: LibraryUiState, file: FileItemDto, selectable: Boolean, viewModel: LibraryViewModel): (() -> Unit)? =
@@ -527,6 +528,9 @@ private fun fileClick(state: LibraryUiState, file: FileItemDto, selectable: Bool
         }
         !state.picking && isPdf(file) -> {
             { viewModel.openPdf(file) }
+        }
+        !state.picking && opensExternally(file) -> {
+            { viewModel.openExternal(file) }
         }
         else -> null
     }

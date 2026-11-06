@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Внешним приложениям доступна только копия файла из кеша оригиналов, не весь cacheDir. -->
+<paths>
+    <cache-path name="originals" path="originals/" />
+</paths>

@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
@@ -23,6 +24,11 @@ import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.LibrarySession
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.library.external.ExternalError
+import ru.tbcarus.photo_cloud_client.library.external.ExternalFile
+import ru.tbcarus.photo_cloud_client.library.external.ExternalFiles
+import ru.tbcarus.photo_cloud_client.library.external.externalDisplayName
+import ru.tbcarus.photo_cloud_client.library.original.OriginalLease
 import ru.tbcarus.photo_cloud_client.library.pdf.isPdf
 import ru.tbcarus.photo_cloud_client.library.video.isPlayableVideo
 import ru.tbcarus.photo_cloud_client.transfer.isReservedRootName
@@ -43,7 +49,8 @@ class LibraryViewModel @Inject constructor(
     baseUrlProvider: BaseUrlProvider,
     tokenStorage: TokenStorage,
     private val transfers: TransferManager,
-    private val sources: BackupSourceRepository
+    private val sources: BackupSourceRepository,
+    private val externalFiles: ExternalFiles
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LibraryUiState())
@@ -118,6 +125,73 @@ class LibraryViewModel @Inject constructor(
         _pdfFileId.value = null
     }
 
+    // Открытие во внешнем приложении: копия готовится в кеше оригиналов, запускает её UI, защита копии
+    // от вытеснения держится до возврата в приложение.
+    private val _externalOpen = MutableStateFlow<ExternalOpen?>(null)
+    val externalOpen: StateFlow<ExternalOpen?> = _externalOpen.asStateFlow()
+    private var externalJob: Job? = null
+    private var externalLease: OriginalLease? = null
+
+    fun openExternal(file: FileItemDto) {
+        val state = _uiState.value
+        if (state.selecting || state.picking || !opensExternally(file) || _externalOpen.value != null) return
+        val name = externalDisplayName(file)
+        _externalOpen.value = ExternalOpen.Loading(name)
+        externalJob = viewModelScope.launch {
+            val result = externalFiles.prepare(file)
+            // Отменённое открытие внешнее приложение не запускает.
+            if (!isActive) {
+                (result as? ExternalFile.Ready)?.lease?.release()
+                return@launch
+            }
+            _externalOpen.value = when (result) {
+                is ExternalFile.Ready -> {
+                    externalLease = result.lease
+                    ExternalOpen.Ready(result)
+                }
+                is ExternalFile.Error -> ExternalOpen.Failed(name, result.reason)
+            }
+        }
+    }
+
+    fun onExternalLaunched() {
+        val ready = _externalOpen.value as? ExternalOpen.Ready ?: return
+        _externalOpen.value = ExternalOpen.Launched(ready.file.name)
+    }
+
+    fun onExternalFailed(reason: ExternalError) {
+        val ready = _externalOpen.value as? ExternalOpen.Ready ?: return
+        releaseExternal()
+        _externalOpen.value = ExternalOpen.Failed(ready.file.name, reason)
+    }
+
+    /** Приложение снова на экране: внешнее приложение файл уже получило, защита копии снимается. */
+    fun onExternalReturned() {
+        if (_externalOpen.value !is ExternalOpen.Launched) return
+        releaseExternal()
+        _externalOpen.value = null
+    }
+
+    fun dismissExternal() {
+        if (_externalOpen.value is ExternalOpen.Failed) _externalOpen.value = null
+    }
+
+    fun cancelExternal() {
+        externalJob?.cancel()
+        externalJob = null
+        releaseExternal()
+        _externalOpen.value = null
+    }
+
+    private fun releaseExternal() {
+        externalLease?.release()
+        externalLease = null
+    }
+
+    override fun onCleared() {
+        releaseExternal()
+    }
+
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
 
@@ -163,6 +237,7 @@ class LibraryViewModel @Inject constructor(
         closeViewer()
         closeVideo()
         closePdf()
+        cancelExternal()
         cancelLoads()
         relocationSource = null
         resetScroll()

@@ -45,12 +45,18 @@ import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
 import ru.tbcarus.photo_cloud_client.library.librarySessionFlow
+import ru.tbcarus.photo_cloud_client.library.external.ExternalError
+import ru.tbcarus.photo_cloud_client.library.external.ExternalFiles
+import ru.tbcarus.photo_cloud_client.library.original.OriginalCache
+import ru.tbcarus.photo_cloud_client.transfer.DownloadedFile
 import ru.tbcarus.photo_cloud_client.transfer.FakeDocuments
+import ru.tbcarus.photo_cloud_client.transfer.RemoteResult
 import ru.tbcarus.photo_cloud_client.transfer.FakeTransferRemote
 import ru.tbcarus.photo_cloud_client.transfer.TransferManager
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
 import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.Base64
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -115,7 +121,7 @@ class LibraryViewModelTest {
     }
 
     private fun createViewModel() {
-        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers, sources)
+        viewModel = LibraryViewModel(repository, baseUrlProvider, tokens, transfers, sources, ExternalFiles(originals))
     }
 
     private fun opened(): LibraryViewModel {
@@ -2322,6 +2328,160 @@ class LibraryViewModelTest {
         viewModel.openPdf(pdf(12))
         baseUrlProvider.baseUrl = SERVER_B
         assertNull(viewModel.pdfFileId.value)
+    }
+
+    // --- Внешнее приложение: остальные файлы, копия из общего кеша оригиналов, запуск — в UI.
+
+    private val originalContent = HashMap<Long, ByteArray>()
+    // Пишется потоком скачивания, читается тестом.
+    private val originalCalls = java.util.Collections.synchronizedList(mutableListOf<Long>())
+    // Пока не завершён, скачивание ждёт: так проверяется отмена до запуска внешнего приложения.
+    private var downloadGate = CompletableDeferred(Unit)
+    private val originals by lazy {
+        OriginalCache(
+            Files.createTempDirectory("originals").toFile(),
+            Files.createTempDirectory("originals-tmp").toFile(),
+            OriginalCache.MAX_BYTES,
+            { fileId, target ->
+                originalCalls += fileId
+                downloadGate.await()
+                val bytes = originalContent[fileId] ?: return@OriginalCache RemoteResult.HttpError(404, "FILE_ITEM_NOT_FOUND")
+                target.writeBytes(bytes)
+                RemoteResult.Success(DownloadedFile(bytes.size.toLong(), sha256(bytes)))
+            },
+            { Long.MAX_VALUE }
+        )
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun document(id: Long, name: String, mime: String? = null, text: String = "note $id"): FileItemDto {
+        val bytes = text.toByteArray()
+        originalContent[id] = bytes
+        return FileItemDto(id = id, originalFilename = name, mimeType = mime, size = bytes.size.toLong(), checksum = sha256(bytes))
+    }
+
+    private fun awaitExternal(condition: (ExternalOpen?) -> Boolean): ExternalOpen? {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!condition(viewModel.externalOpen.value)) {
+            check(System.currentTimeMillis() < deadline) { "Состояние не достигнуто: ${viewModel.externalOpen.value}" }
+            Thread.sleep(10)
+        }
+        return viewModel.externalOpen.value
+    }
+
+    @Test
+    fun onlyFilesWithoutBuiltInViewerOpenExternally() {
+        val note = document(20, "notes.txt", "text/plain")
+        val photo = photo(10).copy(checksum = "a".repeat(64))
+        val clip = video(11).copy(checksum = "b".repeat(64))
+        val scan = pdf(12, "application/octet-stream", "Scan.PDF").copy(checksum = "c".repeat(64))
+        repository.setFiles(root, 0, page(listOf(photo, clip, scan, note)))
+        opened()
+
+        listOf(photo, clip, scan, file(13)).forEach(viewModel::openExternal)
+        assertNull(viewModel.externalOpen.value)
+        assertEquals(listOf<Long>(), originalCalls)
+
+        viewModel.toggleSelection(photo)
+        viewModel.openExternal(note)
+        assertNull(viewModel.externalOpen.value)
+        viewModel.exitSelection()
+
+        viewModel.openExternal(note)
+        assertTrue(awaitExternal { it is ExternalOpen.Ready } is ExternalOpen.Ready)
+    }
+
+    @Test
+    fun verifiedCopyIsHandedOverAndReusedAfterReturn() {
+        // В Robolectric таблица расширений пуста; на устройстве она системная.
+        org.robolectric.Shadows.shadowOf(android.webkit.MimeTypeMap.getSingleton())
+            .addExtensionMimeTypeMapping("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        val sheet = document(21, "Отчёт.xlsx", "application/octet-stream")
+        repository.setFiles(root, 0, page(listOf(sheet)))
+        opened()
+        val before = state
+
+        viewModel.openExternal(sheet)
+        val ready = (awaitExternal { it is ExternalOpen.Ready } as ExternalOpen.Ready).file
+        assertEquals("Отчёт.xlsx", ready.name)
+        assertEquals("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ready.mimeType)
+        assertEquals("note 21", ready.file.readText())
+        assertEquals(sheet.checksum, ready.file.name)
+
+        viewModel.onExternalLaunched()
+        assertEquals(ExternalOpen.Launched("Отчёт.xlsx"), viewModel.externalOpen.value)
+        viewModel.onExternalReturned()
+        assertNull(viewModel.externalOpen.value)
+        assertEquals(before, state)
+
+        // Повторное открытие берёт проверенную копию из кеша без скачивания.
+        viewModel.openExternal(sheet)
+        awaitExternal { it is ExternalOpen.Ready }
+        assertEquals(listOf(21L), originalCalls)
+    }
+
+    // Отмена приходит, когда скачивание уже началось, как при настоящей загрузке.
+    private fun awaitDownloadStarted(fileId: Long) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (fileId !in originalCalls) {
+            check(System.currentTimeMillis() < deadline) { "Скачивание $fileId не началось" }
+            Thread.sleep(10)
+        }
+    }
+
+    @Test
+    fun cancelOrSessionChangeDropsPendingOpen() {
+        val first = document(22, "first.txt", "text/plain")
+        val second = document(26, "second.txt", "text/plain")
+        repository.setFiles(root, 0, page(listOf(first, second)))
+        opened()
+        downloadGate = CompletableDeferred()
+
+        viewModel.openExternal(first)
+        assertEquals(ExternalOpen.Loading("first.txt"), viewModel.externalOpen.value)
+        awaitDownloadStarted(22)
+        viewModel.cancelExternal()
+        downloadGate.complete(Unit)
+        Thread.sleep(100)
+        assertNull(viewModel.externalOpen.value)
+
+        downloadGate = CompletableDeferred()
+        viewModel.openExternal(second)
+        assertEquals(ExternalOpen.Loading("second.txt"), viewModel.externalOpen.value)
+        awaitDownloadStarted(26)
+        tokens.saveTokens(tokensOf("bob"))
+        downloadGate.complete(Unit)
+        Thread.sleep(100)
+        assertNull(viewModel.externalOpen.value)
+    }
+
+    @Test
+    fun failuresAreReportedWithoutBreakingLibrary() {
+        val missing = FileItemDto(id = 23, originalFilename = "gone.docx", size = 5, checksum = "d".repeat(64))
+        val huge = FileItemDto(id = 24, originalFilename = "disk.iso", size = OriginalCache.MAX_BYTES + 1, checksum = "e".repeat(64))
+        val note = document(25, "notes.txt", "text/plain")
+        repository.setFiles(root, 0, page(listOf(missing, huge, note)))
+        opened()
+
+        viewModel.openExternal(missing)
+        assertEquals(ExternalOpen.Failed("gone.docx", ExternalError.NOT_FOUND), awaitExternal { it is ExternalOpen.Failed })
+        viewModel.dismissExternal()
+
+        viewModel.openExternal(huge)
+        assertEquals(ExternalOpen.Failed("disk.iso", ExternalError.TOO_LARGE), awaitExternal { it is ExternalOpen.Failed })
+        viewModel.dismissExternal()
+        assertEquals(listOf(23L), originalCalls)
+
+        // Подходящего приложения нет: сообщение вместо запуска, копия больше не защищена.
+        viewModel.openExternal(note)
+        awaitExternal { it is ExternalOpen.Ready }
+        viewModel.onExternalFailed(ExternalError.NO_APP)
+        assertEquals(ExternalOpen.Failed("notes.txt", ExternalError.NO_APP), viewModel.externalOpen.value)
+        viewModel.dismissExternal()
+        assertNull(viewModel.externalOpen.value)
+        assertEquals(LibraryStatus.Content, state.status)
     }
 
     /** DELETE без HTTP: исход задаёт тест. */

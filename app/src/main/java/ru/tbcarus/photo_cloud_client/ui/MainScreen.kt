@@ -22,6 +22,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import ru.tbcarus.photo_cloud_client.ui.components.BottomNavigationBar
 import ru.tbcarus.photo_cloud_client.ui.components.NavigationGraph
 import ru.tbcarus.photo_cloud_client.ui.components.bottomNavItems
+import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryExternalOpen
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryImageViewer
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryPdfViewer
 import ru.tbcarus.photo_cloud_client.ui.screens.library.LibraryVideoPlayer
@@ -72,5 +73,6 @@ fun MainScreen(networkViewModel: NetworkViewModel, libraryViewModel: LibraryView
     LibraryImageViewer(libraryViewModel)
     LibraryVideoPlayer(libraryViewModel)
     LibraryPdfViewer(libraryViewModel)
+    LibraryExternalOpen(libraryViewModel)
     }
 }
