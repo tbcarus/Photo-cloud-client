@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderShared
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
@@ -135,6 +136,7 @@ internal const val THUMBNAIL_TAG_PREFIX = "thumbnail-"
 internal const val FILE_ICON_TAG_PREFIX = "file-icon-"
 internal const val FOLDER_ICON_TAG_PREFIX = "folder-icon-"
 internal const val SHARED_ENTRY_TAG = "shared-entry"
+internal const val GRANTED_ENTRY_TAG = "granted-entry"
 internal const val SHARED_LIST_TAG = "shared-list"
 private const val ITEM_NAMES_SHOWN = 5
 
@@ -149,7 +151,7 @@ fun LibraryScreen(
     val transfer by viewModel.transferState.collectAsState()
     val gridView by viewModel.gridView.collectAsState()
     // Выбор назначения и список «Доступно мне» (владелец и срок — во второй строке) всегда показываются списком.
-    val showGrid = gridView && !state.picking && !state.atSharedList
+    val showGrid = gridView && !state.picking && !state.atSharedList && !state.inGranted
 
     // Назначение запоминается до системного выбора: после гибели процесса открытая папка была бы уже другой.
     var destinationId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -260,6 +262,7 @@ fun LibraryScreen(
                 )
             }
         }
+        LibrarySharingDialogs(viewModel)
         state.shared?.removal?.let { removal ->
             RemoveSharedDialog(
                 removal = removal,
@@ -326,7 +329,9 @@ fun LibraryScreen(
                     onAction = viewModel::refresh
                 )
                 LibraryStatus.Content ->
-                    if (state.atSharedList) {
+                    if (state.inGranted) {
+                        GrantedSection(viewModel)
+                    } else if (state.atSharedList) {
                         if (state.isEmpty) {
                             StateMessage(text = "Вам пока ничего не предоставили. Здесь появятся файлы и папки, которыми с вами поделятся.")
                         } else {
@@ -377,7 +382,7 @@ private fun LibraryHeader(
             Icon(Icons.Default.Refresh, contentDescription = "Обновить")
         }
     }
-    if (state.path.isEmpty() && !state.inShared) return
+    if (state.path.isEmpty() && !state.inShared && !state.inGranted) return
 
     // Длинный путь прокручивается: конец с текущей папкой виден сразу.
     val pathScroll = rememberScrollState()
@@ -387,12 +392,16 @@ private fun LibraryHeader(
             IconButton(onClick = onUp) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = if (state.atSharedList) "В библиотеку" else "К родительской папке"
+                    contentDescription = if (state.atSharedList || state.inGranted) "В библиотеку" else "К родительской папке"
                 )
             }
         }
         Text(
-            text = if (state.inShared) sharedPathLabel(state.path) else libraryPathLabel(state.path),
+            text = when {
+                state.inGranted -> GRANTED_SECTION_NAME
+                state.inShared -> sharedPathLabel(state.path)
+                else -> libraryPathLabel(state.path)
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -476,7 +485,23 @@ private fun LibraryList(
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag(LIST_TAG)) {
         if (state.showSharedEntry) {
             item(key = SHARED_ENTRY_TAG) {
-                SharedEntryRow(onClick = viewModel::openShared)
+                VirtualEntryRow(
+                    title = SHARED_SECTION_NAME,
+                    subtitle = "Файлы и папки, которыми с вами поделились",
+                    icon = Icons.Default.FolderShared,
+                    tag = SHARED_ENTRY_TAG,
+                    onClick = viewModel::openShared
+                )
+                HorizontalDivider()
+            }
+            item(key = GRANTED_ENTRY_TAG) {
+                VirtualEntryRow(
+                    title = GRANTED_SECTION_NAME,
+                    subtitle = "Доступы, которые вы выдали другим",
+                    icon = Icons.Default.Share,
+                    tag = GRANTED_ENTRY_TAG,
+                    onClick = viewModel::openGranted
+                )
                 HorizontalDivider()
             }
         }
@@ -568,6 +593,7 @@ private fun folderActions(
     viewModel: LibraryViewModel,
     keepPosition: () -> Unit
 ): List<RowAction> = listOfNotNull(
+    RowAction("Поделиться", { viewModel.startShare(LibraryItem.Folder(folder)) }).takeIf { state.canShare(folder) },
     RowAction("Переименовать", { viewModel.startRename(folder) }).takeIf { state.canRename(folder) },
     RowAction("Переместить", {
         keepPosition()
@@ -585,6 +611,7 @@ private fun fileActions(
     keepPosition: () -> Unit
 ): List<RowAction> = if (state.picking) emptyList() else listOfNotNull(
     RowAction("Скачать", { viewModel.download(file) }, enabled = downloadEnabled && file.id != null),
+    RowAction("Поделиться", { viewModel.startShare(LibraryItem.File(file)) }).takeIf { state.canShare(file) },
     RowAction("Переименовать", { viewModel.startRename(file) }).takeIf { state.canRename(file) },
     RowAction("Переместить", {
         keepPosition()
@@ -597,25 +624,25 @@ private fun fileActions(
     RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
 )
 
-/** Виртуальный элемент корня библиотеки: вход в «Доступно мне». Это не папка Server, действий у него нет. */
+/** Виртуальный элемент корня библиотеки: вход в «Доступно мне» или «Предоставлено мной». Это не папка Server. */
 @Composable
-private fun SharedEntryRow(onClick: () -> Unit) {
+private fun VirtualEntryRow(title: String, subtitle: String, icon: ImageVector, tag: String, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(vertical = 4.dp)
-            .testTag(SHARED_ENTRY_TAG)
+            .testTag(tag)
     ) {
         Box(Modifier.width(THUMBNAIL_SIZE), contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.FolderShared, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(ICON_SIZE))
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(ICON_SIZE))
         }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp)) {
-            Text(text = SHARED_SECTION_NAME, style = MaterialTheme.typography.bodyLarge)
+            Text(text = title, style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = "Файлы и папки, которыми с вами поделились",
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -722,7 +749,7 @@ private fun RemoveSharedDialog(removal: SharedRemoval, onConfirm: () -> Unit, on
 }
 
 @Composable
-private fun LoadingMore() {
+internal fun LoadingMore() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -734,7 +761,7 @@ private fun LoadingMore() {
 }
 
 @Composable
-private fun LoadMoreError(error: String, onRetry: () -> Unit) {
+internal fun LoadMoreError(error: String, onRetry: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -792,6 +819,16 @@ private fun LibraryGrid(
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(TILE_ICON_SIZE).testTag(SHARED_ENTRY_TAG)
+                    )
+                }
+            }
+            item(key = GRANTED_ENTRY_TAG) {
+                LibraryTile(name = GRANTED_SECTION_NAME, actions = emptyList(), selected = null, onClick = viewModel::openGranted, onLongClick = null) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(TILE_ICON_SIZE).testTag(GRANTED_ENTRY_TAG)
                     )
                 }
             }
@@ -1008,7 +1045,7 @@ private fun FileRow(
     }
 }
 
-private data class RowAction(
+internal data class RowAction(
     val label: String,
     val onClick: () -> Unit,
     val enabled: Boolean = true,
@@ -1018,7 +1055,7 @@ private data class RowAction(
 
 /** Кнопка «⋮» строки; без действий на её месте пустое поле той же ширины, чтобы строки не сдвигались. */
 @Composable
-private fun ActionsMenu(actions: List<RowAction>) {
+internal fun ActionsMenu(actions: List<RowAction>) {
     if (actions.isEmpty()) {
         Spacer(Modifier.width(48.dp))
         return
@@ -1514,7 +1551,7 @@ private fun ItemNames(names: List<String>) {
 }
 
 @Composable
-private fun StateMessage(text: String, action: String? = null, onAction: () -> Unit = {}) {
+internal fun StateMessage(text: String, action: String? = null, onAction: () -> Unit = {}) {
     Column(
         modifier = Modifier
             .fillMaxSize()

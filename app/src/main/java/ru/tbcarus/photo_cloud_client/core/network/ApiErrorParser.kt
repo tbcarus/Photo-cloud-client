@@ -5,8 +5,11 @@ import com.google.gson.JsonSyntaxException
 import retrofit2.Response
 import ru.tbcarus.photo_cloud_client.api.models.ErrorResponseDto
 
-/** Код ErrorResponse (null — тела нет или это не ErrorResponse) и текст для пользователя. */
-data class ApiError(val code: String?, val message: String)
+/**
+ * Код ErrorResponse (null — тела нет или это не ErrorResponse) и текст для пользователя.
+ * [fieldErrors] — исходные ошибки полей: по ним, например, отмечаются отклонённые адреса выдачи доступа.
+ */
+data class ApiError(val code: String?, val message: String, val fieldErrors: Map<String, String>? = null)
 
 object ApiErrorParser {
 
@@ -39,7 +42,7 @@ object ApiErrorParser {
         if (dto != null) {
             val fieldErrors = dto.fieldErrors
             if (!fieldErrors.isNullOrEmpty()) {
-                return ApiError(code, fieldErrors.entries.joinToString("; ") { "${it.key}: ${it.value}" })
+                return ApiError(code, fieldErrors.entries.joinToString("; ") { "${it.key}: ${it.value}" }, fieldErrors)
             }
             dto.message?.takeIf { it.isNotBlank() }?.let { return ApiError(code, it) }
             code?.let { return ApiError(it, it) }

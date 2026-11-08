@@ -37,6 +37,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -223,12 +224,13 @@ class LibraryGridScreenTest {
     fun gridKeepsListOrderFoldersThenFiles() {
         toGrid()
 
-        // В ROOT первой стоит виртуальная плитка «Доступно мне», затем папки и файлы в порядке списка.
+        // В ROOT первыми стоят виртуальные плитки «Доступно мне» и «Предоставлено мной», затем папки и файлы.
         assertEquals(
-            listOf(SHARED_SECTION_NAME, "Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp",
+            listOf(SHARED_SECTION_NAME, GRANTED_SECTION_NAME, "Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp",
                 "doc.pdf", "fake.jpg", "clip.mp4")
                 .map { TILE_TAG_PREFIX + it },
-            gridTags()
+            // Последние плитки уходят за край экрана: порядок собирается до и после прокрутки к концу.
+            (gridTags() + compose.onNodeWithTag(GRID_TAG).performScrollToIndex(12).let { gridTags() }).distinct()
         )
     }
 
@@ -241,6 +243,7 @@ class LibraryGridScreenTest {
         // Robolectric без native graphics не декодирует картинку надёжно: проверяются запросы, а не пиксели.
         val requested = (1..server.requestCount).map { server.takeRequest().path }.toSet()
         assertEquals(listOf(jpeg, png, webp).map { "/api/v1/files/${it.id}/thumbnail" }.toSet(), requested)
+        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(12)
         // PDF и HEIC под именем .jpg — значок типа, миниатюра не запрашивается.
         listOf(pdf, heic, clip).forEach {
             compose.onNodeWithTag(FILE_ICON_TAG_PREFIX + it.id, useUnmergedTree = true).assertExists()
@@ -292,7 +295,7 @@ class LibraryGridScreenTest {
     @Test
     fun tappingVideoOpensPlayerFromGridAndList() {
         toGrid()
-        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(11)
+        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(12)
 
         tile("clip.mp4").performClick()
         compose.waitForIdle()
@@ -301,7 +304,7 @@ class LibraryGridScreenTest {
         viewModel.closeVideo()
 
         compose.onNodeWithContentDescription("Показать списком").performClick()
-        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(11)
+        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(12)
         compose.onNodeWithText("clip.mp4").performClick()
         compose.waitForIdle()
         assertEquals(clip.id, viewModel.videoFileId.value)
@@ -320,8 +323,8 @@ class LibraryGridScreenTest {
         viewModel.closePdf()
 
         compose.onNodeWithContentDescription("Показать списком").performClick()
-        // Строка «Доступно мне» в ROOT сдвигает файлы: PDF — десятая строка списка.
-        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(9)
+        // Строки «Доступно мне» и «Предоставлено мной» в ROOT сдвигают файлы: PDF — одиннадцатая строка списка.
+        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(10)
         compose.onNodeWithText("doc.pdf").performClick()
         compose.waitForIdle()
         assertEquals(pdf.id, viewModel.pdfFileId.value)
@@ -365,16 +368,24 @@ class LibraryGridScreenTest {
         toGrid()
 
         // Действия плитки строятся теми же функциями, что у строки списка; кнопки нет у объектов без действий.
-        listOf("photo.jpg", "doc.pdf", "Alpha").forEach { menuOf(it).assertExists() }
-        listOf("Camera", "AutoUploads").forEach { menuOf(it).assertDoesNotExist() }
+        // У Camera из действий только «Поделиться»: переименования, перемещения и удаления по-прежнему нет.
+        listOf("photo.jpg", "doc.pdf", "Alpha", "Camera").forEach { menuOf(it).assertExists() }
+        menuOf("AutoUploads").assertDoesNotExist()
+        val camera = viewModel.uiState.value.folders.first { it.isCamera }
+        assertTrue(viewModel.uiState.value.canShare(camera))
+        assertFalse(viewModel.uiState.value.canRename(camera) || viewModel.uiState.value.canDelete(camera))
     }
 
     @Test
     fun activeSourceTreeKeepsRestrictions() {
         toGrid()
         open("AutoUploads")
-        // Корень активного источника не меняется пользователем: меню нет.
-        menuOf("Phone").assertDoesNotExist()
+        // Корень активного источника не меняется пользователем: в меню только «Поделиться».
+        val phone = viewModel.uiState.value.folders.first { it.name == "Phone" }
+        menuOf("Phone").assertExists()
+        assertTrue(viewModel.uiState.value.canShare(phone))
+        assertFalse(viewModel.uiState.value.canRename(phone) || viewModel.uiState.value.canMove(phone) ||
+            viewModel.uiState.value.canDelete(phone))
         open("Phone")
 
         // В активном дереве объекты не выделяются; у файла остаётся только «Скачать», поэтому меню есть.

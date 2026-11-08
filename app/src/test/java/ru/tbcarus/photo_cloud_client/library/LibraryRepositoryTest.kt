@@ -18,6 +18,7 @@ import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito.mock
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import ru.tbcarus.photo_cloud_client.core.network.AuthInterceptor
 import ru.tbcarus.photo_cloud_client.core.network.TokenAuthenticator
@@ -390,6 +391,40 @@ class LibraryRepositoryTest {
         server.enqueue(json("""{"code":"CONFLICT","message":"Conflict"}""").setResponseCode(409))
 
         assertEquals(LibraryResult.ServerError("Conflict"), repository.getChildren(1))
+    }
+
+    @Test
+    fun shareRequestsSendServerContractIncludingExplicitNullExpiry() = runBlocking {
+        val shareJson = """{"id":5,"resourceType":"FILE","resourceId":42,"resourceName":"a.txt",
+            "recipient":{"id":3,"email":"a@test","displayName":null},"expiresAt":null,"status":"ACTIVE"}"""
+        server.enqueue(json("[$shareJson]"))
+        server.enqueue(json(shareJson))
+        server.enqueue(json(shareJson.replace("\"expiresAt\":null", "\"expiresAt\":\"2031-01-01T00:00:00Z\"")))
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(json("""{"code":"SHARE_RECIPIENT_UNAVAILABLE","message":"Some recipients cannot receive access",
+            "fieldErrors":{"x@test":"Recipient is not available"}}""").setResponseCode(400))
+
+        repository.grantShare(GrantShareRequest(fileId = 42, emails = listOf("a@test", "b@test")))
+        // Бессрочный доступ: поле присутствует со значением null, общий Gson его бы опустил.
+        assertEquals(null, (repository.updateShareExpiry(5, null) as LibraryResult.Success).value.expiresAt)
+        repository.updateShareExpiry(5, "2031-01-01T03:00:00+03:00")
+        repository.revokeAllShares(fileId = null, folderId = 7)
+        val rejected = repository.grantShare(GrantShareRequest(folderId = 7, emails = listOf("x@test")))
+
+        val grant = server.takeRequest()
+        assertEquals("POST", grant.method)
+        assertEquals("/api/v1/shares/users", grant.path)
+        // Gson не пишет null-поля: отсутствующие folderId и expiresAt Server понимает как файл и бессрочный срок.
+        assertEquals("""{"fileId":42,"emails":["a@test","b@test"]}""", grant.body.readUtf8())
+        val toNever = server.takeRequest()
+        assertEquals("PATCH", toNever.method)
+        assertEquals("/api/v1/shares/5", toNever.path)
+        assertEquals("""{"expiresAt":null}""", toNever.body.readUtf8())
+        assertEquals("""{"expiresAt":"2031-01-01T03:00:00+03:00"}""", server.takeRequest().body.readUtf8())
+        val revokeAll = server.takeRequest()
+        assertEquals("DELETE", revokeAll.method)
+        assertEquals("/api/v1/shares/users?folderId=7", revokeAll.path)
+        assertEquals(LibraryResult.RecipientsRejected(mapOf("x@test" to "Recipient is not available")), rejected)
     }
 
     private fun json(body: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(body)

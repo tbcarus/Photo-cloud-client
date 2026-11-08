@@ -25,6 +25,9 @@ import org.robolectric.annotation.Config
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
+import ru.tbcarus.photo_cloud_client.api.models.ShareDto
+import ru.tbcarus.photo_cloud_client.api.models.SharePageDto
 import ru.tbcarus.photo_cloud_client.api.models.ShareUserDto
 import ru.tbcarus.photo_cloud_client.api.models.SharedPageDto
 import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
@@ -2329,6 +2332,169 @@ class LibraryViewModelTest {
         assertEquals(listOf(root.id), state.path.map { it.id })
     }
 
+    // --- «Поделиться» и «Предоставлено мной»: управление выданными USER-доступами.
+
+    private val sharing get() = viewModel.sharingState.value
+
+    private fun share(id: Long, email: String, expiresAt: String? = null, status: String = "ACTIVE") =
+        ShareDto(id, "FILE", 10, "file10.txt", ShareUserDto(id, email, null), expiresAt, status)
+
+    @Test
+    fun shareIsOfferedOnlyForOwnAllowedObjects() {
+        val autoUploads = FolderDto(6, 1, "AutoUploads", "AUTO_UPLOADS")
+        val source = FolderDto(7, 6, "Docs", "USER", backupSource = "550e8400-e29b-41d4-a716-446655440000")
+        repository.setChildren(root, camera, autoUploads, alpha)
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+
+        assertTrue(state.canShare(camera) && state.canShare(alpha) && state.canShare(source) && state.canShare(file(10)))
+        assertFalse(state.canShare(root) || state.canShare(autoUploads))
+        viewModel.startShare(LibraryItem.Folder(autoUploads))
+        assertNull(sharing.dialog)
+
+        // Чужие объекты в «Доступно мне» не предоставляются дальше.
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips")))
+        viewModel.openShared()
+        viewModel.openSharedEntry(state.shared!!.entries.single())
+        assertFalse(state.canShare(FolderDto(51, 50, "Day1", "USER")) || state.canShare(file(70)))
+    }
+
+    @Test
+    fun grantSendsDistinctEmailsAndRefreshesObjectShares() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        repository.setShares(10, null, 0, SharePageDto(items = listOf(share(1, "old@test"))))
+        opened()
+        viewModel.startShare(LibraryItem.File(file(10)))
+        assertEquals(listOf(1L), sharing.dialog!!.shares.map { it.id })
+
+        repository.setShares(10, null, 0, SharePageDto(items = listOf(share(1, "old@test"), share(2, "a@test"), share(3, "b@test"))))
+        viewModel.onShareEmailsChange(" a@test, b@test\nA@TEST,, ")
+        viewModel.grantShare()
+
+        assertEquals(listOf(GrantShareRequest(fileId = 10, emails = listOf("a@test", "b@test"), expiresAt = null)), repository.grants)
+        assertEquals(listOf(1L, 2L, 3L), sharing.dialog!!.shares.map { it.id })
+        assertEquals("", sharing.dialog!!.emails)
+        assertEquals(2, repository.calls.count { it == "shares:10:null:0" })
+    }
+
+    @Test
+    fun invalidInputAndRejectedRecipientsKeepFormWithoutPartialSuccess() {
+        tokens.saveTokens(tokensOf("me@test"))
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startShare(LibraryItem.File(file(10)))
+
+        viewModel.onShareEmailsChange("friend@test, ME@test")
+        viewModel.grantShare()
+        assertEquals("Нельзя предоставить доступ самому себе", sharing.dialog!!.error)
+        viewModel.onShareEmailsChange("friend@test")
+        viewModel.onShareExpiryChange(ExpiryChoice.Days("0"))
+        viewModel.grantShare()
+        assertEquals("Укажите положительное число дней", sharing.dialog!!.error)
+        assertTrue(repository.grants.isEmpty())
+
+        viewModel.onShareExpiryChange(ExpiryChoice.Days("3"))
+        repository.fail("grant", LibraryResult.RecipientsRejected(mapOf("friend@test" to "Recipient is not available")))
+        viewModel.grantShare()
+
+        val dialog = sharing.dialog!!
+        assertTrue(dialog.error!!.startsWith("Доступ не предоставлен никому"))
+        assertTrue("friend@test" in dialog.error!!)
+        assertEquals("friend@test", dialog.emails)
+        assertFalse(dialog.granting)
+        // На N дней — момент с текущим смещением пояса устройства, а не дата без времени.
+        assertNotNull(java.time.OffsetDateTime.parse(repository.grants.single().expiresAt))
+    }
+
+    @Test
+    fun editExpiryToNeverSendsNullAndReplacesShare() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        repository.setShares(10, null, 0, SharePageDto(items = listOf(share(5, "a@test", "2020-01-01T00:00:00Z", "EXPIRED"))))
+        opened()
+        viewModel.startShare(LibraryItem.File(file(10)))
+
+        viewModel.startEditShare(sharing.dialog!!.shares.single())
+        assertTrue(sharing.edit!!.expiry is ExpiryChoice.Until)
+        viewModel.onEditShareExpiryChange(ExpiryChoice.Never)
+        viewModel.confirmEditShare()
+
+        assertTrue("updateShare:5:null" in repository.calls)
+        assertNull(sharing.edit)
+        val updated = sharing.dialog!!.shares.single()
+        assertNull(updated.expiresAt)
+        assertEquals("ACTIVE", updated.status)
+    }
+
+    @Test
+    fun revokeRemovesShareOnlyAfterSuccessAndRevokeAllUsesResource() {
+        repository.setChildren(root, alpha)
+        repository.setShares(null, alpha.id, 0, SharePageDto(items = listOf(share(1, "a@test"), share(2, "b@test"))))
+        opened()
+        viewModel.startShare(LibraryItem.Folder(alpha))
+
+        repository.fail("revokeShare:1", LibraryResult.NetworkError("timeout"))
+        viewModel.startRevokeShare(sharing.dialog!!.shares.first())
+        viewModel.confirmRevokeShare()
+        assertEquals(listOf(1L, 2L), sharing.dialog!!.shares.map { it.id })
+        assertEquals("Нет связи с сервером: timeout", sharing.revoke!!.error)
+
+        repository.succeed("revokeShare:1")
+        viewModel.confirmRevokeShare()
+        assertEquals(listOf(2L), sharing.dialog!!.shares.map { it.id })
+        assertNull(sharing.revoke)
+
+        repository.setShares(null, alpha.id, 0, SharePageDto(items = emptyList()))
+        viewModel.requestRevokeAllShares()
+        viewModel.confirmRevokeAllShares()
+        assertTrue("revokeAll:null:${alpha.id}" in repository.calls)
+        assertTrue(sharing.dialog!!.shares.isEmpty())
+        assertEquals("Доступ всем пользователям отключён", sharing.dialog!!.info)
+        // Удаления объектов не было: отключены только доступы.
+        assertTrue(repository.calls.none { it.startsWith("delete") })
+    }
+
+    @Test
+    fun grantedSectionPagesAndReturnsToRootWithoutReload() {
+        repository.setChildren(root, alpha)
+        repository.setShares(null, null, 0, SharePageDto(items = listOf(share(1, "a@test")), hasNext = true))
+        repository.setShares(null, null, 1, SharePageDto(items = listOf(share(2, "b@test", status = "EXPIRED"))))
+        opened()
+        assertTrue(state.showSharedEntry)
+
+        viewModel.openGranted()
+        assertTrue(state.inGranted)
+        assertFalse(state.canUpload || state.showSharedEntry)
+        assertEquals(listOf(1L), sharing.granted!!.entries.map { it.id })
+        viewModel.loadMoreGranted()
+        assertEquals(listOf(1L, 2L), sharing.granted!!.entries.map { it.id })
+
+        val rootRequests = repository.calls.count { it == "root" }
+        viewModel.navigateUp()
+        assertFalse(state.inGranted)
+        assertNull(sharing.granted)
+        assertEquals(listOf(alpha.id), state.folders.map { it.id })
+        assertEquals(rootRequests, repository.calls.count { it == "root" })
+    }
+
+    @Test
+    fun accountChangeDropsSharingStateAndLateResult() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startShare(LibraryItem.File(file(10)))
+        viewModel.onShareEmailsChange("a@test")
+        val gate = repository.hold("grant")
+        viewModel.grantShare()
+        assertTrue(sharing.dialog!!.granting)
+
+        tokens.saveTokens(tokensOf("bob"))
+        gate.complete(Unit)
+
+        assertNull(sharing.dialog)
+        assertNull(sharing.granted)
+        // Запоздавший ответ прежней сессии не перечитывает доступы в новой.
+        assertEquals(1, repository.calls.count { it.startsWith("shares:") })
+    }
+
     // --- Полноэкранный просмотр: состояние в ViewModel, Library под ним не меняется.
 
     private fun photo(id: Long, mime: String = "image/jpeg") =
@@ -2718,6 +2884,34 @@ class LibraryViewModelTest {
             answer("shared:$page", shared[page] ?: SharedPageDto(items = emptyList()))
 
         override suspend fun removeShared(shareId: Long): LibraryResult<Unit> = answer("removeShared:$shareId", Unit)
+
+        val grants = mutableListOf<GrantShareRequest>()
+        private val sharePages = HashMap<String, SharePageDto>()
+
+        fun setShares(fileId: Long?, folderId: Long?, page: Int, value: SharePageDto) {
+            sharePages["shares:$fileId:$folderId:$page"] = value
+        }
+
+        override suspend fun grantShare(request: GrantShareRequest): LibraryResult<List<ShareDto>> {
+            grants += request
+            return answer("grant", request.emails.mapIndexed { index, email ->
+                ShareDto(100L + index, "FILE", request.fileId ?: 0, "file", ShareUserDto(null, email, null), request.expiresAt, "ACTIVE")
+            })
+        }
+
+        override suspend fun getShares(fileId: Long?, folderId: Long?, page: Int): LibraryResult<SharePageDto> {
+            val key = "shares:$fileId:$folderId:$page"
+            return answer(key, sharePages[key] ?: SharePageDto(items = emptyList()))
+        }
+
+        override suspend fun updateShareExpiry(shareId: Long, expiresAt: String?): LibraryResult<ShareDto> =
+            answer("updateShare:$shareId:$expiresAt", ShareDto(shareId, "FILE", 10, "file10.txt",
+                ShareUserDto(shareId, "a@test", null), expiresAt, "ACTIVE"))
+
+        override suspend fun revokeShare(shareId: Long): LibraryResult<Unit> = answer("revokeShare:$shareId", Unit)
+
+        override suspend fun revokeAllShares(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
+            answer("revokeAll:$fileId:$folderId", Unit)
 
         override suspend fun getRoot(): LibraryResult<FolderDto> = answer("root", root)
 

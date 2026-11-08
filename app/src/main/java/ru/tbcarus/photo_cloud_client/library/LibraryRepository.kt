@@ -1,10 +1,15 @@
 package ru.tbcarus.photo_cloud_client.library
 
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonNull
+import com.google.gson.JsonObject
 import com.google.gson.JsonParseException
 import com.google.gson.stream.MalformedJsonException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Call
 import retrofit2.Response
 import retrofit2.awaitResponse
@@ -13,6 +18,9 @@ import ru.tbcarus.photo_cloud_client.api.models.CreateFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
+import ru.tbcarus.photo_cloud_client.api.models.ShareDto
+import ru.tbcarus.photo_cloud_client.api.models.SharePageDto
 import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.MoveFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
@@ -43,6 +51,8 @@ sealed interface LibraryResult<out T> {
     data class Rejected(val message: String) : Failure
     /** Server ответил 2xx, но тело не разобрано: операция могла выполниться. Только для move и copy. */
     data class UnknownResult(val message: String) : Failure
+    /** 400 SHARE_RECIPIENT_UNAVAILABLE: выдача отклонена целиком; адрес → причина Server. */
+    data class RecipientsRejected(val rejected: Map<String, String>) : Failure
 }
 
 /**
@@ -59,6 +69,10 @@ open class LibraryRepository @Inject constructor(
         const val PAGE_SIZE = 50
         private const val SORT_BY_NAME = "name"
         private const val FOLDER_MANAGED = "FOLDER_MANAGED"
+        private const val SHARE_RECIPIENT_UNAVAILABLE = "SHARE_RECIPIENT_UNAVAILABLE"
+        private val JSON = "application/json; charset=utf-8".toMediaType()
+        // Только для тела изменения срока: явный null снимает срок. Общий Gson Retrofit null-поля не пишет.
+        private val nullAwareGson = GsonBuilder().serializeNulls().create()
     }
 
     open suspend fun getRoot(): LibraryResult<FolderDto> =
@@ -116,6 +130,33 @@ open class LibraryRepository @Inject constructor(
     open suspend fun removeShared(shareId: Long): LibraryResult<Unit> =
         send(call = { apiServiceFactory.authShareService().removeShared(shareId) }) { LibraryResult.Success(Unit) }
 
+    /** Выдача USER-доступа владельцем: все адреса или никто. 400 с отклонёнными адресами — [LibraryResult.RecipientsRejected]. */
+    open suspend fun grantShare(request: GrantShareRequest): LibraryResult<List<ShareDto>> =
+        request(change = true) { apiServiceFactory.authShareService().grant(request) }
+
+    /** Выданные текущим пользователем доступы, с фильтром по одному ресурсу или без него. */
+    open suspend fun getShares(fileId: Long?, folderId: Long?, page: Int): LibraryResult<SharePageDto> =
+        request { apiServiceFactory.authShareService().getShares(fileId, folderId, page, PAGE_SIZE) }
+
+    /** [expiresAt] — ISO-8601 со смещением; null отправляется явным {"expiresAt":null} и делает доступ бессрочным. */
+    open suspend fun updateShareExpiry(shareId: Long, expiresAt: String?): LibraryResult<ShareDto> {
+        val body = JsonObject().apply {
+            if (expiresAt == null) add("expiresAt", JsonNull.INSTANCE) else addProperty("expiresAt", expiresAt)
+        }
+        val json = nullAwareGson.toJson(body).toRequestBody(JSON)
+        return request(change = true) { apiServiceFactory.authShareService().updateExpiry(shareId, json) }
+    }
+
+    /** Отзыв одного доступа; 404 — его уже нет. */
+    open suspend fun revokeShare(shareId: Long): LibraryResult<Unit> =
+        send(change = true, call = { apiServiceFactory.authShareService().revoke(shareId) }) { LibraryResult.Success(Unit) }
+
+    /** Отзыв всех USER-доступов одного ресурса; ресурс без доступов — тоже успех. */
+    open suspend fun revokeAllShares(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
+        send(change = true, call = { apiServiceFactory.authShareService().revokeAll(fileId, folderId) }) {
+            LibraryResult.Success(Unit)
+        }
+
     // uncertainBody: Retrofit разбирает только тело 2xx, поэтому ошибка разбора означает, что Server операцию принял.
     private suspend fun <T : Any> request(
         change: Boolean = false,
@@ -163,6 +204,8 @@ open class LibraryRepository @Inject constructor(
     private fun failure(response: Response<*>, change: Boolean, nameConflict: Boolean): LibraryResult.Failure {
         val error = ApiErrorParser.read(response)
         return when {
+            change && response.code() == 400 && error.code == SHARE_RECIPIENT_UNAVAILABLE ->
+                LibraryResult.RecipientsRejected(error.fieldErrors.orEmpty())
             change && response.code() == 409 && error.code == FOLDER_MANAGED -> LibraryResult.Managed
             change && response.code() == 409 && nameConflict -> LibraryResult.NameTaken
             change && response.code() == 409 -> LibraryResult.Rejected(error.message)

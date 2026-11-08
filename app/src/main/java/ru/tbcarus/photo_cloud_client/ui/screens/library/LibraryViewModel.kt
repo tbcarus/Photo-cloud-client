@@ -15,6 +15,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.ShareDto
 import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
@@ -56,6 +57,15 @@ class LibraryViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
+
+    /**
+     * Выдача и управление USER-доступами владельца: окно «Поделиться» и раздел «Предоставлено мной».
+     * Сбрасывается вместе с контекстом Library; потеря сессии переводит Library ко входу.
+     */
+    private val sharing = LibrarySharing(viewModelScope, repository, onUnauthorized = {
+        applyFailure(LibraryResult.Unauthorized, _uiState.value.path)
+    })
+    val sharingState: StateFlow<SharingState> = sharing.state
 
     // Вид — состояние экрана, а не каталога: загрузка папки и смена контекста его не сбрасывают. Только в памяти процесса.
     private val _gridView = MutableStateFlow(false)
@@ -244,6 +254,7 @@ class LibraryViewModel @Inject constructor(
         closePdf()
         cancelExternal()
         cancelLoads()
+        sharing.reset()
         relocationSource = null
         ownLibrary = null
         resetScroll()
@@ -266,6 +277,7 @@ class LibraryViewModel @Inject constructor(
         val state = _uiState.value
         val path = state.path
         when {
+            state.inGranted -> exitGranted()
             path.size > 1 -> loadFolder(path.dropLast(1))
             // Корень предоставленного дерева — граница: выше него только список «Доступно мне».
             state.inShared && path.size == 1 -> loadSharedList()
@@ -287,6 +299,58 @@ class LibraryViewModel @Inject constructor(
     /** Возврат в собственную библиотеку: её корень показывается в прежнем виде, без запросов. */
     fun exitShared() {
         if (!_uiState.value.inShared) return
+        restoreOwnLibrary()
+    }
+
+    // --- «Поделиться» и «Предоставлено мной» ---
+
+    /** Окно «Поделиться» собственного файла или папки: выданные доступы и форма выдачи. */
+    fun startShare(item: LibraryItem) {
+        val state = _uiState.value
+        val allowed = when (item) {
+            is LibraryItem.File -> state.canShare(item.file)
+            is LibraryItem.Folder -> state.canShare(item.folder)
+        }
+        if (allowed && state.edit == null && state.deletion == null) sharing.open(item)
+    }
+
+    fun closeShare() = sharing.close()
+    fun onShareEmailsChange(text: String) = sharing.onEmailsChange(text)
+    fun onShareExpiryChange(choice: ExpiryChoice) = sharing.onExpiryChange(choice)
+    // Свой адрес — subject токена текущей сессии: самому себе доступ не выдаётся.
+    fun grantShare() = sharing.grant(context?.user)
+    fun loadMoreObjectShares() = sharing.loadMoreDialogShares()
+    fun retryObjectShares() = sharing.retryDialogShares()
+    fun requestRevokeAllShares() = sharing.requestRevokeAll()
+    fun dismissRevokeAllShares() = sharing.dismissRevokeAll()
+    fun confirmRevokeAllShares() = sharing.confirmRevokeAll()
+    fun startEditShare(share: ShareDto) = sharing.startEdit(share)
+    fun onEditShareExpiryChange(choice: ExpiryChoice) = sharing.onEditExpiryChange(choice)
+    fun dismissEditShare() = sharing.dismissEdit()
+    fun confirmEditShare() = sharing.confirmEdit()
+    fun startRevokeShare(share: ShareDto) = sharing.startRevoke(share)
+    fun dismissRevokeShare() = sharing.dismissRevoke()
+    fun confirmRevokeShare() = sharing.confirmRevoke()
+    fun loadMoreGranted() = sharing.loadMoreGranted()
+    fun retryMoreGranted() = sharing.retryMoreGranted()
+
+    /** Раздел «Предоставлено мной» из корня собственной библиотеки; корень запоминается для возврата. */
+    fun openGranted() {
+        val state = _uiState.value
+        if (!state.showSharedEntry) return
+        ownLibrary = RelocationSource(state, nextPage, scrollIndex, scrollOffset)
+        cancelLoads()
+        _uiState.update { LibraryUiState(status = LibraryStatus.Content, granted = true, contentVersion = it.contentVersion + 1) }
+        sharing.openGranted()
+    }
+
+    fun exitGranted() {
+        if (!_uiState.value.inGranted) return
+        sharing.closeGranted()
+        restoreOwnLibrary()
+    }
+
+    private fun restoreOwnLibrary() {
         val saved = ownLibrary
         ownLibrary = null
         cancelLoads()
@@ -407,6 +471,7 @@ class LibraryViewModel @Inject constructor(
             if (it.unknownResult) it.copy(unknownResult = false, error = "Проверьте, выполнена ли операция, прежде чем повторять") else it
         }
         when {
+            state.inGranted -> sharing.refreshGranted()
             state.atSharedList -> loadSharedList()
             state.path.isEmpty() -> loadRoot()
             else -> loadFolder(state.path)
@@ -1090,6 +1155,7 @@ class LibraryViewModel @Inject constructor(
         when {
             failure is LibraryResult.Unauthorized -> {
                 cancelLoads()
+                sharing.reset()
                 relocationSource = null
                 ownLibrary = null
                 _uiState.update {
@@ -1115,6 +1181,7 @@ class LibraryViewModel @Inject constructor(
         LibraryResult.Managed -> "Папку изменяет только автоматическое резервирование"
         is LibraryResult.Rejected -> "Сервер отклонил операцию: ${failure.message}"
         is LibraryResult.UnknownResult -> "Результат операции неизвестен: ${failure.message}"
+        is LibraryResult.RecipientsRejected -> recipientsRejectedText(failure.rejected)
     }
 
     // Offset-пагинация при изменении каталога может вернуть файл повторно, а ключ строки уникален.

@@ -23,6 +23,7 @@ fun sharedPathLabel(path: List<FolderDto>): String =
     (listOf(SHARED_SECTION_NAME) + path.map { it.name }).joinToString(" / ")
 
 const val SHARED_SECTION_NAME = "Доступно мне"
+const val GRANTED_SECTION_NAME = "Предоставлено мной"
 
 /**
  * Вторая строка элемента «Доступно мне»: владелец (имя, иначе email), у файла — тип и размер, срок доступа, если он

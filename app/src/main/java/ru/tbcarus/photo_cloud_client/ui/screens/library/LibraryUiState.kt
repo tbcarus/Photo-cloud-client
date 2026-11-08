@@ -119,18 +119,22 @@ data class LibraryUiState(
     // Итог успешной операции; ошибки показывает notice.
     val info: String? = null,
     // Открыт раздел «Доступно мне»; null — собственная библиотека.
-    val shared: SharedBrowse? = null
+    val shared: SharedBrowse? = null,
+    // Открыт раздел «Предоставлено мной»: его список хранит LibrarySharing, папок и файлов в нём нет.
+    val granted: Boolean = false
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
     /** Предоставленные ресурсы только читаются: режим задаёт контекст Library, а не тип или поля папки. */
     val inShared: Boolean get() = shared != null
     /** Открыт сам список «Доступно мне», а не предоставленная папка. */
     val atSharedList: Boolean get() = inShared && path.isEmpty()
-    // В разделе «Доступно мне» Back ведёт вверх по предоставленному дереву, затем к списку, затем в библиотеку.
-    val canGoUp: Boolean get() = inShared || path.size > 1
+    val inGranted: Boolean get() = granted
+    // В разделе «Доступно мне» Back ведёт вверх по предоставленному дереву, затем к списку, затем в библиотеку;
+    // из «Предоставлено мной» — сразу в библиотеку.
+    val canGoUp: Boolean get() = inShared || inGranted || path.size > 1
     /** Вход в «Доступно мне» — в корне собственной библиотеки, вне выбора назначения, выделения и пакета. */
     val showSharedEntry: Boolean get() =
-        !inShared && status == LibraryStatus.Content && path.size == 1 && !picking && !selecting && batch == null
+        !inShared && !inGranted && status == LibraryStatus.Content && path.size == 1 && !picking && !selecting && batch == null
     /**
      * AutoUploads и дерево активного источника меняет только автоматическое резервирование. Вложенные папки
      * backupSource не имеют: принадлежность дереву определяет корень источника на открытом пути.
@@ -164,10 +168,10 @@ data class LibraryUiState(
 
     // Чужие объекты в «Доступно мне» не меняются и не выделяются: переименование, перемещение, копирование, удаление.
     private fun changeable(folder: FolderDto): Boolean =
-        !inShared && status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+        !inShared && !inGranted && status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
 
     private fun changeable(file: FileItemDto): Boolean =
-        !inShared && status == LibraryStatus.Content && file.id != null && !inActiveSource
+        !inShared && !inGranted && status == LibraryStatus.Content && file.id != null && !inActiveSource
 
     /**
      * Выделить можно только то, что допускает групповые операции: системные папки, корень активного источника
@@ -176,6 +180,16 @@ data class LibraryUiState(
     fun canSelect(folder: FolderDto): Boolean = !picking && batch == null && changeable(folder)
 
     fun canSelect(file: FileItemDto): Boolean = !picking && batch == null && changeable(file)
+
+    /**
+     * «Поделиться» — только собственные объекты: USER-папки (в том числе корни и вложенные папки источников) и Camera.
+     * ROOT и AUTO_UPLOADS Server не предоставляет; в «Доступно мне» объекты чужие.
+     */
+    fun canShare(folder: FolderDto): Boolean =
+        !inShared && !inGranted && status == LibraryStatus.Content && !busy && (folder.isUser || folder.isCamera)
+
+    fun canShare(file: FileItemDto): Boolean =
+        !inShared && !inGranted && status == LibraryStatus.Content && !busy && file.id != null
 
     /** Перемещается только USER-папка вне активного дерева, в том числе отключённый источник из AutoUploads. */
     fun canMove(folder: FolderDto): Boolean = canRename(folder)
