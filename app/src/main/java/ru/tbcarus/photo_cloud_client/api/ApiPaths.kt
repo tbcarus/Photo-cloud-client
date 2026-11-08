@@ -27,4 +27,7 @@ object ApiPaths {
     const val FOLDER_ID = "$FOLDERS/{id}"
     const val FOLDER_MOVE = "$FOLDERS/{id}/move"
     const val FOLDER_BACKUP_SOURCE = "$FOLDERS/{id}/backup"
+
+    const val SHARED_WITH_ME = "$API_V1/shared-with-me"
+    const val SHARED_WITH_ME_ID = "$SHARED_WITH_ME/{shareId}"
 }

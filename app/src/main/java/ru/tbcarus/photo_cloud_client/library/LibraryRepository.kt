@@ -17,6 +17,7 @@ import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.MoveFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFolderRequest
+import ru.tbcarus.photo_cloud_client.api.models.SharedPageDto
 import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import java.io.IOException
@@ -106,6 +107,14 @@ open class LibraryRepository @Inject constructor(
         send(change = true, nameConflict = false, call = { apiServiceFactory.authFolderService().deleteFolder(folderId) }) {
             LibraryResult.Success(Unit)
         }
+
+    /** «Доступно мне»: страница прямых USER-доступов текущего пользователя, тем же размером страницы, что у файлов. */
+    open suspend fun getSharedWithMe(page: Int): LibraryResult<SharedPageDto> =
+        request { apiServiceFactory.authShareService().getSharedWithMe(page, PAGE_SIZE) }
+
+    /** Отказ от своего доступа: 404 — доступа уже нет (отозван, истёк или удалён другим запросом). */
+    open suspend fun removeShared(shareId: Long): LibraryResult<Unit> =
+        send(call = { apiServiceFactory.authShareService().removeShared(shareId) }) { LibraryResult.Success(Unit) }
 
     // uncertainBody: Retrofit разбирает только тело 2xx, поэтому ошибка разбора означает, что Server операцию принял.
     private suspend fun <T : Any> request(

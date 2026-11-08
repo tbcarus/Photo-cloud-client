@@ -5,6 +5,9 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.ShareUserDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
+import java.time.ZoneId
 
 class LibraryFormatTest {
 
@@ -17,6 +20,24 @@ class LibraryFormatTest {
             capturedAt = "2020-02-03T04:05:06",
             uploadedAt = "2026-05-17T10:16:00.123456"
         )
+
+    @Test
+    fun sharedEntryShowsOwnerTypeSizeAndExpiryInDeviceZone() {
+        val entry = SharedResourceDto(
+            shareId = 1, resourceType = "FILE", resourceId = 1, name = "plan.pdf",
+            file = file("plan.pdf"), owner = ShareUserDto(2, "owner@test", " "), expiresAt = "2031-05-01T09:00:00Z"
+        )
+        val folder = SharedResourceDto(2, "FOLDER", 5, "Trips", owner = ShareUserDto(2, "owner@test", "Анна"))
+
+        // Пустое имя заменяется email; срок — момент UTC в часовом поясе устройства.
+        assertEquals(
+            "Владелец: owner@test · PDF · 2,4 МБ · доступ до 01.05.2031 12:00",
+            sharedSubtitle(entry, ZoneId.of("Europe/Moscow"))
+        )
+        assertEquals("Владелец: Анна", sharedSubtitle(folder))
+        assertEquals("Доступно мне / Trips / Day1",
+            sharedPathLabel(listOf(FolderDto(5, null, "Trips", SHARED_ROOT_TYPE), FolderDto(6, 5, "Day1", "USER"))))
+    }
 
     @Test
     fun pathStartsFromRootLabel() {

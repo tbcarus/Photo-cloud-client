@@ -25,6 +25,9 @@ import org.robolectric.annotation.Config
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.ShareUserDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedPageDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import androidx.room.Room
 import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupSource
@@ -2154,6 +2157,178 @@ class LibraryViewModelTest {
         return Triple(autoUploads, source, nestedSource)
     }
 
+    // --- «Доступно мне»: виртуальный раздел только для чтения поверх тех же read-endpoints.
+
+    private fun sharedFolder(shareId: Long, folderId: Long, name: String) =
+        SharedResourceDto(shareId, "FOLDER", folderId, name, owner = ShareUserDto(7, "owner@test", "Owner"))
+
+    private fun sharedFile(shareId: Long, file: FileItemDto) =
+        SharedResourceDto(shareId, "FILE", file.id!!, file.originalFilename, file = file, owner = ShareUserDto(7, "owner@test", null))
+
+    private fun sharedPage(vararg items: SharedResourceDto, hasNext: Boolean = false) =
+        SharedPageDto(items = items.toList(), hasNext = hasNext)
+
+    @Test
+    fun sharedListIsEnteredFromRootAndPaged() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips"), hasNext = true))
+        repository.setShared(1, sharedPage(sharedFile(101, photo(60))))
+        opened()
+        assertTrue(state.showSharedEntry)
+
+        viewModel.openShared()
+
+        assertTrue(state.atSharedList)
+        assertEquals(LibraryStatus.Content, state.status)
+        assertEquals(listOf(100L), state.shared!!.entries.map { it.shareId })
+        viewModel.onListEndReached()
+        assertEquals(listOf(100L, 101L), state.shared!!.entries.map { it.shareId })
+        // Файлы списка — для просмотра и скачивания; папки владельца в files не попадают.
+        assertEquals(listOf(60L), state.files.map { it.id })
+        assertTrue("shared:0" in repository.calls && "shared:1" in repository.calls)
+        assertFalse(state.showSharedEntry)
+    }
+
+    @Test
+    fun sharedFolderNavigationStopsAtGrantedRootAndReturnsToLibrary() {
+        val sharedRoot = FolderDto(50, 49, "Trips", "USER")
+        val sharedChild = FolderDto(51, 50, "Day1", "USER")
+        repository.setChildren(root, alpha)
+        repository.setChildren(sharedRoot, sharedChild)
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips")))
+        opened()
+        viewModel.openShared()
+
+        viewModel.openSharedEntry(state.shared!!.entries.single())
+        assertEquals(listOf(50L), state.path.map { it.id })
+        assertTrue(state.inShared)
+        assertEquals(listOf(51L), state.folders.map { it.id })
+        viewModel.openFolder(sharedChild)
+        assertEquals(listOf(50L, 51L), state.path.map { it.id })
+
+        viewModel.navigateUp()
+        assertEquals(listOf(50L), state.path.map { it.id })
+        // Выше корня доступа — только список «Доступно мне», не родительская папка владельца 49.
+        viewModel.navigateUp()
+        assertTrue(state.atSharedList)
+        assertFalse("children:49" in repository.calls)
+        val rootRequests = repository.calls.count { it == "root" }
+        viewModel.navigateUp()
+
+        assertFalse(state.inShared)
+        assertEquals(listOf(root.id), state.path.map { it.id })
+        assertEquals(listOf(alpha.id), state.folders.map { it.id })
+        assertEquals(rootRequests, repository.calls.count { it == "root" })
+    }
+
+    @Test
+    fun directlySharedFilesOpenInExistingViewersWithoutForeignNeighbours() {
+        val pdf = FileItemDto(id = 62, originalFilename = "doc.pdf", mimeType = "application/pdf", checksum = "%064x".format(62))
+        repository.setShared(0, sharedPage(sharedFile(101, photo(60)), sharedFolder(102, 50, "Trips"), sharedFile(103, pdf),
+            sharedFile(104, photo(61))))
+        opened()
+        viewModel.openShared()
+
+        viewModel.openViewer(photo(60))
+        assertEquals(60L, viewModel.viewerFileId.value)
+        // Соседние изображения просмотра — только непосредственно предоставленные файлы списка.
+        assertEquals(listOf(60L, 61L), state.viewerImages.map { it.id })
+        viewModel.closeViewer()
+        viewModel.openPdf(pdf)
+        assertEquals(62L, viewModel.pdfFileId.value)
+    }
+
+    @Test
+    fun sharedTreeOffersNoChanges() {
+        val sharedRoot = FolderDto(50, 49, "Trips", "USER")
+        val child = FolderDto(51, 50, "Day1", "USER", backupSource = "550e8400-e29b-41d4-a716-446655440000")
+        val sharedFile = file(70)
+        repository.setChildren(sharedRoot, child)
+        repository.setFiles(sharedRoot, 0, page(listOf(sharedFile)))
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips")))
+        opened()
+        viewModel.openShared()
+        viewModel.openSharedEntry(state.shared!!.entries.single())
+
+        assertFalse(state.canUpload || state.canCreateFolder || state.isSourceRoot)
+        assertNull(viewModel.uploadDestination())
+        assertFalse(state.canRename(child) || state.canMove(child) || state.canDelete(child) || state.canSelect(child))
+        assertFalse(state.canRename(sharedFile) || state.canMove(sharedFile) || state.canCopy(sharedFile) ||
+            state.canDelete(sharedFile) || state.canSelect(sharedFile))
+        viewModel.startRename(sharedFile)
+        viewModel.startDelete(child)
+        viewModel.toggleSelection(sharedFile)
+        viewModel.startCopy(sharedFile)
+        assertNull(state.edit)
+        assertNull(state.deletion)
+        assertNull(state.selection)
+        assertNull(state.relocation)
+        assertTrue(repository.calls.none { it.startsWith("rename") || it.startsWith("delete") || it.startsWith("copy") })
+    }
+
+    @Test
+    fun removingSharedEntryKeepsItOnErrorAndDropsItOnSuccess() {
+        val trips = sharedFolder(100, 50, "Trips")
+        val photoEntry = sharedFile(101, photo(60))
+        repository.setShared(0, sharedPage(trips, photoEntry))
+        repository.fail("removeShared:100", LibraryResult.ServerError("busy"))
+        opened()
+        viewModel.openShared()
+
+        viewModel.startRemoveShared(trips)
+        viewModel.confirmRemoveShared()
+        assertEquals("Ошибка сервера: busy", state.shared!!.removal!!.error)
+        assertEquals(listOf(100L, 101L), state.shared!!.entries.map { it.shareId })
+
+        repository.succeed("removeShared:100")
+        repository.setShared(0, sharedPage(photoEntry))
+        viewModel.confirmRemoveShared()
+
+        assertNull(state.shared!!.removal)
+        assertEquals(listOf(101L), state.shared!!.entries.map { it.shareId })
+        assertEquals("«Trips» убран из «Доступно мне»", state.info)
+        // Удаляется только доступ: запросов изменения папки владельца нет.
+        assertTrue(repository.calls.none { it.startsWith("deleteFolder") })
+    }
+
+    @Test
+    fun revokedSharedFolderReturnsToSharedListWithoutSignOut() {
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips")))
+        opened()
+        viewModel.openShared()
+        viewModel.openSharedEntry(state.shared!!.entries.single())
+        assertEquals(listOf(50L), state.path.map { it.id })
+
+        // Доступ отозван или истёк: Server отвечает 404, список перечитывается без отозванного ресурса.
+        repository.fail("children:50", LibraryResult.NotFound)
+        repository.setShared(0, sharedPage())
+        viewModel.refresh()
+
+        assertTrue(state.atSharedList)
+        assertEquals(LibraryStatus.Content, state.status)
+        assertTrue(state.isEmpty)
+        assertEquals("Папка больше недоступна: доступ отозван, истёк или папка удалена", state.notice)
+        assertEquals(1, repository.calls.count { it == "root" })
+    }
+
+    @Test
+    fun accountChangeClosesSharedSectionAndItsViewer() {
+        repository.setShared(0, sharedPage(sharedFile(101, photo(60))))
+        opened()
+        viewModel.openShared()
+        viewModel.openViewer(photo(60))
+
+        tokens.saveTokens(tokensOf("bob"))
+
+        assertNull(state.shared)
+        assertFalse(state.inShared)
+        assertTrue(state.files.isEmpty())
+        assertNull(viewModel.viewerFileId.value)
+        // Новый пользователь начинает со своей библиотеки, а не с чужого списка.
+        viewModel.ensureLoaded()
+        assertEquals(listOf(root.id), state.path.map { it.id })
+    }
+
     // --- Полноэкранный просмотр: состояние в ViewModel, Library под ним не меняется.
 
     private fun photo(id: Long, mime: String = "image/jpeg") =
@@ -2532,6 +2707,17 @@ class LibraryViewModelTest {
         }
 
         fun hold(key: String): CompletableDeferred<Unit> = CompletableDeferred<Unit>().also { gates[key] = it }
+
+        private val shared = HashMap<Int, SharedPageDto>()
+
+        fun setShared(page: Int, value: SharedPageDto) {
+            shared[page] = value
+        }
+
+        override suspend fun getSharedWithMe(page: Int): LibraryResult<SharedPageDto> =
+            answer("shared:$page", shared[page] ?: SharedPageDto(items = emptyList()))
+
+        override suspend fun removeShared(shareId: Long): LibraryResult<Unit> = answer("removeShared:$shareId", Unit)
 
         override suspend fun getRoot(): LibraryResult<FolderDto> = answer("root", root)
 

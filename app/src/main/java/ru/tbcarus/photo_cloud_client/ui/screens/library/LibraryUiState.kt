@@ -2,6 +2,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
 
 sealed interface LibraryStatus {
@@ -67,6 +68,32 @@ data class Deletion(
     val unknownResult: Boolean = false
 )
 
+/**
+ * Раздел «Доступно мне» — виртуальный, папкой Server не является. Пока путь пуст, показывается список прямых
+ * доступов [entries]; внутри предоставленного дерева путь начинается с его корня и выше него не поднимается.
+ */
+data class SharedBrowse(
+    val entries: List<SharedResourceDto> = emptyList(),
+    val removal: SharedRemoval? = null
+)
+
+/** Подтверждение «Убрать из моей библиотеки»: удаляется только доступ текущего пользователя. */
+data class SharedRemoval(
+    val id: Int,
+    val entry: SharedResourceDto,
+    val removing: Boolean = false,
+    val error: String? = null
+)
+
+/**
+ * Корень предоставленного дерева. Тип папки Server в списке доступов не передаёт: метка отличает её от системных
+ * папок, файлы в ней сортируются по имени.
+ */
+fun sharedRootFolder(entry: SharedResourceDto): FolderDto =
+    FolderDto(entry.resourceId, parentId = null, name = entry.name.orEmpty(), folderType = SHARED_ROOT_TYPE)
+
+const val SHARED_ROOT_TYPE = "SHARED"
+
 data class LibraryUiState(
     val status: LibraryStatus = LibraryStatus.Idle,
     // Открытые папки от ROOT до текущей: API не отдаёт путь и не ищет папку по ID.
@@ -90,10 +117,20 @@ data class LibraryUiState(
     // Групповая операция: прогресс, затем итог. Переживает перечитывание папки.
     val batch: Batch? = null,
     // Итог успешной операции; ошибки показывает notice.
-    val info: String? = null
+    val info: String? = null,
+    // Открыт раздел «Доступно мне»; null — собственная библиотека.
+    val shared: SharedBrowse? = null
 ) {
     val currentFolder: FolderDto? get() = path.lastOrNull()
-    val canGoUp: Boolean get() = path.size > 1
+    /** Предоставленные ресурсы только читаются: режим задаёт контекст Library, а не тип или поля папки. */
+    val inShared: Boolean get() = shared != null
+    /** Открыт сам список «Доступно мне», а не предоставленная папка. */
+    val atSharedList: Boolean get() = inShared && path.isEmpty()
+    // В разделе «Доступно мне» Back ведёт вверх по предоставленному дереву, затем к списку, затем в библиотеку.
+    val canGoUp: Boolean get() = inShared || path.size > 1
+    /** Вход в «Доступно мне» — в корне собственной библиотеки, вне выбора назначения, выделения и пакета. */
+    val showSharedEntry: Boolean get() =
+        !inShared && status == LibraryStatus.Content && path.size == 1 && !picking && !selecting && batch == null
     /**
      * AutoUploads и дерево активного источника меняет только автоматическое резервирование. Вложенные папки
      * backupSource не имеют: принадлежность дереву определяет корень источника на открытом пути.
@@ -102,17 +139,17 @@ data class LibraryUiState(
     /** На открытом пути есть корень активного источника: всё ниже него меняет только резервирование. */
     val inActiveSource: Boolean get() = path.any { it.isActiveBackupSource }
     /** Открыта сама корневая папка активного источника: только у неё Server хранит backupSource. */
-    val isSourceRoot: Boolean get() = status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
+    val isSourceRoot: Boolean get() = !inShared && status == LibraryStatus.Content && currentFolder?.isActiveBackupSource == true
     val picking: Boolean get() = relocation != null
     val selecting: Boolean get() = selection != null
     // Выбор назначения, выделение и групповая операция исключают одиночные изменения.
     private val busy: Boolean get() = picking || selecting || batch != null
     // В Camera файлы попадают только через backup Android.
     val canUpload: Boolean get() =
-        status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree && !busy
+        !inShared && status == LibraryStatus.Content && currentFolder?.isCamera == false && !inManagedTree && !busy
     /** Server создаёт папки только в ROOT и USER вне активного дерева: те же папки, что принимают ручную загрузку. */
     val canCreateFolder: Boolean get() = canUpload
-    val isEmpty: Boolean get() = folders.isEmpty() && files.isEmpty()
+    val isEmpty: Boolean get() = if (atSharedList) shared?.entries.isNullOrEmpty() else folders.isEmpty() && files.isEmpty()
     /** Последовательность полноэкранного просмотра: загруженные файлы папки, которые можно показать, в порядке Library. */
     val viewerImages: List<FileItemDto> get() = files.filter(::isViewable)
 
@@ -125,10 +162,12 @@ data class LibraryUiState(
     /** Файл активного дерева меняет только резервирование; файлы Camera Server переименовывает по своим правилам. */
     fun canRename(file: FileItemDto): Boolean = !busy && changeable(file)
 
+    // Чужие объекты в «Доступно мне» не меняются и не выделяются: переименование, перемещение, копирование, удаление.
     private fun changeable(folder: FolderDto): Boolean =
-        status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
+        !inShared && status == LibraryStatus.Content && folder.isUser && !folder.isActiveBackupSource && !inActiveSource
 
-    private fun changeable(file: FileItemDto): Boolean = status == LibraryStatus.Content && file.id != null && !inActiveSource
+    private fun changeable(file: FileItemDto): Boolean =
+        !inShared && status == LibraryStatus.Content && file.id != null && !inActiveSource
 
     /**
      * Выделить можно только то, что допускает групповые операции: системные папки, корень активного источника

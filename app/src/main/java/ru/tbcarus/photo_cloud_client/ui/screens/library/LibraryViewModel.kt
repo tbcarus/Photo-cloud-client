@@ -15,6 +15,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
 import ru.tbcarus.photo_cloud_client.backup.SourceActionResult
@@ -210,9 +211,13 @@ class LibraryViewModel @Inject constructor(
     private var relocationSerial = 0
     private var deletionSerial = 0
     private var batchSerial = 0
+    private var removalSerial = 0
 
     // Исходная папка выбора назначения: отмена возвращает её список и прокрутку без запросов.
     private var relocationSource: RelocationSource? = null
+
+    // Корень собственной библиотеки, из которого открыт раздел «Доступно мне»: выход возвращает его без запросов.
+    private var ownLibrary: RelocationSource? = null
 
     private class RelocationSource(val state: LibraryUiState, val nextPage: Int, val scrollIndex: Int, val scrollOffset: Int)
 
@@ -240,6 +245,7 @@ class LibraryViewModel @Inject constructor(
         cancelExternal()
         cancelLoads()
         relocationSource = null
+        ownLibrary = null
         resetScroll()
         val status = when {
             newContext.baseUrl.isBlank() -> LibraryStatus.NoServer
@@ -257,8 +263,139 @@ class LibraryViewModel @Inject constructor(
     fun openFolder(folder: FolderDto) = loadFolder(_uiState.value.path + folder)
 
     fun navigateUp() {
-        val path = _uiState.value.path
-        if (path.size > 1) loadFolder(path.dropLast(1))
+        val state = _uiState.value
+        val path = state.path
+        when {
+            path.size > 1 -> loadFolder(path.dropLast(1))
+            // Корень предоставленного дерева — граница: выше него только список «Доступно мне».
+            state.inShared && path.size == 1 -> loadSharedList()
+            state.inShared -> exitShared()
+        }
+    }
+
+    // --- Раздел «Доступно мне» ---
+
+    /** Открывает список ресурсов, предоставленных текущему пользователю. Корень библиотеки запоминается для возврата. */
+    fun openShared() {
+        val state = _uiState.value
+        if (!state.showSharedEntry) return
+        ownLibrary = RelocationSource(state, nextPage, scrollIndex, scrollOffset)
+        _uiState.update { it.copy(shared = SharedBrowse(), notice = null, info = null) }
+        loadSharedList()
+    }
+
+    /** Возврат в собственную библиотеку: её корень показывается в прежнем виде, без запросов. */
+    fun exitShared() {
+        if (!_uiState.value.inShared) return
+        val saved = ownLibrary
+        ownLibrary = null
+        cancelLoads()
+        if (saved == null) {
+            _uiState.update { LibraryUiState(status = LibraryStatus.Idle, contentVersion = it.contentVersion + 1) }
+            loadRoot()
+            return
+        }
+        nextPage = saved.nextPage
+        saveScroll(saved.scrollIndex, saved.scrollOffset)
+        _uiState.update { saved.state.copy(contentVersion = it.contentVersion + 1) }
+    }
+
+    /** Предоставленная папка открывается обычными read-endpoints; путь начинается с неё самой. */
+    fun openSharedEntry(entry: SharedResourceDto) {
+        val state = _uiState.value
+        if (!state.atSharedList || !entry.isFolder) return
+        loadFolder(listOf(sharedRootFolder(entry)))
+    }
+
+    fun startRemoveShared(entry: SharedResourceDto) {
+        val state = _uiState.value
+        val shared = state.shared ?: return
+        if (!state.atSharedList || state.status != LibraryStatus.Content || shared.removal != null) return
+        _uiState.update { it.copy(shared = shared.copy(removal = SharedRemoval(++removalSerial, entry)), notice = null, info = null) }
+    }
+
+    /** Пока запрос выполняется, диалог не закрывается: его итог должен дойти до списка. */
+    fun dismissRemoveShared() = updateRemoval { if (it.removing) it else null }
+
+    /**
+     * Удаляет только доступ текущего пользователя: ресурс владельца и доступы других получателей не меняются.
+     * 404 — доступа уже нет, цель достигнута. Список перечитывается с начала: страницы считаются от смещения.
+     */
+    fun confirmRemoveShared() {
+        val removal = _uiState.value.shared?.removal ?: return
+        if (removal.removing) return
+        updateRemoval { it.copy(removing = true, error = null) }
+        viewModelScope.launch {
+            val result = repository.removeShared(removal.entry.shareId)
+            // Сменилась сессия или раздел закрыт: интерфейс другого контекста не меняется.
+            if (_uiState.value.shared?.removal?.id != removal.id) return@launch
+            when (result) {
+                is LibraryResult.Success, LibraryResult.NotFound ->
+                    loadSharedList(info = "«${removal.entry.name.orEmpty()}» убран из «Доступно мне»")
+                LibraryResult.Unauthorized -> applyFailure(LibraryResult.Unauthorized, emptyList())
+                is LibraryResult.Failure -> updateRemoval { it.copy(removing = false, error = failureText(result)) }
+            }
+        }
+    }
+
+    private fun updateRemoval(change: (SharedRemoval) -> SharedRemoval?) {
+        _uiState.update { state ->
+            val shared = state.shared ?: return@update state
+            val removal = shared.removal ?: return@update state
+            state.copy(shared = shared.copy(removal = change(removal)))
+        }
+    }
+
+    private fun loadSharedList(notice: String? = null, info: String? = null) {
+        val current = beginLoad(emptyList(), notice, info)
+        loadJob = viewModelScope.launch {
+            val result = repository.getSharedWithMe(0)
+            if (current != generation) return@launch
+            when (result) {
+                is LibraryResult.Success -> {
+                    nextPage = 1
+                    applySharedPage(emptyList(), result.value.items, result.value.hasNext)
+                    _uiState.update { it.copy(status = LibraryStatus.Content) }
+                }
+                is LibraryResult.Failure -> applyFailure(result, emptyList())
+            }
+        }
+    }
+
+    private fun loadNextSharedPage(state: LibraryUiState) {
+        val page = nextPage
+        val current = generation
+        _uiState.update { it.copy(isLoadingMore = true, loadMoreError = null) }
+        loadMoreJob = viewModelScope.launch {
+            val result = repository.getSharedWithMe(page)
+            if (current != generation) return@launch
+            when (result) {
+                is LibraryResult.Success -> {
+                    nextPage = page + 1
+                    applySharedPage(_uiState.value.shared?.entries.orEmpty(), result.value.items, result.value.hasNext)
+                    _uiState.update { it.copy(isLoadingMore = false) }
+                }
+                is LibraryResult.NetworkError, is LibraryResult.ServerError -> _uiState.update {
+                    it.copy(isLoadingMore = false, loadMoreError = failureText(result as LibraryResult.Failure))
+                }
+                is LibraryResult.Failure -> applyFailure(result, state.path)
+            }
+        }
+    }
+
+    /**
+     * Файлы списка — для просмотра, плеера, PDF и скачивания теми же средствами, что в папке: соседние изображения
+     * просмотра — только непосредственно предоставленные файлы.
+     */
+    private fun applySharedPage(loaded: List<SharedResourceDto>, page: List<SharedResourceDto>?, hasNext: Boolean) {
+        val entries = (loaded + page.orEmpty()).distinctBy { it.shareId }
+        _uiState.update { state ->
+            state.copy(
+                shared = (state.shared ?: SharedBrowse()).copy(entries = entries),
+                files = mergeFiles(emptyList(), entries.mapNotNull { it.file }),
+                hasNext = hasNext
+            )
+        }
     }
 
     /** Обновление и повтор: каталог и пагинация начинаются заново. */
@@ -269,7 +406,11 @@ class LibraryViewModel @Inject constructor(
         updateRelocation {
             if (it.unknownResult) it.copy(unknownResult = false, error = "Проверьте, выполнена ли операция, прежде чем повторять") else it
         }
-        if (state.path.isEmpty()) loadRoot() else loadFolder(state.path)
+        when {
+            state.atSharedList -> loadSharedList()
+            state.path.isEmpty() -> loadRoot()
+            else -> loadFolder(state.path)
+        }
     }
 
     /** Прокрутка к концу списка. После ошибки новая попытка — только по кнопке. */
@@ -279,8 +420,12 @@ class LibraryViewModel @Inject constructor(
 
     fun loadNextPage() {
         val state = _uiState.value
-        val folder = state.currentFolder ?: return
         if (state.status != LibraryStatus.Content || !state.hasNext || state.isLoadingMore) return
+        if (state.atSharedList) {
+            loadNextSharedPage(state)
+            return
+        }
+        val folder = state.currentFolder ?: return
 
         val page = nextPage
         val current = generation
@@ -924,7 +1069,9 @@ class LibraryViewModel @Inject constructor(
                 deletion = it.deletion?.takeIf { deletion -> deletion.parent.id == path.lastOrNull()?.id },
                 // Переход в другую папку сбрасывает выделение, обновление той же — нет.
                 selection = it.selection?.takeIf { selection -> selection.folderId == path.lastOrNull()?.id },
-                batch = it.batch
+                batch = it.batch,
+                // Переходы внутри «Доступно мне» остаются в разделе; список и диалог отказа читаются заново.
+                shared = it.shared?.let { SharedBrowse() }
             )
         }
         return generation
@@ -944,10 +1091,14 @@ class LibraryViewModel @Inject constructor(
             failure is LibraryResult.Unauthorized -> {
                 cancelLoads()
                 relocationSource = null
+                ownLibrary = null
                 _uiState.update {
                     LibraryUiState(status = LibraryStatus.NoSession, contentVersion = it.contentVersion + 1)
                 }
             }
+            // Предоставленная папка недоступна (доступ отозван, истёк или папка удалена): возврат к списку,
+            // а не в собственную библиотеку и не к выходу из аккаунта.
+            failure is LibraryResult.NotFound && _uiState.value.inShared && path.isNotEmpty() -> loadSharedList(SHARED_GONE_NOTICE)
             failure is LibraryResult.NotFound && path.size > 1 -> loadRoot(FOLDER_GONE_NOTICE)
             else -> _uiState.update {
                 it.copy(status = LibraryStatus.Error(failureText(failure)), isLoadingMore = false)
@@ -974,6 +1125,7 @@ class LibraryViewModel @Inject constructor(
         // За сколько изображений до конца загруженной части просмотр запрашивает следующую страницу.
         const val VIEWER_PREFETCH = 3
         const val FOLDER_GONE_NOTICE = "Папка удалена или недоступна. Открыт корень."
+        const val SHARED_GONE_NOTICE = "Папка больше недоступна: доступ отозван, истёк или папка удалена"
         const val NOT_FOUND_TEXT = "Объект или папка назначения не найдены: возможно, они удалены или перемещены"
     }
 }

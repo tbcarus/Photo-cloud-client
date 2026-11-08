@@ -223,8 +223,10 @@ class LibraryGridScreenTest {
     fun gridKeepsListOrderFoldersThenFiles() {
         toGrid()
 
+        // В ROOT первой стоит виртуальная плитка «Доступно мне», затем папки и файлы в порядке списка.
         assertEquals(
-            listOf("Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp", "doc.pdf", "fake.jpg", "clip.mp4")
+            listOf(SHARED_SECTION_NAME, "Camera", "AutoUploads", "Alpha", "Many", "Empty", "photo.jpg", "picture.png", "image.webp",
+                "doc.pdf", "fake.jpg", "clip.mp4")
                 .map { TILE_TAG_PREFIX + it },
             gridTags()
         )
@@ -290,7 +292,7 @@ class LibraryGridScreenTest {
     @Test
     fun tappingVideoOpensPlayerFromGridAndList() {
         toGrid()
-        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(10)
+        compose.onNodeWithTag(GRID_TAG).performScrollToIndex(11)
 
         tile("clip.mp4").performClick()
         compose.waitForIdle()
@@ -299,7 +301,7 @@ class LibraryGridScreenTest {
         viewModel.closeVideo()
 
         compose.onNodeWithContentDescription("Показать списком").performClick()
-        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(10)
+        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(11)
         compose.onNodeWithText("clip.mp4").performClick()
         compose.waitForIdle()
         assertEquals(clip.id, viewModel.videoFileId.value)
@@ -318,6 +320,8 @@ class LibraryGridScreenTest {
         viewModel.closePdf()
 
         compose.onNodeWithContentDescription("Показать списком").performClick()
+        // Строка «Доступно мне» в ROOT сдвигает файлы: PDF — десятая строка списка.
+        compose.onNodeWithTag(LIST_TAG).performScrollToIndex(9)
         compose.onNodeWithText("doc.pdf").performClick()
         compose.waitForIdle()
         assertEquals(pdf.id, viewModel.pdfFileId.value)

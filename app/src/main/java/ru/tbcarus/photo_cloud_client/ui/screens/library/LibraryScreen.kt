@@ -50,6 +50,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderShared
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
@@ -107,6 +108,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import ru.tbcarus.photo_cloud_client.library.thumbnail.LibraryThumbnails
 import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
 import ru.tbcarus.photo_cloud_client.library.thumbnail.ThumbnailScope
@@ -132,6 +134,8 @@ internal const val TILE_TAG_PREFIX = "tile-"
 internal const val THUMBNAIL_TAG_PREFIX = "thumbnail-"
 internal const val FILE_ICON_TAG_PREFIX = "file-icon-"
 internal const val FOLDER_ICON_TAG_PREFIX = "folder-icon-"
+internal const val SHARED_ENTRY_TAG = "shared-entry"
+internal const val SHARED_LIST_TAG = "shared-list"
 private const val ITEM_NAMES_SHOWN = 5
 
 @Composable
@@ -144,8 +148,8 @@ fun LibraryScreen(
     val state by viewModel.uiState.collectAsState()
     val transfer by viewModel.transferState.collectAsState()
     val gridView by viewModel.gridView.collectAsState()
-    // Выбор назначения всегда показывается списком; выбранный вид возвращается после него.
-    val showGrid = gridView && !state.picking
+    // Выбор назначения и список «Доступно мне» (владелец и срок — во второй строке) всегда показываются списком.
+    val showGrid = gridView && !state.picking && !state.atSharedList
 
     // Назначение запоминается до системного выбора: после гибели процесса открытая папка была бы уже другой.
     var destinationId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -256,6 +260,13 @@ fun LibraryScreen(
                 )
             }
         }
+        state.shared?.removal?.let { removal ->
+            RemoveSharedDialog(
+                removal = removal,
+                onConfirm = viewModel::confirmRemoveShared,
+                onDismiss = viewModel::dismissRemoveShared
+            )
+        }
         state.selection?.let { selection ->
             SelectionPanel(state, selection, viewModel)
             if (selection.confirmingDelete) {
@@ -315,7 +326,13 @@ fun LibraryScreen(
                     onAction = viewModel::refresh
                 )
                 LibraryStatus.Content ->
-                    if (state.isEmpty) {
+                    if (state.atSharedList) {
+                        if (state.isEmpty) {
+                            StateMessage(text = "Вам пока ничего не предоставили. Здесь появятся файлы и папки, которыми с вами поделятся.")
+                        } else {
+                            SharedList(state, listState, viewModel, downloadEnabled = !transfer.isActive, thumbnails = thumbnails)
+                        }
+                    } else if (state.isEmpty && !state.showSharedEntry) {
                         StateMessage(text = "Папка пуста")
                     } else {
                         if (showGrid) {
@@ -360,7 +377,7 @@ private fun LibraryHeader(
             Icon(Icons.Default.Refresh, contentDescription = "Обновить")
         }
     }
-    if (state.path.isEmpty()) return
+    if (state.path.isEmpty() && !state.inShared) return
 
     // Длинный путь прокручивается: конец с текущей папкой виден сразу.
     val pathScroll = rememberScrollState()
@@ -368,11 +385,14 @@ private fun LibraryHeader(
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (state.canGoUp) {
             IconButton(onClick = onUp) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "К родительской папке")
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = if (state.atSharedList) "В библиотеку" else "К родительской папке"
+                )
             }
         }
         Text(
-            text = libraryPathLabel(state.path),
+            text = if (state.inShared) sharedPathLabel(state.path) else libraryPathLabel(state.path),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -454,6 +474,12 @@ private fun LibraryList(
     val relocation = state.relocation
     val selection = state.selection
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag(LIST_TAG)) {
+        if (state.showSharedEntry) {
+            item(key = SHARED_ENTRY_TAG) {
+                SharedEntryRow(onClick = viewModel::openShared)
+                HorizontalDivider()
+            }
+        }
         items(state.folders, key = { "folder-${it.id}" }) { folder ->
             val actions = folderActions(state, folder, viewModel, ::keepPosition)
             val selectable = state.canSelect(folder)
@@ -571,6 +597,130 @@ private fun fileActions(
     RowAction("Удалить", { viewModel.startDelete(file) }, destructive = true).takeIf { state.canDelete(file) }
 )
 
+/** Виртуальный элемент корня библиотеки: вход в «Доступно мне». Это не папка Server, действий у него нет. */
+@Composable
+private fun SharedEntryRow(onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp)
+            .testTag(SHARED_ENTRY_TAG)
+    ) {
+        Box(Modifier.width(THUMBNAIL_SIZE), contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.FolderShared, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(ICON_SIZE))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Text(text = SHARED_SECTION_NAME, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "Файлы и папки, которыми с вами поделились",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(Modifier.width(48.dp))
+    }
+}
+
+/**
+ * Список «Доступно мне»: прямые доступы в порядке Server с владельцем и сроком. Папка открывается обычной навигацией,
+ * файл — тем же просмотром, плеером, PDF или внешним приложением, что в библиотеке. Действия — только скачать файл
+ * и убрать доступ из своей библиотеки.
+ */
+@Composable
+private fun SharedList(
+    state: LibraryUiState,
+    listState: LazyListState,
+    viewModel: LibraryViewModel,
+    downloadEnabled: Boolean,
+    thumbnails: LibraryThumbnails
+) {
+    val thumbnailScope by thumbnails.currentScope.collectAsState()
+    val nearEnd by remember(listState) {
+        derivedStateOf {
+            val layout = listState.layoutInfo
+            val last = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
+            last >= 0 && last >= layout.totalItemsCount - LOAD_MORE_THRESHOLD
+        }
+    }
+    LaunchedEffect(nearEnd, state.hasNext, state.isLoadingMore, state.loadMoreError) {
+        if (nearEnd) viewModel.onListEndReached()
+    }
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().testTag(SHARED_LIST_TAG)) {
+        items(state.shared?.entries.orEmpty(), key = { "share-${it.shareId}" }) { entry ->
+            val remove = RowAction("Убрать из моей библиотеки", { viewModel.startRemoveShared(entry) })
+            val file = entry.file
+            if (entry.isFolder || file == null) {
+                FolderRow(
+                    folder = sharedRootFolder(entry),
+                    actions = listOf(remove),
+                    blocked = null,
+                    selected = null,
+                    onClick = { viewModel.openSharedEntry(entry) },
+                    onLongClick = null,
+                    subtitle = sharedSubtitle(entry)
+                )
+            } else {
+                FileRow(
+                    file = file,
+                    thumbnail = remember(file.id, file.checksum, file.mimeType, thumbnailScope) {
+                        Thumbnail.of(file, thumbnailScope)
+                    },
+                    thumbnails = thumbnails,
+                    inCamera = false,
+                    actions = listOf(
+                        RowAction("Скачать", { viewModel.download(file) }, enabled = downloadEnabled && file.id != null),
+                        remove
+                    ),
+                    dimmed = false,
+                    selected = null,
+                    onClick = fileClick(state, file, selectable = false, viewModel),
+                    onLongClick = null,
+                    subtitle = sharedSubtitle(entry)
+                )
+            }
+            HorizontalDivider()
+        }
+        if (state.isLoadingMore) {
+            item(key = "loading-more") { LoadingMore() }
+        }
+        state.loadMoreError?.let { error ->
+            item(key = "load-more-error") { LoadMoreError(error, viewModel::loadNextPage) }
+        }
+    }
+}
+
+/** Подтверждение отказа: файл или папка владельца не удаляются, исчезает только доступ текущего пользователя. */
+@Composable
+private fun RemoveSharedDialog(removal: SharedRemoval, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(dismissOnClickOutside = !removal.removing, dismissOnBackPress = !removal.removing),
+        title = { Text("Убрать из моей библиотеки?") },
+        text = {
+            Column {
+                Text(
+                    "«${removal.entry.name.orEmpty()}» исчезнет из раздела «Доступно мне». У владельца " +
+                        (if (removal.entry.isFolder) "папка" else "файл") +
+                        " останется, вернуть доступ может только он."
+                )
+                removal.error?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !removal.removing) { Text(if (removal.removing) "Удаление…" else "Убрать") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !removal.removing) { Text("Отмена") }
+        }
+    )
+}
+
 @Composable
 private fun LoadingMore() {
     Box(
@@ -634,6 +784,18 @@ private fun LibraryGrid(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
+        if (state.showSharedEntry) {
+            item(key = SHARED_ENTRY_TAG) {
+                LibraryTile(name = SHARED_SECTION_NAME, actions = emptyList(), selected = null, onClick = viewModel::openShared, onLongClick = null) {
+                    Icon(
+                        Icons.Default.FolderShared,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(TILE_ICON_SIZE).testTag(SHARED_ENTRY_TAG)
+                    )
+                }
+            }
+        }
         gridItems(state.folders, key = { "folder-${it.id}" }) { folder ->
             val selectable = state.canSelect(folder)
             LibraryTile(
@@ -767,7 +929,8 @@ private fun FolderRow(
     blocked: String?,
     selected: Boolean?,
     onClick: () -> Unit,
-    onLongClick: (() -> Unit)?
+    onLongClick: (() -> Unit)?,
+    subtitle: String? = folderSubtitle(folder)
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -790,7 +953,7 @@ private fun FolderRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            (blocked ?: folderSubtitle(folder))?.let {
+            (blocked ?: subtitle)?.let {
                 Text(text = it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -810,7 +973,8 @@ private fun FileRow(
     dimmed: Boolean,
     selected: Boolean?,
     onClick: (() -> Unit)?,
-    onLongClick: (() -> Unit)?
+    onLongClick: (() -> Unit)?,
+    subtitle: String = librarySubtitle(file, inCamera)
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -835,7 +999,7 @@ private fun FileRow(
             )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = librarySubtitle(file, inCamera),
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

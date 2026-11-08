@@ -2,6 +2,9 @@ package ru.tbcarus.photo_cloud_client.ui.screens.library
 
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
+import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
+import java.time.Instant
+import java.time.ZoneId
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
@@ -14,6 +17,32 @@ private val shortExtension = Regex("[\\p{L}\\p{N}]{1,8}")
 /** Путь от ROOT: имя системного корня пользователю ничего не говорит. */
 fun libraryPathLabel(path: List<FolderDto>): String =
     path.mapIndexed { index, folder -> if (index == 0) "Корень" else folder.name }.joinToString(" / ")
+
+/** Путь внутри «Доступно мне»: от раздела через корень предоставленного дерева; папок владельца выше него нет. */
+fun sharedPathLabel(path: List<FolderDto>): String =
+    (listOf(SHARED_SECTION_NAME) + path.map { it.name }).joinToString(" / ")
+
+const val SHARED_SECTION_NAME = "Доступно мне"
+
+/**
+ * Вторая строка элемента «Доступно мне»: владелец (имя, иначе email), у файла — тип и размер, срок доступа, если он
+ * задан. Срок приходит моментом UTC и показывается в часовом поясе устройства.
+ */
+fun sharedSubtitle(entry: SharedResourceDto, zone: ZoneId = ZoneId.systemDefault()): String =
+    listOfNotNull(
+        (entry.owner?.displayName?.takeIf { it.isNotBlank() } ?: entry.owner?.email)?.let { "Владелец: $it" },
+        entry.file?.let(::fileTypeLabel),
+        entry.file?.size?.let(::formatLibrarySize),
+        formatShareExpiry(entry.expiresAt, zone)?.let { "доступ до $it" }
+    ).joinToString(" · ")
+
+fun formatShareExpiry(value: String?, zone: ZoneId = ZoneId.systemDefault()): String? = value?.let {
+    try {
+        Instant.parse(it).atZone(zone).format(dateFormat)
+    } catch (_: DateTimeParseException) {
+        null
+    }
+}
 
 /** Вид значка папки в списке. */
 enum class FolderKind { CAMERA, AUTO_UPLOADS, ACTIVE_SOURCE, FOLDER }
