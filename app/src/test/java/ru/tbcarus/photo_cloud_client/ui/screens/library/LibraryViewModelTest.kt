@@ -2334,6 +2334,87 @@ class LibraryViewModelTest {
         assertEquals(listOf(root.id), state.path.map { it.id })
     }
 
+    // --- Переход из уведомления: указатель ищется среди действующих доступов «Доступно мне».
+
+    private val sessionA get() = ru.tbcarus.photo_cloud_client.library.LibrarySession(SERVER_A, "alice")
+
+    @Test
+    fun notificationFolderIsFoundOnLaterPageAndOpensAsSharedRoot() {
+        val sharedRoot = FolderDto(50, 49, "Trips", "USER")
+        repository.setChildren(root, alpha)
+        repository.setShared(0, sharedPage(sharedFile(101, photo(60)), hasNext = true))
+        repository.setShared(1, sharedPage(sharedFolder(102, 50, "Trips")))
+        opened()
+
+        viewModel.openSharedTarget(SharedTarget(sessionA, isFolder = true, resourceId = 50))
+
+        // Цель не на первой странице: поиск идёт по всем страницам, затем обычное чтение папки.
+        assertTrue("shared:0" in repository.calls && "shared:1" in repository.calls)
+        assertEquals(listOf(50L), state.path.map { it.id })
+        assertTrue(state.inShared)
+        assertEquals(LibraryStatus.Content, state.status)
+        // Back — к списку «Доступно мне», не к родителю владельца, затем — в свою библиотеку.
+        viewModel.navigateUp()
+        assertTrue(state.atSharedList)
+        assertFalse("children:49" in repository.calls)
+        viewModel.navigateUp()
+        assertFalse(state.inShared)
+        assertEquals(listOf(root.id), state.path.map { it.id })
+    }
+
+    @Test
+    fun notificationFileOpensInExistingViewerWithoutChangeActions() {
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips"), sharedFile(101, photo(60))))
+        opened()
+
+        viewModel.openSharedTarget(SharedTarget(sessionA, isFolder = false, resourceId = 60))
+
+        assertTrue(state.atSharedList)
+        assertEquals(60L, viewModel.viewerFileId.value)
+        assertEquals(listOf(60L), state.viewerImages.map { it.id })
+        assertFalse(state.canShare(photo(60)) || state.canRename(photo(60)) || state.canDelete(photo(60)))
+        // Папка с тем же ID не путается с файлом.
+        assertTrue(repository.calls.none { it.startsWith("children:") && it != "children:${root.id}" })
+    }
+
+    @Test
+    fun unavailableNotificationTargetShowsSharedListWithExplanation() {
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips"), hasNext = true))
+        repository.setShared(1, sharedPage(sharedFile(101, photo(61))))
+        opened()
+
+        // Доступ отозван: ресурса нет ни на одной странице. Сессия сохраняется, уведомление прав не даёт.
+        viewModel.openSharedTarget(SharedTarget(sessionA, isFolder = false, resourceId = 60))
+
+        assertTrue(state.atSharedList)
+        assertEquals(LibraryStatus.Content, state.status)
+        assertEquals(listOf(100L, 101L), state.shared!!.entries.map { it.shareId })
+        assertTrue(state.notice!!.startsWith("Объект недоступен"))
+        assertNull(viewModel.viewerFileId.value)
+        assertTrue(repository.calls.none { it.startsWith("files:60") || it == "children:60" })
+
+        // Сбой сети при поиске — ошибка с повтором, а не сообщение о потере доступа.
+        repository.fail("shared:0", LibraryResult.NetworkError("timeout"))
+        viewModel.openSharedTarget(SharedTarget(sessionA, isFolder = false, resourceId = 60))
+        assertTrue(state.status is LibraryStatus.Error)
+    }
+
+    @Test
+    fun notificationTargetOfPreviousSessionIsIgnored() {
+        repository.setShared(0, sharedPage(sharedFolder(100, 50, "Trips")))
+        opened()
+        val target = SharedTarget(sessionA, isFolder = true, resourceId = 50)
+
+        tokens.saveTokens(tokensOf("bob"))
+        viewModel.ensureLoaded()
+        viewModel.openSharedTarget(target)
+        baseUrlProvider.baseUrl = SERVER_B
+        viewModel.openSharedTarget(target.copy(session = ru.tbcarus.photo_cloud_client.library.LibrarySession(SERVER_B, "alice")))
+
+        assertFalse(state.inShared)
+        assertTrue(repository.calls.none { it.startsWith("shared:") })
+    }
+
     // --- «Поделиться» и «Предоставлено мной»: управление выданными USER-доступами.
 
     private val sharing get() = viewModel.sharingState.value

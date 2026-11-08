@@ -7,4 +7,6 @@ object Routes {
     const val Profile = "profile"
     const val Library = "library"
     const val Files = "files"
+    // Не вкладка нижней панели: открывается колокольчиком верхней панели.
+    const val Notifications = "notifications"
 }

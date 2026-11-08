@@ -26,6 +26,9 @@ import ru.tbcarus.photo_cloud_client.api.models.ShareDto
 import ru.tbcarus.photo_cloud_client.api.models.SharePageDto
 import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.MoveFolderRequest
+import ru.tbcarus.photo_cloud_client.api.models.NotificationDto
+import ru.tbcarus.photo_cloud_client.api.models.NotificationPageDto
+import ru.tbcarus.photo_cloud_client.api.models.UnreadNotificationCountDto
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
 import ru.tbcarus.photo_cloud_client.api.models.RenameFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.SharedPageDto
@@ -184,6 +187,21 @@ open class LibraryRepository @Inject constructor(
         send(change = true, call = { apiServiceFactory.authShareService().revokeAllLinks(fileId, folderId) }) {
             LibraryResult.Success(Unit)
         }
+
+    // --- Уведомления текущего пользователя: тот же разбор ответов, что у доступов, из которых они возникают ---
+
+    open suspend fun getNotifications(page: Int): LibraryResult<NotificationPageDto> =
+        request { apiServiceFactory.authNotificationService().getNotifications(page, PAGE_SIZE) }
+
+    open suspend fun getUnreadNotificationCount(): LibraryResult<UnreadNotificationCountDto> =
+        request { apiServiceFactory.authNotificationService().getUnreadCount() }
+
+    /** Актуальное уведомление; повтор сохраняет исходный readAt. 404 — уведомления нет у текущего пользователя. */
+    open suspend fun markNotificationRead(id: Long): LibraryResult<NotificationDto> =
+        request { apiServiceFactory.authNotificationService().markRead(id) }
+
+    open suspend fun markAllNotificationsRead(): LibraryResult<Unit> =
+        send(call = { apiServiceFactory.authNotificationService().markAllRead() }) { LibraryResult.Success(Unit) }
 
     // uncertainBody: Retrofit разбирает только тело 2xx, поэтому ошибка разбора означает, что Server операцию принял.
     private suspend fun <T : Any> request(

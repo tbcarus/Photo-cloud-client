@@ -36,4 +36,9 @@ object ApiPaths {
     const val SHARE_ID = "$SHARES/{id}"
     const val SHARES_LINKS = "$SHARES/links"
     const val SHARE_LINK_ID = "$SHARES_LINKS/{id}"
+
+    const val NOTIFICATIONS = "$API_V1/notifications"
+    const val NOTIFICATIONS_UNREAD_COUNT = "$NOTIFICATIONS/unread-count"
+    const val NOTIFICATION_READ = "$NOTIFICATIONS/{id}/read"
+    const val NOTIFICATIONS_READ_ALL = "$NOTIFICATIONS/read-all"
 }

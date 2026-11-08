@@ -3,6 +3,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.library
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
+import ru.tbcarus.photo_cloud_client.library.LibrarySession
 import ru.tbcarus.photo_cloud_client.library.thumbnail.Thumbnail
 
 sealed interface LibraryStatus {
@@ -93,6 +94,12 @@ fun sharedRootFolder(entry: SharedResourceDto): FolderDto =
     FolderDto(entry.resourceId, parentId = null, name = entry.name.orEmpty(), folderType = SHARED_ROOT_TYPE)
 
 const val SHARED_ROOT_TYPE = "SHARED"
+
+/**
+ * Ресурс, который нужно открыть в «Доступно мне» извне Library (из уведомления). Это только указатель: открывается
+ * лишь то, что Server вернул в списке действующих доступов [session].
+ */
+data class SharedTarget(val session: LibrarySession, val isFolder: Boolean, val resourceId: Long)
 
 data class LibraryUiState(
     val status: LibraryStatus = LibraryStatus.Idle,

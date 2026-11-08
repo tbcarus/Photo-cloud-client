@@ -384,6 +384,85 @@ class LibraryViewModel @Inject constructor(
         loadFolder(listOf(sharedRootFolder(entry)))
     }
 
+    /**
+     * Переход из уведомления. Уведомление права не даёт: ресурс ищется среди прямых действующих доступов
+     * «Доступно мне» по всем страницам, дальше работают обычные read-endpoints и их проверки. Папка открывается
+     * корнем предоставленного дерева (выше — только список «Доступно мне»), файл — тем же просмотром, что из списка.
+     * Не найден — список с пояснением: объект может оставаться доступен через предоставленную папку.
+     */
+    fun openSharedTarget(target: SharedTarget) {
+        // Указатель другой сессии не открывается: адрес или пользователь уже сменились.
+        if (target.session != context || context?.user == null) return
+        val state = _uiState.value
+        if (state.batch?.running == true) {
+            _uiState.update { it.copy(notice = BATCH_BUSY_NOTICE) }
+            return
+        }
+        closeViewer()
+        closeVideo()
+        closePdf()
+        cancelExternal()
+        if (state.inGranted) sharing.closeGranted()
+        // Корень собственной библиотеки запоминается для возврата, как при входе в «Доступно мне» вручную.
+        if (!state.inShared && !state.inGranted) {
+            ownLibrary = if (state.showSharedEntry) RelocationSource(state, nextPage, scrollIndex, scrollOffset) else null
+        }
+        relocationSource = null
+        val current = beginLoad(emptyList(), notice = null, keepRelocation = false)
+        _uiState.update { it.copy(shared = SharedBrowse(), batch = null) }
+        loadJob = viewModelScope.launch {
+            val entries = mutableListOf<SharedResourceDto>()
+            var page = 0
+            var hasNext = true
+            var found: SharedResourceDto? = null
+            while (found == null && hasNext) {
+                val result = repository.getSharedWithMe(page)
+                if (current != generation) return@launch
+                when (result) {
+                    is LibraryResult.Success -> {
+                        val items = result.value.items.orEmpty()
+                        entries += items
+                        found = items.firstOrNull { it.isFolder == target.isFolder && it.resourceId == target.resourceId }
+                        // Пустая страница с hasNext не зациклит поиск.
+                        hasNext = result.value.hasNext && items.isNotEmpty()
+                        page++
+                    }
+                    is LibraryResult.Failure -> {
+                        applyFailure(result, emptyList())
+                        return@launch
+                    }
+                }
+            }
+            // Просмотренные страницы становятся списком «Доступно мне»: прокрутка продолжит его с той же страницы.
+            nextPage = page
+            applySharedPage(emptyList(), entries, hasNext)
+            val entry = found
+            val file = entry?.file
+            when {
+                entry == null -> _uiState.update { it.copy(status = LibraryStatus.Content, notice = SHARED_TARGET_GONE_NOTICE) }
+                entry.isFolder -> loadFolder(listOf(sharedRootFolder(entry)))
+                file == null -> _uiState.update { it.copy(status = LibraryStatus.Content, notice = SHARED_TARGET_GONE_NOTICE) }
+                else -> {
+                    _uiState.update { it.copy(status = LibraryStatus.Content) }
+                    openSharedFile(file)
+                }
+            }
+        }
+    }
+
+    // Те же средства, что у нажатия на файл в списке «Доступно мне».
+    private fun openSharedFile(file: FileItemDto) {
+        when {
+            isViewable(file) -> openViewer(file)
+            isPlayableVideo(file) -> openVideo(file)
+            isPdf(file) -> openPdf(file)
+            opensExternally(file) -> openExternal(file)
+            else -> _uiState.update {
+                it.copy(info = "Файл «${file.originalFilename.orEmpty()}» нельзя открыть на устройстве: его можно скачать из списка")
+            }
+        }
+    }
+
     fun startRemoveShared(entry: SharedResourceDto) {
         val state = _uiState.value
         val shared = state.shared ?: return
@@ -1207,6 +1286,9 @@ class LibraryViewModel @Inject constructor(
         const val VIEWER_PREFETCH = 3
         const val FOLDER_GONE_NOTICE = "Папка удалена или недоступна. Открыт корень."
         const val SHARED_GONE_NOTICE = "Папка больше недоступна: доступ отозван, истёк или папка удалена"
-        const val NOT_FOUND_TEXT = "Объект или папка назначения не найдены: возможно, они удалены или перемещены"
+        const val SHARED_TARGET_GONE_NOTICE = "Объект недоступен: доступ отозван или истёк либо объект удалён. " +
+            "Если он находится в предоставленной вам папке, откройте её здесь."
+        const val BATCH_BUSY_NOTICE = "Дождитесь завершения групповой операции"
+        const val NOT_FOUND_TEXT ="Объект или папка назначения не найдены: возможно, они удалены или перемещены"
     }
 }
