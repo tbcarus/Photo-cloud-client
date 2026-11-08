@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
+import ru.tbcarus.photo_cloud_client.api.models.LinkShareDto
+import ru.tbcarus.photo_cloud_client.api.models.ShareAccess
 import ru.tbcarus.photo_cloud_client.api.models.ShareDto
 import ru.tbcarus.photo_cloud_client.library.LibraryRepository
 import ru.tbcarus.photo_cloud_client.library.LibraryResult
@@ -95,7 +97,27 @@ fun recipientsRejectedText(rejected: Map<String, String>): String {
     return "Доступ не предоставлен никому. $reasons"
 }
 
-/** Окно «Поделиться» объекта собственной библиотеки: выданные доступы и форма новой выдачи. */
+internal const val LINKS_UNAVAILABLE_TEXT =
+    "Публичные ссылки на сервере не настроены: администратору нужно задать публичный адрес и ключ ссылок"
+
+/** Режим окна «Поделиться» и раздела «Предоставлено мной»: доступы пользователям или публичные ссылки. */
+enum class ShareMode { USERS, LINKS }
+
+/** Список доступов или ссылок, загружаемый страницами Server. */
+data class ShareList<T>(
+    val entries: List<T> = emptyList(),
+    val loading: Boolean = true,
+    val error: String? = null,
+    val hasNext: Boolean = false,
+    val loadingMore: Boolean = false,
+    val loadMoreError: String? = null,
+    val info: String? = null
+)
+
+/**
+ * Окно «Поделиться» объекта собственной библиотеки. «Пользователям»: выданные доступы и форма новой выдачи.
+ * «По ссылке»: ссылки объекта ([links] загружаются при первом переключении) и создание новой.
+ */
 data class ShareDialog(
     val id: Int,
     val target: LibraryItem,
@@ -110,50 +132,57 @@ data class ShareDialog(
     val error: String? = null,
     val info: String? = null,
     val confirmingRevokeAll: Boolean = false,
-    val revokingAll: Boolean = false
+    val revokingAll: Boolean = false,
+    val mode: ShareMode = ShareMode.USERS,
+    val links: ShareList<LinkShareDto>? = null,
+    val linkExpiry: ExpiryChoice = ExpiryChoice.Never,
+    val creatingLink: Boolean = false,
+    // Только что созданная ссылка: её адрес показывается с действиями «Копировать» и «Поделиться ссылкой».
+    val createdLink: LinkShareDto? = null,
+    val confirmingRevokeAllLinks: Boolean = false,
+    val revokingAllLinks: Boolean = false
 ) {
     val fileId: Long? get() = (target as? LibraryItem.File)?.file?.id
     val folderId: Long? get() = (target as? LibraryItem.Folder)?.folder?.id
-    val busy: Boolean get() = granting || revokingAll
+    val busy: Boolean get() = granting || revokingAll || creatingLink || revokingAllLinks
+
+    /** Папка может содержать фотографии; у файла — по MIME изображения. */
+    val mayContainPhotos: Boolean
+        get() = when (target) {
+            is LibraryItem.Folder -> true
+            is LibraryItem.File -> target.file.mimeType?.startsWith("image/") == true
+        }
 }
 
-/** Раздел «Предоставлено мной»: все выданные текущим пользователем USER-доступы, включая истёкшие. */
-data class GrantedList(
-    val entries: List<ShareDto> = emptyList(),
-    val loading: Boolean = true,
-    val error: String? = null,
-    val hasNext: Boolean = false,
-    val loadingMore: Boolean = false,
-    val loadMoreError: String? = null,
-    val info: String? = null
-)
-
-/** Изменение срока одного доступа (из окна объекта или из «Предоставлено мной»). */
+/** Изменение срока одного доступа или ссылки (из окна объекта или из «Предоставлено мной»). */
 data class ShareEdit(
     val id: Int,
-    val share: ShareDto,
+    val share: ShareAccess,
     val expiry: ExpiryChoice,
     val saving: Boolean = false,
     val error: String? = null
 )
 
-/** Подтверждение отзыва одного доступа. */
+/** Подтверждение отзыва одного доступа или ссылки. */
 data class ShareRevoke(
     val id: Int,
-    val share: ShareDto,
+    val share: ShareAccess,
     val revoking: Boolean = false,
     val error: String? = null
 )
 
+/** [granted] — USER-доступы раздела «Предоставлено мной», [grantedLinks] — его ссылки, загружаются при первом переключении. */
 data class SharingState(
     val dialog: ShareDialog? = null,
-    val granted: GrantedList? = null,
+    val granted: ShareList<ShareDto>? = null,
+    val grantedLinks: ShareList<LinkShareDto>? = null,
+    val grantedMode: ShareMode = ShareMode.USERS,
     val edit: ShareEdit? = null,
     val revoke: ShareRevoke? = null
 )
 
 /**
- * Управление выданными USER-доступами. Состояние живёт рядом с Library и сбрасывается вместе с её контекстом:
+ * Управление выданными USER-доступами и публичными ссылками. Состояние живёт рядом с Library и сбрасывается вместе с её контекстом:
  * [reset] отменяет запросы, а ответы, пришедшие после смены сервера или пользователя, отбрасываются по [generation].
  * Список меняется только после ответа Server, без оптимистичных изменений.
  */
@@ -171,6 +200,8 @@ class LibrarySharing(
     private var serial = 0
     private var dialogPage = 0
     private var grantedPage = 0
+    private var dialogLinkPage = 0
+    private var grantedLinkPage = 0
 
     /** Смена сервера, пользователя или потеря сессии: окна закрываются, данные прежнего аккаунта не показываются. */
     fun reset() {
@@ -279,6 +310,101 @@ class LibrarySharing(
         }
     }
 
+    fun selectMode(mode: ShareMode) {
+        val dialog = _state.value.dialog ?: return
+        if (dialog.busy || dialog.mode == mode) return
+        updateDialog { it.copy(mode = mode, error = null, info = null) }
+        if (mode == ShareMode.LINKS && dialog.links == null) {
+            updateDialog { it.copy(links = ShareList()) }
+            loadLinks(dialog.id, reset = true)
+        }
+    }
+
+    fun onLinkExpiryChange(choice: ExpiryChoice) = updateDialog { if (it.creatingLink) it else it.copy(linkExpiry = choice, error = null) }
+
+    fun loadMoreDialogLinks() {
+        val links = _state.value.dialog?.links ?: return
+        if (links.loading || links.loadingMore || !links.hasNext || links.loadMoreError != null) return
+        loadLinks(_state.value.dialog?.id, reset = false)
+    }
+
+    fun retryDialogLinks() {
+        val dialog = _state.value.dialog ?: return
+        val links = dialog.links ?: return
+        loadLinks(dialog.id, reset = links.error != null || links.entries.isEmpty())
+    }
+
+    /**
+     * Каждое создание — новая независимая ссылка. Адрес показывается только из ответа Server; ответ без адреса —
+     * ошибка без сообщения об успехе, а список ссылок перечитывается, чтобы созданную можно было отозвать.
+     */
+    fun createLink() {
+        val dialog = _state.value.dialog ?: return
+        if (dialog.busy) return
+        val expiry = expiryValue(dialog.linkExpiry, now())
+        if (expiry is ExpiryValue.Invalid) {
+            updateDialog { it.copy(error = expiry.message, info = null) }
+            return
+        }
+        updateDialog { it.copy(creatingLink = true, createdLink = null, error = null, info = null) }
+        track { current ->
+            val result = repository.createLink(dialog.fileId, dialog.folderId, (expiry as ExpiryValue.Valid).iso)
+            if (!stillFor(current, dialog.id)) return@track
+            when (result) {
+                is LibraryResult.Success -> {
+                    val link = result.value
+                    updateDialog {
+                        if (link.shareableUrl == null) {
+                            it.copy(creatingLink = false, error = "Server не вернул адрес ссылки. Отзовите её в списке и создайте новую")
+                        } else {
+                            it.copy(creatingLink = false, createdLink = link, linkExpiry = ExpiryChoice.Never, info = "Ссылка создана")
+                        }
+                    }
+                    loadLinks(dialog.id, reset = true)
+                }
+                LibraryResult.Unauthorized -> onUnauthorized()
+                LibraryResult.NotFound -> updateDialog { it.copy(creatingLink = false, error = goneText(it)) }
+                is LibraryResult.Failure -> updateDialog { it.copy(creatingLink = false, error = failureText(result)) }
+            }
+        }
+    }
+
+    fun requestRevokeAllLinks() = updateDialog {
+        if (it.busy || it.links?.entries.isNullOrEmpty()) it else it.copy(confirmingRevokeAllLinks = true, error = null)
+    }
+
+    fun dismissRevokeAllLinks() = updateDialog { if (it.revokingAllLinks) it else it.copy(confirmingRevokeAllLinks = false) }
+
+    /** Отключает только ссылки этого объекта: USER-доступы и ссылки вложенных объектов не меняются. */
+    fun confirmRevokeAllLinks() {
+        val dialog = _state.value.dialog ?: return
+        if (!dialog.confirmingRevokeAllLinks || dialog.busy) return
+        updateDialog { it.copy(revokingAllLinks = true, error = null, info = null) }
+        track { current ->
+            val result = repository.revokeAllLinks(dialog.fileId, dialog.folderId)
+            if (!stillFor(current, dialog.id)) return@track
+            when (result) {
+                is LibraryResult.Success -> {
+                    updateDialog {
+                        it.copy(revokingAllLinks = false, confirmingRevokeAllLinks = false, createdLink = null,
+                            info = "Все ссылки на объект отключены")
+                    }
+                    loadLinks(dialog.id, reset = true)
+                }
+                LibraryResult.Unauthorized -> onUnauthorized()
+                LibraryResult.NotFound -> updateDialog {
+                    it.copy(revokingAllLinks = false, confirmingRevokeAllLinks = false, error = goneText(it))
+                }
+                is LibraryResult.Failure -> updateDialog {
+                    it.copy(revokingAllLinks = false, confirmingRevokeAllLinks = false, error = failureText(result))
+                }
+            }
+        }
+    }
+
+    /** Подтверждение копирования: адрес уже в буфере обмена, в состояние он не записывается повторно. */
+    fun onLinkCopied() = announce("Ссылка скопирована")
+
     private fun loadDialogShares(reset: Boolean) {
         val dialog = _state.value.dialog ?: return
         val page = if (reset) 0 else dialogPage
@@ -314,7 +440,7 @@ class LibrarySharing(
 
     // --- Изменение срока и отзыв одного доступа ---
 
-    fun startEdit(share: ShareDto) {
+    fun startEdit(share: ShareAccess) {
         val state = _state.value
         if (state.edit != null || state.revoke != null || state.dialog?.busy == true) return
         _state.update { it.copy(edit = ShareEdit(++serial, share, expiryChoiceOf(share.expiresAt, now().zone))) }
@@ -335,13 +461,17 @@ class LibrarySharing(
         }
         updateEdit { it.copy(saving = true, error = null) }
         track { current ->
-            val result = repository.updateShareExpiry(edit.share.id, (expiry as ExpiryValue.Valid).iso)
+            val iso = (expiry as ExpiryValue.Valid).iso
+            val result: LibraryResult<ShareAccess> = when (val share = edit.share) {
+                is LinkShareDto -> repository.updateLinkExpiry(share.id, iso)
+                else -> repository.updateShareExpiry(share.id, iso)
+            }
             if (current != generation || _state.value.edit?.id != edit.id) return@track
             when (result) {
                 is LibraryResult.Success -> {
                     _state.update { it.copy(edit = null) }
                     replaceShare(result.value)
-                    announce("Срок доступа для ${recipientLabel(result.value)} изменён")
+                    announce(if (result.value is LinkShareDto) "Срок ссылки изменён" else "Срок доступа для ${recipientLabel(result.value)} изменён")
                 }
                 LibraryResult.Unauthorized -> onUnauthorized()
                 LibraryResult.NotFound -> {
@@ -353,7 +483,7 @@ class LibrarySharing(
         }
     }
 
-    fun startRevoke(share: ShareDto) {
+    fun startRevoke(share: ShareAccess) {
         val state = _state.value
         if (state.edit != null || state.revoke != null || state.dialog?.busy == true) return
         _state.update { it.copy(revoke = ShareRevoke(++serial, share)) }
@@ -367,18 +497,14 @@ class LibrarySharing(
         if (revoke.revoking) return
         _state.update { it.copy(revoke = revoke.copy(revoking = true, error = null)) }
         track { current ->
-            val result = repository.revokeShare(revoke.share.id)
+            val link = revoke.share is LinkShareDto
+            val result = if (link) repository.revokeLink(revoke.share.id) else repository.revokeShare(revoke.share.id)
             if (current != generation || _state.value.revoke?.id != revoke.id) return@track
             when (result) {
                 is LibraryResult.Success -> {
-                    _state.update { state ->
-                        state.copy(
-                            revoke = null,
-                            dialog = state.dialog?.let { it.copy(shares = it.shares.filter { share -> share.id != revoke.share.id }) },
-                            granted = state.granted?.let { it.copy(entries = it.entries.filter { share -> share.id != revoke.share.id }) }
-                        )
-                    }
-                    announce("Доступ для ${recipientLabel(revoke.share)} отозван")
+                    _state.update { it.copy(revoke = null) }
+                    removeShare(revoke.share)
+                    announce(if (link) "Ссылка отозвана" else "Доступ для ${recipientLabel(revoke.share)} отозван")
                 }
                 LibraryResult.Unauthorized -> onUnauthorized()
                 LibraryResult.NotFound -> {
@@ -395,15 +521,40 @@ class LibrarySharing(
     // --- «Предоставлено мной» ---
 
     fun openGranted() {
-        _state.update { it.copy(granted = GrantedList()) }
+        _state.update { it.copy(granted = ShareList(), grantedLinks = null, grantedMode = ShareMode.USERS) }
         loadGranted(reset = true)
     }
 
-    fun closeGranted() = _state.update { it.copy(granted = null, edit = null, revoke = null) }
+    fun closeGranted() = _state.update {
+        it.copy(granted = null, grantedLinks = null, grantedMode = ShareMode.USERS, edit = null, revoke = null)
+    }
+
+    /** Режимы раздела загружаются и листаются независимо; ссылки — при первом переключении. */
+    fun selectGrantedMode(mode: ShareMode) {
+        val state = _state.value
+        if (state.granted == null || state.grantedMode == mode) return
+        _state.update { it.copy(grantedMode = mode) }
+        if (mode == ShareMode.LINKS && state.grantedLinks == null) {
+            _state.update { it.copy(grantedLinks = ShareList()) }
+            loadLinks(null, reset = true)
+        }
+    }
 
     fun refreshGranted() {
-        if (_state.value.granted == null) return
-        loadGranted(reset = true)
+        val state = _state.value
+        if (state.granted == null) return
+        if (state.grantedMode == ShareMode.LINKS) loadLinks(null, reset = true) else loadGranted(reset = true)
+    }
+
+    fun loadMoreGrantedLinks() {
+        val links = _state.value.grantedLinks ?: return
+        if (links.loading || links.loadingMore || !links.hasNext || links.loadMoreError != null) return
+        loadLinks(null, reset = false)
+    }
+
+    fun retryMoreGrantedLinks() {
+        updateLinks(null) { it.copy(loadMoreError = null) }
+        loadMoreGrantedLinks()
     }
 
     fun loadMoreGranted() {
@@ -449,15 +600,96 @@ class LibrarySharing(
 
     // --- Общее ---
 
-    private fun replaceShare(share: ShareDto) = _state.update { state ->
-        state.copy(
-            dialog = state.dialog?.let { it.copy(shares = it.shares.map { old -> if (old.id == share.id) share else old }) },
-            granted = state.granted?.let { it.copy(entries = it.entries.map { old -> if (old.id == share.id) share else old }) }
-        )
+    /**
+     * Ссылки окна объекта ([dialogId]) или раздела «Предоставлено мной» (null). Ответ применяется, только если
+     * тот же список ещё показан в той же сессии.
+     */
+    private fun loadLinks(dialogId: Int?, reset: Boolean, info: String? = null) {
+        val dialog = if (dialogId == null) null else _state.value.dialog?.takeIf { it.id == dialogId } ?: return
+        val page = if (reset) 0 else if (dialog != null) dialogLinkPage else grantedLinkPage
+        updateLinks(dialogId) {
+            if (reset) it.copy(loading = true, error = null, loadMoreError = null, info = info ?: it.info)
+            else it.copy(loadingMore = true, loadMoreError = null)
+        }
+        track { current ->
+            val result = repository.getLinks(dialog?.fileId, dialog?.folderId, page)
+            val shown = if (dialogId == null) _state.value.grantedLinks != null else _state.value.dialog?.id == dialogId
+            if (current != generation || !shown) return@track
+            when (result) {
+                is LibraryResult.Success -> {
+                    if (dialog != null) dialogLinkPage = page + 1 else grantedLinkPage = page + 1
+                    updateLinks(dialogId) {
+                        val loaded = if (reset) emptyList() else it.entries
+                        it.copy(
+                            entries = (loaded + result.value.items.orEmpty()).distinctBy { link -> link.id },
+                            hasNext = result.value.hasNext,
+                            loading = false,
+                            loadingMore = false
+                        )
+                    }
+                }
+                LibraryResult.Unauthorized -> onUnauthorized()
+                is LibraryResult.Failure -> {
+                    val text = if (result == LibraryResult.NotFound && dialog != null) goneText(dialog) else failureText(result)
+                    updateLinks(dialogId) {
+                        if (reset) it.copy(loading = false, error = text) else it.copy(loadingMore = false, loadMoreError = text)
+                    }
+                }
+            }
+        }
     }
 
-    // Доступ уже отозван или удалён вместе с объектом: показанные списки перечитываются с начала.
-    private fun shareGone(share: ShareDto) {
+    private fun replaceShare(share: ShareAccess) = _state.update { state ->
+        when (share) {
+            is LinkShareDto -> state.copy(
+                dialog = state.dialog?.let { dialog ->
+                    dialog.copy(
+                        links = dialog.links?.let { it.copy(entries = it.entries.map { old -> if (old.id == share.id) share else old }) },
+                        createdLink = dialog.createdLink?.let { if (it.id == share.id) share else it }
+                    )
+                },
+                grantedLinks = state.grantedLinks?.let { it.copy(entries = it.entries.map { old -> if (old.id == share.id) share else old }) }
+            )
+            is ShareDto -> state.copy(
+                dialog = state.dialog?.let { it.copy(shares = it.shares.map { old -> if (old.id == share.id) share else old }) },
+                granted = state.granted?.let { it.copy(entries = it.entries.map { old -> if (old.id == share.id) share else old }) }
+            )
+            else -> state
+        }
+    }
+
+    private fun removeShare(share: ShareAccess) = _state.update { state ->
+        if (share is LinkShareDto) {
+            state.copy(
+                dialog = state.dialog?.let { dialog ->
+                    dialog.copy(
+                        links = dialog.links?.let { it.copy(entries = it.entries.filter { link -> link.id != share.id }) },
+                        createdLink = dialog.createdLink?.takeIf { it.id != share.id }
+                    )
+                },
+                grantedLinks = state.grantedLinks?.let { it.copy(entries = it.entries.filter { link -> link.id != share.id }) }
+            )
+        } else {
+            state.copy(
+                dialog = state.dialog?.let { it.copy(shares = it.shares.filter { old -> old.id != share.id }) },
+                granted = state.granted?.let { it.copy(entries = it.entries.filter { old -> old.id != share.id }) }
+            )
+        }
+    }
+
+    // Доступ или ссылка уже отозваны или удалены вместе с объектом: показанные списки перечитываются с начала.
+    private fun shareGone(share: ShareAccess) {
+        if (share is LinkShareDto) {
+            val message = "Ссылка уже отозвана или удалена"
+            removeShare(share)
+            val dialog = _state.value.dialog
+            if (dialog != null) {
+                updateDialog { it.copy(info = message) }
+                if (dialog.links != null) loadLinks(dialog.id, reset = true)
+            }
+            if (_state.value.grantedLinks != null) loadLinks(null, reset = true, info = message)
+            return
+        }
         val message = "Доступ для ${recipientLabel(share)} уже отозван или удалён"
         if (_state.value.dialog != null) {
             updateDialog { it.copy(info = message) }
@@ -467,12 +699,26 @@ class LibrarySharing(
     }
 
     private fun announce(message: String) = _state.update { state ->
-        if (state.dialog != null) state.copy(dialog = state.dialog.copy(info = message, error = null))
-        else state.copy(granted = state.granted?.copy(info = message))
+        when {
+            state.dialog != null -> state.copy(dialog = state.dialog.copy(info = message, error = null))
+            state.grantedMode == ShareMode.LINKS -> state.copy(grantedLinks = state.grantedLinks?.copy(info = message))
+            else -> state.copy(granted = state.granted?.copy(info = message))
+        }
     }
 
-    private fun recipientLabel(share: ShareDto): String =
-        share.recipient?.email ?: share.recipient?.displayName ?: "получателя"
+    private fun recipientLabel(share: ShareAccess): String =
+        (share as? ShareDto)?.recipient?.let { it.email ?: it.displayName } ?: "получателя"
+
+    private fun goneText(dialog: ShareDialog): String = "«${dialog.target.name}» не найден: возможно, объект удалён"
+
+    private fun updateLinks(dialogId: Int?, change: (ShareList<LinkShareDto>) -> ShareList<LinkShareDto>) = _state.update { state ->
+        if (dialogId == null) {
+            state.grantedLinks?.let { state.copy(grantedLinks = change(it)) } ?: state
+        } else {
+            val dialog = state.dialog?.takeIf { it.id == dialogId }
+            dialog?.links?.let { state.copy(dialog = dialog.copy(links = change(it))) } ?: state
+        }
+    }
 
     private fun stillFor(current: Int, dialogId: Int): Boolean = current == generation && _state.value.dialog?.id == dialogId
 
@@ -489,7 +735,7 @@ class LibrarySharing(
     private fun updateEdit(change: (ShareEdit) -> ShareEdit) =
         _state.update { state -> state.edit?.let { state.copy(edit = change(it)) } ?: state }
 
-    private fun updateGranted(change: (GrantedList) -> GrantedList) =
+    private fun updateGranted(change: (ShareList<ShareDto>) -> ShareList<ShareDto>) =
         _state.update { state -> state.granted?.let { state.copy(granted = change(it)) } ?: state }
 
     private fun failureText(failure: LibraryResult.Failure): String = when (failure) {
@@ -497,6 +743,7 @@ class LibrarySharing(
         is LibraryResult.ServerError -> "Ошибка сервера: ${failure.message}"
         is LibraryResult.Rejected -> "Сервер отклонил операцию: ${failure.message}"
         is LibraryResult.RecipientsRejected -> recipientsRejectedText(failure.rejected)
+        LibraryResult.LinksUnavailable -> LINKS_UNAVAILABLE_TEXT
         is LibraryResult.UnknownResult -> "Результат операции неизвестен: ${failure.message}"
         LibraryResult.NotFound -> "Не найдено: возможно, объект или доступ удалены"
         LibraryResult.Unauthorized -> "Требуется вход"

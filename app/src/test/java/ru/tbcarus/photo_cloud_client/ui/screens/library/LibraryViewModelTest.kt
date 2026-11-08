@@ -26,6 +26,8 @@ import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
+import ru.tbcarus.photo_cloud_client.api.models.LinkPageDto
+import ru.tbcarus.photo_cloud_client.api.models.LinkShareDto
 import ru.tbcarus.photo_cloud_client.api.models.ShareDto
 import ru.tbcarus.photo_cloud_client.api.models.SharePageDto
 import ru.tbcarus.photo_cloud_client.api.models.ShareUserDto
@@ -2495,6 +2497,194 @@ class LibraryViewModelTest {
         assertEquals(1, repository.calls.count { it.startsWith("shares:") })
     }
 
+    // --- Публичные ссылки: режим «По ссылке» окна «Поделиться» и раздела «Предоставлено мной».
+
+    private fun link(id: Long, url: String? = "https://cloud.test/s/t$id", expiresAt: String? = null, status: String = "ACTIVE") =
+        LinkShareDto(id, "FILE", 10, "file10.txt", url, expiresAt, status, "2026-11-08T10:00:00Z")
+
+    private fun openLinks(item: LibraryItem) {
+        viewModel.startShare(item)
+        viewModel.selectShareMode(ShareMode.LINKS)
+    }
+
+    @Test
+    fun eachCreationMakesIndependentLinkWithServerUrl() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        viewModel.startShare(LibraryItem.File(file(10)))
+        // Ссылки читаются только при переходе в режим «По ссылке».
+        assertEquals(ShareMode.USERS, sharing.dialog!!.mode)
+        assertTrue(repository.calls.none { it.startsWith("links:") })
+        viewModel.selectShareMode(ShareMode.LINKS)
+        assertTrue(sharing.dialog!!.links!!.entries.isEmpty())
+
+        repository.setLinks(10, null, 0, LinkPageDto(items = listOf(link(200))))
+        viewModel.createLink()
+        assertEquals("https://cloud.test/s/t200", sharing.dialog!!.createdLink!!.shareableUrl)
+        assertEquals("Ссылка создана", sharing.dialog!!.info)
+        assertEquals(listOf(200L), sharing.dialog!!.links!!.entries.map { it.id })
+
+        repository.setLinks(10, null, 0, LinkPageDto(items = listOf(link(201), link(200))))
+        viewModel.createLink()
+        assertEquals(listOf("10:null:null", "10:null:null"), repository.linkCreates)
+        assertEquals(201L, sharing.dialog!!.createdLink!!.id)
+        assertEquals(listOf(201L, 200L), sharing.dialog!!.links!!.entries.map { it.id })
+        // USER-доступы режимом ссылок не меняются.
+        assertTrue(repository.grants.isEmpty())
+    }
+
+    @Test
+    fun linkExpiryUsesSharedCalculation() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        openLinks(LibraryItem.File(file(10)))
+
+        viewModel.onLinkExpiryChange(ExpiryChoice.Days("0"))
+        viewModel.createLink()
+        assertEquals("Укажите положительное число дней", sharing.dialog!!.error)
+        assertTrue(repository.linkCreates.isEmpty())
+
+        viewModel.onLinkExpiryChange(ExpiryChoice.Days("7"))
+        viewModel.createLink()
+        val expiresAt = java.time.OffsetDateTime.parse(repository.linkCreates.single().substringAfter("10:null:"))
+        val expected = java.time.OffsetDateTime.now().plusDays(7)
+        assertTrue(kotlin.math.abs(java.time.Duration.between(expected, expiresAt).seconds) < 60)
+        // После создания форма возвращается к бессрочному сроку.
+        assertEquals(ExpiryChoice.Never, sharing.dialog!!.linkExpiry)
+    }
+
+    @Test
+    fun editLinkToNeverSendsNullAndUpdatesRow() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        repository.setLinks(10, null, 0, LinkPageDto(items = listOf(link(5, expiresAt = "2020-01-01T00:00:00Z", status = "EXPIRED"))))
+        opened()
+        openLinks(LibraryItem.File(file(10)))
+
+        viewModel.startEditShare(sharing.dialog!!.links!!.entries.single())
+        assertTrue(sharing.edit!!.expiry is ExpiryChoice.Until)
+        viewModel.onEditShareExpiryChange(ExpiryChoice.Never)
+        viewModel.confirmEditShare()
+
+        assertTrue("updateLink:5:null" in repository.calls)
+        assertTrue(repository.calls.none { it.startsWith("updateShare:") })
+        val updated = sharing.dialog!!.links!!.entries.single()
+        assertNull(updated.expiresAt)
+        assertEquals("ACTIVE", updated.status)
+        assertEquals("Срок ссылки изменён", sharing.dialog!!.info)
+    }
+
+    @Test
+    fun revokeLinkOnlyAfterSuccessAndRevokeAllKeepsUserShares() {
+        repository.setChildren(root, alpha)
+        repository.setLinks(null, alpha.id, 0, LinkPageDto(items = listOf(link(1), link(2))))
+        opened()
+        openLinks(LibraryItem.Folder(alpha))
+
+        repository.fail("revokeLink:1", LibraryResult.NetworkError("timeout"))
+        viewModel.startRevokeShare(sharing.dialog!!.links!!.entries.first())
+        viewModel.confirmRevokeShare()
+        assertEquals(listOf(1L, 2L), sharing.dialog!!.links!!.entries.map { it.id })
+        assertEquals("Нет связи с сервером: timeout", sharing.revoke!!.error)
+
+        repository.succeed("revokeLink:1")
+        viewModel.confirmRevokeShare()
+        assertEquals(listOf(2L), sharing.dialog!!.links!!.entries.map { it.id })
+        assertEquals("Ссылка отозвана", sharing.dialog!!.info)
+
+        repository.setLinks(null, alpha.id, 0, LinkPageDto(items = emptyList()))
+        viewModel.requestRevokeAllLinks()
+        viewModel.confirmRevokeAllLinks()
+        assertTrue("revokeAllLinks:null:${alpha.id}" in repository.calls)
+        assertTrue(sharing.dialog!!.links!!.entries.isEmpty())
+        assertEquals("Все ссылки на объект отключены", sharing.dialog!!.info)
+        // USER-доступы и сами объекты не затронуты.
+        assertTrue(repository.calls.none { it.startsWith("revokeAll:") || it.startsWith("revokeShare:") || it.startsWith("delete") })
+    }
+
+    @Test
+    fun grantedLinksModeHasOwnRequestsAndPaging() {
+        repository.setChildren(root, alpha)
+        repository.setShares(null, null, 0, SharePageDto(items = listOf(share(1, "a@test"))))
+        repository.setLinks(null, null, 0, LinkPageDto(items = listOf(link(11)), hasNext = true))
+        repository.setLinks(null, null, 1, LinkPageDto(items = listOf(link(12, status = "EXPIRED"))))
+        opened()
+
+        viewModel.openGranted()
+        assertTrue(repository.calls.none { it.startsWith("links:") })
+        viewModel.selectGrantedMode(ShareMode.LINKS)
+        assertEquals(listOf(11L), sharing.grantedLinks!!.entries.map { it.id })
+        viewModel.loadMoreGrantedLinks()
+        assertEquals(listOf(11L, 12L), sharing.grantedLinks!!.entries.map { it.id })
+        assertEquals(listOf(1L), sharing.granted!!.entries.map { it.id })
+
+        // Возврат к «Пользователям» не перечитывает список; обновление — только текущий режим.
+        viewModel.selectGrantedMode(ShareMode.USERS)
+        viewModel.selectGrantedMode(ShareMode.LINKS)
+        viewModel.refresh()
+        assertEquals(1, repository.calls.count { it == "shares:null:null:0" })
+        assertEquals(2, repository.calls.count { it == "links:null:null:0" })
+
+        viewModel.navigateUp()
+        assertFalse(state.inGranted)
+        assertNull(sharing.grantedLinks)
+        assertEquals(listOf(alpha.id), state.folders.map { it.id })
+    }
+
+    @Test
+    fun linkFailuresShowReasonWithoutFakeSuccess() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        repository.setLinks(10, null, 0, LinkPageDto(items = listOf(link(7, url = null))))
+        opened()
+        openLinks(LibraryItem.File(file(10)))
+        // Адрес прежней ссылки получить нельзя, но строка остаётся для отзыва.
+        assertNull(sharing.dialog!!.links!!.entries.single().shareableUrl)
+
+        repository.fail("createLink", LibraryResult.LinksUnavailable)
+        viewModel.createLink()
+        assertEquals(LINKS_UNAVAILABLE_TEXT, sharing.dialog!!.error)
+        assertNull(sharing.dialog!!.createdLink)
+        assertNull(sharing.dialog!!.info)
+        assertEquals(listOf(7L), sharing.dialog!!.links!!.entries.map { it.id })
+
+        // Server создал ссылку, но не вернул адрес: успеха нет, список перечитывается для отзыва.
+        repository.succeed("createLink")
+        repository.linkUrlBase = null
+        viewModel.createLink()
+        assertTrue(sharing.dialog!!.error!!.startsWith("Server не вернул адрес ссылки"))
+        assertNull(sharing.dialog!!.createdLink)
+        assertEquals(2, repository.calls.count { it == "links:10:null:0" })
+
+        repository.fail("createLink", LibraryResult.NotFound)
+        viewModel.createLink()
+        assertEquals("«file10.txt» не найден: возможно, объект удалён", sharing.dialog!!.error)
+
+        // Ссылка уже отозвана: строка уходит после перечитывания, без ложного «отозвана».
+        repository.setLinks(10, null, 0, LinkPageDto(items = emptyList()))
+        repository.fail("revokeLink:7", LibraryResult.NotFound)
+        viewModel.startRevokeShare(sharing.dialog!!.links!!.entries.single())
+        viewModel.confirmRevokeShare()
+        assertEquals("Ссылка уже отозвана или удалена", sharing.dialog!!.info)
+        assertTrue(sharing.dialog!!.links!!.entries.isEmpty())
+    }
+
+    @Test
+    fun accountChangeDropsLateCreatedLink() {
+        repository.setFiles(root, 0, page(listOf(file(10))))
+        opened()
+        openLinks(LibraryItem.File(file(10)))
+        val gate = repository.hold("createLink")
+        viewModel.createLink()
+        assertTrue(sharing.dialog!!.creatingLink)
+
+        tokens.saveTokens(tokensOf("bob"))
+        gate.complete(Unit)
+
+        // Адрес прежней сессии не показывается и не попадает в новую.
+        assertNull(sharing.dialog)
+        assertNull(sharing.grantedLinks)
+        assertEquals(1, repository.calls.count { it.startsWith("links:") })
+    }
+
     // --- Полноэкранный просмотр: состояние в ViewModel, Library под ним не меняется.
 
     private fun photo(id: Long, mime: String = "image/jpeg") =
@@ -2912,6 +3102,37 @@ class LibraryViewModelTest {
 
         override suspend fun revokeAllShares(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
             answer("revokeAll:$fileId:$folderId", Unit)
+
+        val linkCreates = mutableListOf<String>()
+        private val linkPages = HashMap<String, LinkPageDto>()
+        private var nextLinkId = 200L
+        // null — Server ответил без адреса.
+        var linkUrlBase: String? = "https://cloud.test/s/t"
+
+        fun setLinks(fileId: Long?, folderId: Long?, page: Int, value: LinkPageDto) {
+            linkPages["links:$fileId:$folderId:$page"] = value
+        }
+
+        override suspend fun createLink(fileId: Long?, folderId: Long?, expiresAt: String?): LibraryResult<LinkShareDto> {
+            linkCreates += "$fileId:$folderId:$expiresAt"
+            val id = nextLinkId++
+            return answer("createLink", LinkShareDto(id, if (folderId != null) "FOLDER" else "FILE", fileId ?: folderId ?: 0,
+                "file10.txt", linkUrlBase?.let { it + id }, expiresAt, "ACTIVE", "2026-11-08T10:00:00Z"))
+        }
+
+        override suspend fun getLinks(fileId: Long?, folderId: Long?, page: Int): LibraryResult<LinkPageDto> {
+            val key = "links:$fileId:$folderId:$page"
+            return answer(key, linkPages[key] ?: LinkPageDto(items = emptyList()))
+        }
+
+        override suspend fun updateLinkExpiry(linkId: Long, expiresAt: String?): LibraryResult<LinkShareDto> =
+            answer("updateLink:$linkId:$expiresAt", LinkShareDto(linkId, "FILE", 10, "file10.txt",
+                "https://cloud.test/s/t$linkId", expiresAt, "ACTIVE", "2026-11-08T10:00:00Z"))
+
+        override suspend fun revokeLink(linkId: Long): LibraryResult<Unit> = answer("revokeLink:$linkId", Unit)
+
+        override suspend fun revokeAllLinks(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
+            answer("revokeAllLinks:$fileId:$folderId", Unit)
 
         override suspend fun getRoot(): LibraryResult<FolderDto> = answer("root", root)
 

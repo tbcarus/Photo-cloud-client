@@ -14,11 +14,14 @@ import retrofit2.Call
 import retrofit2.Response
 import retrofit2.awaitResponse
 import ru.tbcarus.photo_cloud_client.api.models.CopyFileRequest
+import ru.tbcarus.photo_cloud_client.api.models.CreateLinkRequest
 import ru.tbcarus.photo_cloud_client.api.models.CreateFolderRequest
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.api.models.GrantShareRequest
+import ru.tbcarus.photo_cloud_client.api.models.LinkPageDto
+import ru.tbcarus.photo_cloud_client.api.models.LinkShareDto
 import ru.tbcarus.photo_cloud_client.api.models.ShareDto
 import ru.tbcarus.photo_cloud_client.api.models.SharePageDto
 import ru.tbcarus.photo_cloud_client.api.models.MoveFileRequest
@@ -53,6 +56,8 @@ sealed interface LibraryResult<out T> {
     data class UnknownResult(val message: String) : Failure
     /** 400 SHARE_RECIPIENT_UNAVAILABLE: выдача отклонена целиком; адрес → причина Server. */
     data class RecipientsRejected(val rejected: Map<String, String>) : Failure
+    /** 503 LINK_SHARING_UNAVAILABLE: на Server не заданы публичный адрес или ключ ссылок. */
+    data object LinksUnavailable : Failure
 }
 
 /**
@@ -70,6 +75,7 @@ open class LibraryRepository @Inject constructor(
         private const val SORT_BY_NAME = "name"
         private const val FOLDER_MANAGED = "FOLDER_MANAGED"
         private const val SHARE_RECIPIENT_UNAVAILABLE = "SHARE_RECIPIENT_UNAVAILABLE"
+        private const val LINK_SHARING_UNAVAILABLE = "LINK_SHARING_UNAVAILABLE"
         private val JSON = "application/json; charset=utf-8".toMediaType()
         // Только для тела изменения срока: явный null снимает срок. Общий Gson Retrofit null-поля не пишет.
         private val nullAwareGson = GsonBuilder().serializeNulls().create()
@@ -139,13 +145,13 @@ open class LibraryRepository @Inject constructor(
         request { apiServiceFactory.authShareService().getShares(fileId, folderId, page, PAGE_SIZE) }
 
     /** [expiresAt] — ISO-8601 со смещением; null отправляется явным {"expiresAt":null} и делает доступ бессрочным. */
-    open suspend fun updateShareExpiry(shareId: Long, expiresAt: String?): LibraryResult<ShareDto> {
-        val body = JsonObject().apply {
-            if (expiresAt == null) add("expiresAt", JsonNull.INSTANCE) else addProperty("expiresAt", expiresAt)
-        }
-        val json = nullAwareGson.toJson(body).toRequestBody(JSON)
-        return request(change = true) { apiServiceFactory.authShareService().updateExpiry(shareId, json) }
-    }
+    open suspend fun updateShareExpiry(shareId: Long, expiresAt: String?): LibraryResult<ShareDto> =
+        request(change = true) { apiServiceFactory.authShareService().updateExpiry(shareId, expiryBody(expiresAt)) }
+
+    // Тело изменения срока USER-доступа и ссылки.
+    private fun expiryBody(expiresAt: String?) = JsonObject().apply {
+        if (expiresAt == null) add("expiresAt", JsonNull.INSTANCE) else addProperty("expiresAt", expiresAt)
+    }.let { nullAwareGson.toJson(it).toRequestBody(JSON) }
 
     /** Отзыв одного доступа; 404 — его уже нет. */
     open suspend fun revokeShare(shareId: Long): LibraryResult<Unit> =
@@ -154,6 +160,28 @@ open class LibraryRepository @Inject constructor(
     /** Отзыв всех USER-доступов одного ресурса; ресурс без доступов — тоже успех. */
     open suspend fun revokeAllShares(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
         send(change = true, call = { apiServiceFactory.authShareService().revokeAll(fileId, folderId) }) {
+            LibraryResult.Success(Unit)
+        }
+
+    /** Новая независимая публичная ссылка; существующие ссылки объекта не переиспользуются. */
+    open suspend fun createLink(fileId: Long?, folderId: Long?, expiresAt: String?): LibraryResult<LinkShareDto> =
+        request(change = true) { apiServiceFactory.authShareService().createLink(CreateLinkRequest(fileId, folderId, expiresAt)) }
+
+    /** Ссылки владельца, с фильтром по одному ресурсу или без него, включая истёкшие. */
+    open suspend fun getLinks(fileId: Long?, folderId: Long?, page: Int): LibraryResult<LinkPageDto> =
+        request { apiServiceFactory.authShareService().getLinks(fileId, folderId, page, PAGE_SIZE) }
+
+    /** null отправляется явным {"expiresAt":null} и делает ссылку бессрочной. */
+    open suspend fun updateLinkExpiry(linkId: Long, expiresAt: String?): LibraryResult<LinkShareDto> =
+        request(change = true) { apiServiceFactory.authShareService().updateLinkExpiry(linkId, expiryBody(expiresAt)) }
+
+    /** Отзыв одной ссылки; 404 — её уже нет. */
+    open suspend fun revokeLink(linkId: Long): LibraryResult<Unit> =
+        send(change = true, call = { apiServiceFactory.authShareService().revokeLink(linkId) }) { LibraryResult.Success(Unit) }
+
+    /** Отзыв всех ссылок одного ресурса; USER-доступы не меняются. */
+    open suspend fun revokeAllLinks(fileId: Long?, folderId: Long?): LibraryResult<Unit> =
+        send(change = true, call = { apiServiceFactory.authShareService().revokeAllLinks(fileId, folderId) }) {
             LibraryResult.Success(Unit)
         }
 
@@ -204,6 +232,7 @@ open class LibraryRepository @Inject constructor(
     private fun failure(response: Response<*>, change: Boolean, nameConflict: Boolean): LibraryResult.Failure {
         val error = ApiErrorParser.read(response)
         return when {
+            response.code() == 503 && error.code == LINK_SHARING_UNAVAILABLE -> LibraryResult.LinksUnavailable
             change && response.code() == 400 && error.code == SHARE_RECIPIENT_UNAVAILABLE ->
                 LibraryResult.RecipientsRejected(error.fieldErrors.orEmpty())
             change && response.code() == 409 && error.code == FOLDER_MANAGED -> LibraryResult.Managed

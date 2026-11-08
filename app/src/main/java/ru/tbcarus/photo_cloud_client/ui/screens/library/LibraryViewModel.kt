@@ -15,7 +15,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
-import ru.tbcarus.photo_cloud_client.api.models.ShareDto
+import ru.tbcarus.photo_cloud_client.api.models.ShareAccess
 import ru.tbcarus.photo_cloud_client.api.models.SharedResourceDto
 import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupSourceRepository
@@ -324,15 +324,28 @@ class LibraryViewModel @Inject constructor(
     fun requestRevokeAllShares() = sharing.requestRevokeAll()
     fun dismissRevokeAllShares() = sharing.dismissRevokeAll()
     fun confirmRevokeAllShares() = sharing.confirmRevokeAll()
-    fun startEditShare(share: ShareDto) = sharing.startEdit(share)
+    fun startEditShare(share: ShareAccess) = sharing.startEdit(share)
     fun onEditShareExpiryChange(choice: ExpiryChoice) = sharing.onEditExpiryChange(choice)
     fun dismissEditShare() = sharing.dismissEdit()
     fun confirmEditShare() = sharing.confirmEdit()
-    fun startRevokeShare(share: ShareDto) = sharing.startRevoke(share)
+    fun startRevokeShare(share: ShareAccess) = sharing.startRevoke(share)
     fun dismissRevokeShare() = sharing.dismissRevoke()
     fun confirmRevokeShare() = sharing.confirmRevoke()
     fun loadMoreGranted() = sharing.loadMoreGranted()
     fun retryMoreGranted() = sharing.retryMoreGranted()
+    // Публичные ссылки: режим окна «Поделиться» и раздела «Предоставлено мной».
+    fun selectShareMode(mode: ShareMode) = sharing.selectMode(mode)
+    fun onLinkExpiryChange(choice: ExpiryChoice) = sharing.onLinkExpiryChange(choice)
+    fun createLink() = sharing.createLink()
+    fun loadMoreObjectLinks() = sharing.loadMoreDialogLinks()
+    fun retryObjectLinks() = sharing.retryDialogLinks()
+    fun requestRevokeAllLinks() = sharing.requestRevokeAllLinks()
+    fun dismissRevokeAllLinks() = sharing.dismissRevokeAllLinks()
+    fun confirmRevokeAllLinks() = sharing.confirmRevokeAllLinks()
+    fun onLinkCopied() = sharing.onLinkCopied()
+    fun selectGrantedMode(mode: ShareMode) = sharing.selectGrantedMode(mode)
+    fun loadMoreGrantedLinks() = sharing.loadMoreGrantedLinks()
+    fun retryMoreGrantedLinks() = sharing.retryMoreGrantedLinks()
 
     /** Раздел «Предоставлено мной» из корня собственной библиотеки; корень запоминается для возврата. */
     fun openGranted() {
@@ -1182,6 +1195,7 @@ class LibraryViewModel @Inject constructor(
         is LibraryResult.Rejected -> "Сервер отклонил операцию: ${failure.message}"
         is LibraryResult.UnknownResult -> "Результат операции неизвестен: ${failure.message}"
         is LibraryResult.RecipientsRejected -> recipientsRejectedText(failure.rejected)
+        LibraryResult.LinksUnavailable -> LINKS_UNAVAILABLE_TEXT
     }
 
     // Offset-пагинация при изменении каталога может вернуть файл повторно, а ключ строки уникален.

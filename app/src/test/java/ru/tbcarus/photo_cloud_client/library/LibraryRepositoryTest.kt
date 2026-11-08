@@ -427,6 +427,54 @@ class LibraryRepositoryTest {
         assertEquals(LibraryResult.RecipientsRejected(mapOf("x@test" to "Recipient is not available")), rejected)
     }
 
+    @Test
+    fun linkRequestsSendServerContractAndMapUnavailableSharing() = runBlocking {
+        val linkJson = """{"id":9,"resourceType":"FOLDER","resourceId":7,"resourceName":"Trips",
+            "url":"https://cloud.example.com/s/abc","expiresAt":null,"status":"ACTIVE","createdAt":"2026-11-08T10:15:30Z"}"""
+        server.enqueue(json(linkJson))
+        server.enqueue(json(linkJson.replace("\"id\":9", "\"id\":10")))
+        server.enqueue(json("""{"items":[$linkJson],"page":0,"hasNext":true}"""))
+        server.enqueue(json(linkJson))
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(json("""{"code":"LINK_SHARING_UNAVAILABLE","message":"Link sharing is not configured"}""").setResponseCode(503))
+        server.enqueue(json("""{"code":"LINK_SHARING_UNAVAILABLE","message":"Link sharing is not configured"}""").setResponseCode(503))
+
+        val first = (repository.createLink(fileId = null, folderId = 7, expiresAt = null) as LibraryResult.Success).value
+        val second = (repository.createLink(fileId = null, folderId = 7, expiresAt = "2031-01-01T03:00:00+03:00") as LibraryResult.Success).value
+        val page = (repository.getLinks(fileId = null, folderId = 7, page = 0) as LibraryResult.Success).value
+        repository.updateLinkExpiry(9, null)
+        repository.revokeLink(9)
+        repository.revokeAllLinks(fileId = 42, folderId = null)
+        val unavailable = repository.createLink(fileId = 42, folderId = null, expiresAt = null)
+        val unavailableList = repository.getLinks(fileId = null, folderId = null, page = 0)
+
+        assertEquals("https://cloud.example.com/s/abc", first.shareableUrl)
+        assertEquals(listOf(9L, 10L), listOf(first.id, second.id))
+        assertEquals(listOf(9L), page.items!!.map { it.id })
+        assertTrue(page.hasNext)
+        // Каждое создание — отдельный POST: существующая ссылка не переиспользуется.
+        val create = server.takeRequest()
+        assertEquals("POST", create.method)
+        assertEquals("/api/v1/shares/links", create.path)
+        assertEquals("""{"folderId":7}""", create.body.readUtf8())
+        assertEquals("""{"folderId":7,"expiresAt":"2031-01-01T03:00:00+03:00"}""", server.takeRequest().body.readUtf8())
+        assertEquals("/api/v1/shares/links?folderId=7&page=0&size=50", server.takeRequest().path)
+        val toNever = server.takeRequest()
+        assertEquals("PATCH", toNever.method)
+        assertEquals("/api/v1/shares/links/9", toNever.path)
+        assertEquals("""{"expiresAt":null}""", toNever.body.readUtf8())
+        val revoke = server.takeRequest()
+        assertEquals("DELETE", revoke.method)
+        assertEquals("/api/v1/shares/links/9", revoke.path)
+        val revokeAll = server.takeRequest()
+        assertEquals("DELETE", revokeAll.method)
+        assertEquals("/api/v1/shares/links?fileId=42", revokeAll.path)
+        // Ссылки не настроены на Server: отдельный результат и при создании, и при чтении.
+        assertEquals(LibraryResult.LinksUnavailable, unavailable)
+        assertEquals(LibraryResult.LinksUnavailable, unavailableList)
+    }
+
     private fun json(body: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(body)
 
     private fun filePage(hasNext: Boolean) = """

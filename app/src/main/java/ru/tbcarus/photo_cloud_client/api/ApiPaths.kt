@@ -34,4 +34,6 @@ object ApiPaths {
     const val SHARES = "$API_V1/shares"
     const val SHARES_USERS = "$SHARES/users"
     const val SHARE_ID = "$SHARES/{id}"
+    const val SHARES_LINKS = "$SHARES/links"
+    const val SHARE_LINK_ID = "$SHARES_LINKS/{id}"
 }
