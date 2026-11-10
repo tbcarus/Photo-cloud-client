@@ -39,7 +39,7 @@ fun NavigationGraph(
         }
         composable(Routes.Files) {
             val viewModel: FilesViewModel = hiltViewModel()
-            FilesScreen(viewModel = viewModel)
+            FilesScreen(viewModel = viewModel, onOpenSettings = { navController.navigateToTab(Routes.Settings) })
         }
         composable(Routes.Notifications) {
             NotificationsScreen(

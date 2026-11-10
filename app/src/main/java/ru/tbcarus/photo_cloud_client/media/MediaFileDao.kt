@@ -149,6 +149,25 @@ interface MediaFileDao {
     suspend fun resetFailedForRetry(mediaStoreId: Long)
 
     /**
+     * Ручной повтор по действию пользователя: все FAILED одним UPDATE возвращаются в начало обработки —
+     * PENDING без checksum и serverFileId: файл будет заново прочитан, прежний checksum его актуальность не подтверждает.
+     * Только здесь, кроме успешного checksum, обнуляется retryCount: лимит авто-повтора снова отсчитывается с нуля.
+     * Условие status = 'FAILED' не трогает строки, которые обработка или scan уже перевели в другое состояние.
+     * @return число строк, возвращённых в очередь.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = 'PENDING',
+            checksum = NULL,
+            serverFileId = NULL,
+            failureReason = NULL,
+            retryCount = 0,
+            lastFailureAt = NULL
+        WHERE status = 'FAILED'
+    """)
+    suspend fun resetAllFailedForManualRetry(): Int
+
+    /**
      * Применяет к известной строке данные scan одним UPDATE: обновляет локальные сведения и,
      * если изменились size или lastModified, сбрасывает обработку — PENDING, без checksum,
      * serverFileId и failure-метаданных (Stage 5K). Выражения SET в SQLite вычисляются по прежним

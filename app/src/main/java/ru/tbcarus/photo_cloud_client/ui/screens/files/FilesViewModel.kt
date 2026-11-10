@@ -3,6 +3,7 @@ package ru.tbcarus.photo_cloud_client.ui.screens.files
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,6 +11,8 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.media.BackupStateMonitor
+import ru.tbcarus.photo_cloud_client.media.FailedRetry
+import ru.tbcarus.photo_cloud_client.media.FailedRetryResult
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
 import ru.tbcarus.photo_cloud_client.media.PeriodicSyncCoordinator
 import javax.inject.Inject
@@ -18,7 +21,8 @@ import javax.inject.Inject
 class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
     backupStateMonitor: BackupStateMonitor,
-    private val periodicSyncCoordinator: PeriodicSyncCoordinator
+    private val periodicSyncCoordinator: PeriodicSyncCoordinator,
+    private val failedRetry: FailedRetry
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -47,6 +51,38 @@ class FilesViewModel @Inject constructor(
     /** Фактический полный доступ к фото, перечитанный экраном при открытии и возврате в приложение. */
     fun onMediaAccessChecked(granted: Boolean) {
         hasMediaAccess.value = granted
+    }
+
+    /**
+     * «Повторить ошибки»: все FAILED возвращаются в очередь Поставщика. Пока повтор выполняется, повторное
+     * нажатие игнорируется; сам [FailedRetry] сериализует вызовы и второй раз записи не найдёт.
+     */
+    fun retryFailed() {
+        if (_uiState.value.retryingFailed) return
+        _uiState.update { it.copy(retryingFailed = true, retryMessage = null) }
+        viewModelScope.launch {
+            val message = try {
+                when (val result = failedRetry.retryAll()) {
+                    FailedRetryResult.NoPermission -> RetryMessage(
+                        "Нет полного доступа к фото: файлы с ошибками не прочитать. Выдайте доступ на экране Settings.",
+                        needsSettings = true
+                    )
+                    FailedRetryResult.NothingToRetry -> RetryMessage("Файлов с ошибками нет.")
+                    is FailedRetryResult.Queued -> RetryMessage(
+                        if (result.scheduled) "Файлы с ошибками возвращены в очередь: ${result.count}."
+                        else "Файлы с ошибками возвращены в очередь: ${result.count}. " +
+                            "Обработка начнётся при следующем запуске синхронизации."
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                RetryMessage("Не удалось повторить: ${e.message ?: "ошибка базы данных"}")
+            } finally {
+                _uiState.update { it.copy(retryingFailed = false) }
+            }
+            _uiState.update { it.copy(retryMessage = message) }
+        }
     }
 
     /** true, если автосинк настроен (есть токены и baseUrl) — можно запрашивать media permission. */

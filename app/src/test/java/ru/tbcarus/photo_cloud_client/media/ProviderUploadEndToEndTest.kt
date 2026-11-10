@@ -14,6 +14,8 @@ import androidx.work.WorkerParameters
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -45,6 +47,8 @@ import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.media.FakeMediaStore.Companion.sha256
 import ru.tbcarus.photo_cloud_client.ui.screens.settings.SettingsViewModel
+import java.io.FileNotFoundException
+import java.io.IOException
 import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -330,6 +334,142 @@ class ProviderUploadEndToEndTest {
         assertEquals(MediaFileStatus.SYNCED, dao.single(image.id).status)
         assertEquals(image.bytes.toString(Charsets.ISO_8859_1), uploadedFilePart())
     }
+
+    // --- Ручной повтор FAILED (кнопка «Повторить ошибки» на Files) ---
+
+    @Test
+    fun manualRetrySyncsAllFailedPhotosAndLeavesSyncedOnesAlone() = runBlocking {
+        val good = media.add(image(1, "good"))
+        val broken = listOf(media.add(image(2, "broken-2")), media.add(image(3, "broken-3")))
+        broken.forEach { it.openFailure = { FileNotFoundException("gone") } }
+        syncAll()
+        val syncedBefore = dao.single(good.id)
+        assertEquals(MediaFileStatus.SYNCED, syncedBefore.status)
+        broken.forEach { assertEquals(FailureReason.FILE_NOT_FOUND, dao.single(it.id).failureReason) }
+
+        // Файлы снова читаются; пользователь нажимает кнопку один раз.
+        broken.forEach { it.openFailure = null }
+        val providersBefore = ids(SyncScheduler.PROVIDER_WORK_NAME)
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        assertEquals(FailedRetryResult.Queued(2, scheduled = true), failedRetry().retryAll())
+
+        // Продолжение Поставщика выполняется само, затем по его сигналу — Загрузчик.
+        assertEquals(WorkInfo.State.SUCCEEDED, awaitFinished(awaitNewId(SyncScheduler.PROVIDER_WORK_NAME, providersBefore)).state)
+        runSignalledUpload(uploadsBefore)
+
+        broken.forEach {
+            val row = dao.single(it.id)
+            assertEquals(MediaFileStatus.SYNCED, row.status)
+            assertNull(row.failureReason)
+            assertEquals(0, row.retryCount)
+            assertEquals(sha256(it.bytes), row.checksum)
+        }
+        assertEquals(syncedBefore, dao.single(good.id))
+        assertEquals(3, paths.count { it == "/api/v1/files/upload" })
+    }
+
+    @Test
+    fun failureAfterManualRetryKeepsAutomaticRetryLimit() = runBlocking {
+        val image = media.add(image(1, "flaky"))
+        image.openFailure = { IOException("read error") }
+        runProvider()
+        // Авто-повтор исчерпан (лимит 3, cooldown прошёл): Поставщик запись больше не берёт.
+        exhaustAutoRetry(image.id)
+        runProvider()
+        assertEquals(MediaFileStatus.FAILED, dao.single(image.id).status)
+        assertEquals(3, dao.single(image.id).retryCount)
+
+        val before = ids(SyncScheduler.PROVIDER_WORK_NAME)
+        assertEquals(FailedRetryResult.Queued(1, scheduled = true), failedRetry().retryAll())
+        awaitFinished(awaitNewId(SyncScheduler.PROVIDER_WORK_NAME, before))
+
+        // Ошибка повторилась: попытка засчитана заново, дальше — прежний ограниченный авто-повтор.
+        val failedAgain = dao.single(image.id)
+        assertEquals(MediaFileStatus.FAILED, failedAgain.status)
+        assertEquals(FailureReason.CHECKSUM_IO, failedAgain.failureReason)
+        assertEquals(1, failedAgain.retryCount)
+        exhaustAutoRetry(image.id)
+        val opens = media.openCount(image.id)
+        runProvider()
+        assertEquals(MediaFileStatus.FAILED, dao.single(image.id).status)
+        assertEquals(3, dao.single(image.id).retryCount)
+        assertEquals(opens, media.openCount(image.id))
+    }
+
+    @Test
+    fun withoutPhotoAccessFailedPhotosStayFailed() = runBlocking {
+        val image = media.add(image(1, "photo"))
+        image.openFailure = { FileNotFoundException("gone") }
+        runProvider()
+        val failed = dao.single(image.id)
+        shadowOf(context).denyPermissions(mediaReadPermission)
+        val before = ids(SyncScheduler.PROVIDER_WORK_NAME)
+
+        assertEquals(FailedRetryResult.NoPermission, failedRetry().retryAll())
+
+        assertEquals(failed, dao.single(image.id))
+        assertEquals(before, ids(SyncScheduler.PROVIDER_WORK_NAME))
+    }
+
+    @Test
+    fun doublePressQueuesFailedOnceAndAddsOneProviderRun() = runBlocking {
+        val images = listOf(media.add(image(1, "a")), media.add(image(2, "b")))
+        images.forEach { it.openFailure = { FileNotFoundException("gone") } }
+        runProvider()
+        images.forEach { it.openFailure = null }
+        val before = ids(SyncScheduler.PROVIDER_WORK_NAME)
+        val retry = failedRetry()
+
+        val results = listOf(async(Dispatchers.IO) { retry.retryAll() }, async(Dispatchers.IO) { retry.retryAll() }).awaitAll()
+
+        assertEquals(setOf(FailedRetryResult.Queued(2, scheduled = true), FailedRetryResult.NothingToRetry), results.toSet())
+        awaitFinished(awaitNewId(SyncScheduler.PROVIDER_WORK_NAME, before))
+        assertEquals(1, (ids(SyncScheduler.PROVIDER_WORK_NAME) - before).size)
+        images.forEach { assertEquals(MediaFileStatus.CHECKSUM_READY, dao.single(it.id).status) }
+    }
+
+    @Test
+    fun retryDuringRunningProviderIsAppendedWithoutReplacingIt() = runBlocking {
+        val image = media.add(image(1, "photo"))
+        image.openFailure = { FileNotFoundException("gone") }
+        runProvider()
+        image.openFailure = null
+        val retry = failedRetry()
+        val duringRun = java.util.concurrent.atomic.AtomicReference<FailedRetryResult?>()
+        // Нажатие приходится на уже выполняющийся Поставщик (его scan читает MediaStore).
+        media.beforeQuery = { if (duringRun.get() == null) duringRun.set(runBlocking { retry.retryAll() }) }
+        val before = ids(SyncScheduler.PROVIDER_WORK_NAME)
+
+        scheduler.enqueueProvider()
+
+        awaitUntil { infos(SyncScheduler.PROVIDER_WORK_NAME).filter { it.id !in before }.let { it.size == 2 && it.all { w -> w.state.isFinished } } }
+        val runs = infos(SyncScheduler.PROVIDER_WORK_NAME).filter { it.id !in before }
+        assertEquals(FailedRetryResult.Queued(1, scheduled = true), duringRun.get())
+        // Выполнявшийся прогон не отменён, повтор добавлен следующим после него.
+        assertEquals(listOf(WorkInfo.State.SUCCEEDED, WorkInfo.State.SUCCEEDED), runs.map { it.state })
+        assertEquals(MediaFileStatus.CHECKSUM_READY, dao.single(image.id).status)
+    }
+
+    @Test
+    fun queuedRowsWithoutRecordedContinuationArePickedUpOnProcessStart() = runBlocking {
+        val image = media.add(image(1, "photo"))
+        image.openFailure = { FileNotFoundException("gone") }
+        runProvider()
+        image.openFailure = null
+        // Процесс погиб после записи в Room, продолжение Поставщика записать не успели.
+        assertEquals(1, dao.resetAllFailedForManualRetry())
+        assertEquals(MediaFileStatus.PENDING, dao.single(image.id).status)
+
+        runNew(SyncScheduler.PROVIDER_WORK_NAME, needsNetwork = false) { ProcessStartSync(context, scheduler).onProcessStart() }
+
+        assertEquals(MediaFileStatus.CHECKSUM_READY, dao.single(image.id).status)
+    }
+
+    private fun failedRetry() = FailedRetry(context, dao, scheduler)
+
+    private fun exhaustAutoRetry(id: Long) = db.openHelper.writableDatabase.execSQL(
+        "UPDATE media_files SET retryCount = 3, lastFailureAt = 0 WHERE mediaStoreId = $id"
+    )
 
     /** Полный цикл Поставщик → Загрузчик для всех фото библиотеки. */
     private fun syncAll() {

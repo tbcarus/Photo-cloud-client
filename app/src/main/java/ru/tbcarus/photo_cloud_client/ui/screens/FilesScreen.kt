@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -39,13 +41,14 @@ import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
 import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
+import ru.tbcarus.photo_cloud_client.ui.screens.files.RetryMessage
 import ru.tbcarus.photo_cloud_client.ui.screens.files.backupCountersText
 import ru.tbcarus.photo_cloud_client.ui.screens.files.backupIssueText
 import ru.tbcarus.photo_cloud_client.ui.screens.files.backupTitle
 import ru.tbcarus.photo_cloud_client.ui.screens.files.formatBackupTime
 
 @Composable
-fun FilesScreen(viewModel: FilesViewModel) {
+fun FilesScreen(viewModel: FilesViewModel, onOpenSettings: () -> Unit) {
     val state by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
@@ -75,6 +78,18 @@ fun FilesScreen(viewModel: FilesViewModel) {
         state.backupState?.let { backup ->
             BackupStateCard(backup)
             Spacer(Modifier.height(8.dp))
+
+            // Кнопка — только при FAILED в индексе; сообщение об итоге остаётся видимым и после сброса.
+            if (backup.counters.failed > 0 || state.retryMessage != null) {
+                RetryFailedRow(
+                    failed = backup.counters.failed,
+                    retrying = state.retryingFailed,
+                    message = state.retryMessage,
+                    onRetry = viewModel::retryFailed,
+                    onOpenSettings = onOpenSettings
+                )
+                Spacer(Modifier.height(8.dp))
+            }
 
             // Пояснение о геоданных — только при полном доступе к фото, иначе причину показывает карточка выше.
             val hasMediaAccess = backup.issues.none { it.kind == BackupIssueKind.NO_MEDIA_PERMISSION }
@@ -169,6 +184,30 @@ private fun BackupStateCard(state: BackupState) {
                     style = MaterialTheme.typography.bodySmall,
                     color = onContainer
                 )
+            }
+        }
+    }
+}
+
+/** Ручной повтор всех FAILED одной кнопкой; индивидуальных повторов нет. */
+@Composable
+private fun RetryFailedRow(
+    failed: Int,
+    retrying: Boolean,
+    message: RetryMessage?,
+    onRetry: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (failed > 0) {
+            Button(onClick = onRetry, enabled = !retrying) {
+                Text("Повторить ошибки")
+            }
+        }
+        message?.let {
+            Text(text = it.text, style = MaterialTheme.typography.bodySmall)
+            if (it.needsSettings) {
+                TextButton(onClick = onOpenSettings) { Text("Открыть Settings") }
             }
         }
     }

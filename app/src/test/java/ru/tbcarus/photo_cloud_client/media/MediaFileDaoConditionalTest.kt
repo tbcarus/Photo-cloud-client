@@ -160,6 +160,43 @@ class MediaFileDaoConditionalTest {
     }
 
     @Test
+    fun manualRetryResetsOnlyFailedRowsToStartOfProcessing() = runBlocking {
+        // Каждый статус, а FAILED — с разными причинами, исчерпанным счётчиком и прежними checksum/serverFileId.
+        val others = MediaFileStatus.entries.filter { it != MediaFileStatus.FAILED }
+        others.forEachIndexed { i, status ->
+            dao.insert(original.copy(mediaStoreId = i + 1L, status = status, serverFileId = 7, retryCount = 2, lastFailureAt = 5))
+        }
+        val failed = listOf(FailureReason.CHECKSUM_IO, FailureReason.FILE_NOT_FOUND, FailureReason.HTTP_409)
+        failed.forEachIndexed { i, reason ->
+            dao.insert(
+                original.copy(
+                    mediaStoreId = 100L + i, status = MediaFileStatus.FAILED, serverFileId = 9,
+                    failureReason = reason, retryCount = 3, lastFailureAt = 5
+                )
+            )
+        }
+        val othersBefore = others.indices.map { dao.single(it + 1L) }
+
+        assertEquals(failed.size, dao.resetAllFailedForManualRetry())
+
+        failed.indices.forEach { i ->
+            val row = dao.single(100L + i)
+            assertEquals(MediaFileStatus.PENDING, row.status)
+            assertNull(row.checksum)
+            assertNull(row.serverFileId)
+            assertNull(row.failureReason)
+            assertEquals(0, row.retryCount)
+            assertNull(row.lastFailureAt)
+            // Локальные сведения файла не меняются: их обновит scan.
+            assertEquals(original.size, row.size)
+            assertEquals(original.lastModified, row.lastModified)
+        }
+        assertEquals(othersBefore, others.indices.map { dao.single(it + 1L) })
+        // Повтор без FAILED ничего не меняет.
+        assertEquals(0, dao.resetAllFailedForManualRetry())
+    }
+
+    @Test
     fun countReadyForUploadCoversUploaderStatusesOnly() = runBlocking {
         val statuses = MediaFileStatus.entries
         statuses.forEachIndexed { i, status ->
