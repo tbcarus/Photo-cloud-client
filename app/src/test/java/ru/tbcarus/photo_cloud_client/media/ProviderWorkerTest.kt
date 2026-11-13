@@ -315,7 +315,7 @@ class ProviderWorkerTest {
                 syncStatusStore,
                 coordinator,
                 scheduler,
-                SyncClock.SYSTEM
+                SyncClock.SYSTEM, idleCameraCheck(appContext, db)
             )
         }
         return TestListenableWorkerBuilder<ProviderWorker>(context).setWorkerFactory(factory).build().doWork()

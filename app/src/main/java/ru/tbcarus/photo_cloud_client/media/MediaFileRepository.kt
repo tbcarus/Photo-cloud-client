@@ -72,14 +72,15 @@ class MediaFileRepository @Inject constructor(
 
         // 3. Stale detection: удаляем из Room файлы, которых больше нет в MediaStore.
         // Неполный снимок не доказывает удаления — строки не трогаем. Server при этом не затрагивается.
+        // null — массовое исчезновение не подтверждено: строки оставлены, индекс не совпадает со снимком.
         val staleIds = if (isComplete) {
             confirmedStaleIds(images)
         } else {
             Log.w(TAG, "Снимок MediaStore неполный — удаление отсутствующих строк пропущено")
-            emptyList()
+            null
         }
 
-        if (staleIds.isNotEmpty()) {
+        if (!staleIds.isNullOrEmpty()) {
             // SQLite имеет лимит bind-параметров (~999), удаляем пачками
             staleIds.chunked(500).forEach { chunk ->
                 dao.deleteByMediaStoreIds(chunk)
@@ -92,7 +93,8 @@ class MediaFileRepository @Inject constructor(
                 // insertedOrUpdated — кол-во записей, прошедших insert+update pipeline,
                 // а не только новых; insert с IGNORE не различает «добавлено» и «проигнорировано»
                 insertedOrUpdated  = images.size,
-                deletedStale       = staleIds.size
+                deletedStale       = staleIds?.size ?: 0,
+                complete           = staleIds != null
             )
         )
     }
@@ -100,9 +102,9 @@ class MediaFileRepository @Inject constructor(
     /**
      * Строки Room, отсутствующие в полном снимке. Если снимок пуст при непустом индексе или пропала
      * большая часть индекса, через паузу выполняется повторный снимок: удаляются только строки,
-     * отсутствующие в обоих. Неудачный или неполный повтор — ничего не удаляем до следующего scan.
+     * отсутствующие в обоих. Неудачный или неполный повтор — ничего не удаляем до следующего scan (null).
      */
-    private suspend fun confirmedStaleIds(images: List<MediaStoreImage>): List<Long> {
+    private suspend fun confirmedStaleIds(images: List<MediaStoreImage>): List<Long>? {
         val dbIds      = dao.getAllMediaStoreIds()
         val scannedIds = images.mapTo(HashSet()) { it.mediaStoreId }
         val staleIds   = dbIds.filter { it !in scannedIds }
@@ -116,7 +118,7 @@ class MediaFileRepository @Inject constructor(
         val recheck = mediaStoreRepository.loadImages()
         if (recheck !is MediaStoreScanOutcome.Success || !recheck.isComplete) {
             Log.w(TAG, "Повторный снимок недостоверен — удаление отсутствующих строк пропущено")
-            return emptyList()
+            return null
         }
         val recheckIds = recheck.images.mapTo(HashSet()) { it.mediaStoreId }
         return staleIds.filter { it !in recheckIds }

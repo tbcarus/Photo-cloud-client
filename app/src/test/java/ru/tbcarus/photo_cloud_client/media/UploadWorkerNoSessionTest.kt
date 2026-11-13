@@ -169,7 +169,7 @@ class UploadWorkerNoSessionTest {
                 storage,
                 coordinator(),
                 SyncScheduler(appContext),
-                SyncClock.SYSTEM
+                SyncClock.SYSTEM, idleCameraCheck(appContext, db)
             )
         }
     }

@@ -47,20 +47,32 @@ class FileUploadRepository @Inject constructor(
 
     /**
      * Грузит PENDING_UPLOAD-фото в папку CAMERA [folderId] партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
-     * Перед каждым файлом проверяет [budget]: исчерпан — новый файл не начинается, начатая отправка
-     * не прерывается; остаток очереди отправит следующий прогон.
+     * Перед каждым файлом проверяет [budget] и паузу ручной сверки [isPaused]: новый файл не начинается,
+     * начатая отправка не прерывается; остаток очереди отправит следующий прогон.
      */
-    suspend fun uploadPendingCameraFiles(folderId: Long, budget: WorkBudget = WorkBudget.UNLIMITED): UploadOutcome =
+    suspend fun uploadPendingCameraFiles(
+        folderId: Long,
+        budget: WorkBudget = WorkBudget.UNLIMITED,
+        isPaused: suspend () -> Boolean = { false }
+    ): UploadOutcome =
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                runUpload(folderId, budget)
+                runUpload(folderId, budget, isPaused)
             }
         }
 
     /** Есть ли работа для Загрузчика: CHECKSUM_READY с checksum, PENDING_UPLOAD или UPLOADING. */
     suspend fun hasQueuedWork(): Boolean = mediaFileDao.countReadyForUpload() > 0
 
-    private suspend fun runUpload(folderId: Long, budget: WorkBudget): UploadOutcome {
+    /**
+     * Дождаться окончания идущего прогона upload другого Загрузчика (Q-01.3). На паузе сверки он дошлёт текущий
+     * файл и следующий не возьмёт, поэтому ожидание ограничено одним файлом.
+     */
+    suspend fun awaitIdle() {
+        mutex.withLock { }
+    }
+
+    private suspend fun runUpload(folderId: Long, budget: WorkBudget, isPaused: suspend () -> Boolean): UploadOutcome {
         // Возвращаем зависшие UPLOADING-записи после возможного падения приложения.
         mediaFileDao.resetStatus(
             sourceStatus = MediaFileStatus.UPLOADING,
@@ -74,15 +86,21 @@ class FileUploadRepository @Inject constructor(
         var failed = 0
         var leftPending = 0
 
-        var budgetExhausted = false
-        while (!budgetExhausted) {
+        var stopped = false
+        while (!stopped) {
             val batch = mediaFileDao.getByStatusInIdOrder(MediaFileStatus.PENDING_UPLOAD, SyncConfig.UPLOAD_BATCH_SIZE)
             if (batch.isEmpty()) break
 
             var progressed = false
             for (file in batch) {
                 if (budget.isExhausted()) {
-                    budgetExhausted = true
+                    stopped = true
+                    break
+                }
+                // Пауза ручной сверки: уже отправленный файл завершён, следующий не берётся.
+                if (isPaused()) {
+                    Log.i(TAG, "Camera upload приостановлен ручной сверкой — очередь сохранена")
+                    stopped = true
                     break
                 }
                 // Защитно: на 5D грузим только фото.

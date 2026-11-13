@@ -134,7 +134,7 @@ class UploadBatchContinuationTest {
                     appContext, workerParameters, folderRepository, precheckRepository, uploadRepository, ServerRepository(api),
                     baseUrlProvider, syncStatusStore, InMemoryTokenStorage(Tokens("access", "refresh")),
                     mock(PeriodicSyncCoordinator::class.java), scheduler,
-                    workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags)
+                    workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags), idleCameraCheck(appContext, db)
                 )
                 else -> null
             }

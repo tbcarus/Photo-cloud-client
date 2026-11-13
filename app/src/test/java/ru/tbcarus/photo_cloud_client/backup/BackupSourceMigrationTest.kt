@@ -61,7 +61,7 @@ class BackupSourceMigrationTest {
         val db = AppDatabase.build(context, DB_NAME)
 
         val rows = db.mediaFileDao().getAll().first().associateBy { it.mediaStoreId }
-        assertEquals(7, db.openHelper.readableDatabase.version)
+        assertEquals(8, db.openHelper.readableDatabase.version)
         assertEquals(3, rows.size)
         assertEquals(MediaFileStatus.SYNCED, rows.getValue(1).status)
         assertEquals(11L, rows.getValue(1).serverFileId)

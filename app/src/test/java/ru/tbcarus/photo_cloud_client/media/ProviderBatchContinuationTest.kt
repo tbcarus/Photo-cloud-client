@@ -111,7 +111,7 @@ class ProviderBatchContinuationTest {
             ): ListenableWorker? = when (workerClassName) {
                 ProviderWorker::class.java.name -> ProviderWorker(
                     appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore,
-                    coordinator, scheduler, workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags)
+                    coordinator, scheduler, workerClock(SyncScheduler.ONE_TIME_TAG in workerParameters.tags), idleCameraCheck(appContext, db)
                 )
                 else -> null
             }

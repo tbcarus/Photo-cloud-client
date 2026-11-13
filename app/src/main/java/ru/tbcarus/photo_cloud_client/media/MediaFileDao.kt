@@ -265,6 +265,28 @@ interface MediaFileDao {
     """)
     suspend fun countReadyForUpload(): Int
 
+    @Query("SELECT * FROM media_files WHERE mediaStoreId = :mediaStoreId")
+    suspend fun getById(mediaStoreId: Long): MediaFile?
+
+    /**
+     * Повтор одной FAILED-записи, отобранной пользователем после ручной сверки (Q-01), — как
+     * [resetAllFailedForManualRetry], но только для той же версии файла, что была проверена.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = 'PENDING',
+            checksum = NULL,
+            serverFileId = NULL,
+            failureReason = NULL,
+            retryCount = 0,
+            lastFailureAt = NULL
+        WHERE mediaStoreId = :mediaStoreId
+          AND status = 'FAILED'
+          AND size = :size
+          AND lastModified = :lastModified
+    """)
+    suspend fun resetFailedForManualRetryIfUnchanged(mediaStoreId: Long, size: Long, lastModified: Long): Int
+
     @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")
     suspend fun exists(mediaStoreId: Long): Int
 

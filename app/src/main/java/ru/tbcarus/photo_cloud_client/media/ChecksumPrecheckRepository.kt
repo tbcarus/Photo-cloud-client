@@ -31,23 +31,32 @@ class ChecksumPrecheckRepository @Inject constructor(
 
     /**
      * Запускает pre-check по папке [folderId] партиями FIFO по mediaStoreId. Один прогон одновременно (Mutex).
-     * Перед каждым запросом проверяет [budget]: исчерпан — новый запрос не начинается,
-     * оставшиеся CHECKSUM_READY проверит следующий прогон.
+     * Перед каждым запросом проверяет [budget] и паузу ручной сверки [isPaused]: новый запрос не начинается,
+     * уже отправленный завершается; оставшиеся CHECKSUM_READY проверит следующий прогон.
      */
-    suspend fun runCameraPrecheck(folderId: Long, budget: WorkBudget = WorkBudget.UNLIMITED): ChecksumPrecheckOutcome =
+    suspend fun runCameraPrecheck(
+        folderId: Long,
+        budget: WorkBudget = WorkBudget.UNLIMITED,
+        isPaused: suspend () -> Boolean = { false }
+    ): ChecksumPrecheckOutcome =
         withContext(Dispatchers.IO) {
             mutex.withLock {
-                runPrecheckForFolder(folderId, budget)
+                runPrecheckForFolder(folderId, budget, isPaused)
             }
         }
 
-    private suspend fun runPrecheckForFolder(folderId: Long, budget: WorkBudget): ChecksumPrecheckOutcome {
+    private suspend fun runPrecheckForFolder(
+        folderId: Long,
+        budget: WorkBudget,
+        isPaused: suspend () -> Boolean
+    ): ChecksumPrecheckOutcome {
         var existingTotal = 0
         var pendingTotal  = 0
         var unchangedTotal = 0
 
         try {
-            while (!budget.isExhausted()) {
+            // Пауза читается из Room перед каждой партией: сверка могла начаться во время прошлого запроса.
+            while (!budget.isExhausted() && !isPaused()) {
                 val batch = mediaFileDao.getByStatusWithChecksumOnce(
                     MediaFileStatus.CHECKSUM_READY,
                     SyncConfig.PRECHECK_BATCH_SIZE

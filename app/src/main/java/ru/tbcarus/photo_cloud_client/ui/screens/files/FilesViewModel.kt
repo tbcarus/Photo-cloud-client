@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.tbcarus.photo_cloud_client.media.BackupStateMonitor
+import ru.tbcarus.photo_cloud_client.media.CameraCheckRepository
+import ru.tbcarus.photo_cloud_client.media.CheckStartResult
+import ru.tbcarus.photo_cloud_client.media.ConfirmUploadResult
 import ru.tbcarus.photo_cloud_client.media.FailedRetry
 import ru.tbcarus.photo_cloud_client.media.FailedRetryResult
 import ru.tbcarus.photo_cloud_client.media.MediaFileRepository
@@ -22,7 +25,8 @@ class FilesViewModel @Inject constructor(
     private val mediaFileRepository: MediaFileRepository,
     backupStateMonitor: BackupStateMonitor,
     private val periodicSyncCoordinator: PeriodicSyncCoordinator,
-    private val failedRetry: FailedRetry
+    private val failedRetry: FailedRetry,
+    private val cameraCheck: CameraCheckRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FilesUiState())
@@ -45,6 +49,84 @@ class FilesViewModel @Inject constructor(
             backupStateMonitor.observe(hasMediaAccess.filterNotNull()).collect { state ->
                 _uiState.update { it.copy(backupState = state) }
             }
+        }
+
+        // Проверка живёт в Room и WorkManager: закрытие экрана её не останавливает, повторное открытие — показывает.
+        viewModelScope.launch {
+            cameraCheck.observe().collect { check ->
+                _uiState.update { it.copy(cameraCheck = check) }
+            }
+        }
+    }
+
+    fun startCheck() = checkAction {
+        when (val result = cameraCheck.start()) {
+            CheckStartResult.NoPermission -> "Нет полного доступа к фото. Выдайте доступ на экране Settings."
+            CheckStartResult.NotSignedIn -> "Вход не выполнен. Войдите на экране Login."
+            CheckStartResult.NoServer -> "Адрес сервера не задан. Укажите его на экране Network."
+            CheckStartResult.AlreadyRunning -> "Проверка уже выполняется."
+            is CheckStartResult.Started -> startedText(result)
+        }
+    }
+
+    fun retryCheck() = checkAction {
+        when (val result = cameraCheck.retry()) {
+            CheckStartResult.NoPermission -> "Нет полного доступа к фото. Выдайте доступ на экране Settings."
+            CheckStartResult.NotSignedIn -> "Вход не выполнен. Войдите на экране Login."
+            CheckStartResult.NoServer -> "Адрес сервера не задан. Укажите его на экране Network."
+            CheckStartResult.AlreadyRunning -> null
+            is CheckStartResult.Started -> startedText(result)
+        }
+    }
+
+    fun cancelCheck() = checkAction {
+        if (cameraCheck.cancel()) {
+            "Проверка отменена. Обычная автоматическая синхронизация возобновлена и может загрузить недостающие файлы."
+        } else {
+            null
+        }
+    }
+
+    fun deferCheck() = checkAction {
+        cameraCheck.defer()
+        null
+    }
+
+    fun dismissCheck() = checkAction {
+        cameraCheck.dismiss()
+        null
+    }
+
+    fun confirmCheckUpload() = checkAction {
+        when (val result = cameraCheck.confirmUpload()) {
+            ConfirmUploadResult.NotAwaiting -> null
+            ConfirmUploadResult.NoPermission -> "Нет полного доступа к фото. Выдайте доступ на экране Settings."
+            ConfirmUploadResult.NotSignedIn -> "Вход не выполнен или адрес сервера не задан."
+            ConfirmUploadResult.DestinationChanged ->
+                "Результат получен для другого сервера или аккаунта. Откажитесь от проверки и запустите новую."
+            is ConfirmUploadResult.Queued -> if (result.scheduled) null else
+                "Загрузка начнётся при следующем запуске синхронизации."
+        }
+    }
+
+    private fun startedText(result: CheckStartResult.Started): String? =
+        if (result.scheduled) null else "Проверка начнётся при следующем запуске синхронизации."
+
+    /** Одно действие над проверкой за раз; повторные нажатия игнорируются, репозиторий их тоже сериализует. */
+    private fun checkAction(action: suspend () -> String?) {
+        if (_uiState.value.checkBusy) return
+        _uiState.update { it.copy(checkBusy = true, checkMessage = null) }
+        viewModelScope.launch {
+            val message = try {
+                action()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                "Не удалось выполнить действие: ${e.message ?: "ошибка базы данных"}"
+            } finally {
+                _uiState.update { it.copy(checkBusy = false) }
+            }
+            _uiState.update { it.copy(checkMessage = message) }
         }
     }
 

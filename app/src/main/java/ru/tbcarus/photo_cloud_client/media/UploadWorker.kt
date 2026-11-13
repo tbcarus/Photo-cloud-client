@@ -20,6 +20,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * Прогон ограничен бюджетом времени; остаток очереди продолжает следующий прогон (A8.2).
  * Не сканирует MediaStore и не вычисляет SHA-256. При отсутствии сессии, сервера или разрешения
  * очередь остаётся в Room без изменения статусов.
+ *
+ * Ручная сверка Camera ([CameraCheckRepository]): её серверную стадию выполняет этот же прогон до обычных стадий.
+ * Пока сверка не завершена, обычные pre-check и upload не начинаются, а начатый upload не берёт следующий файл.
  */
 @HiltWorker
 class UploadWorker @AssistedInject constructor(
@@ -34,7 +37,8 @@ class UploadWorker @AssistedInject constructor(
     private val tokenStorage: TokenStorage,
     private val periodicSyncCoordinator: PeriodicSyncCoordinator,
     private val syncScheduler: SyncScheduler,
-    private val clock: SyncClock
+    private val clock: SyncClock,
+    private val cameraCheck: CameraCheckRepository
 ) : CoroutineWorker(appContext, params) {
 
     companion object {
@@ -42,6 +46,8 @@ class UploadWorker @AssistedInject constructor(
         /** Ключ outputData с причиной остановки без синхронизации. */
         const val STOP_REASON_KEY = "stop_reason"
         const val STOP_REASON_NO_SESSION = "no_session"
+        /** Ключ inputData: прогон поставлен «Повторить» ручной сверки ([SyncScheduler.retryUploadNow]). */
+        const val MANUAL_RETRY_KEY = "manual_retry"
     }
 
     /** Server подтвердил отправленный файл в этом прогоне — для сохраняемого итога (A7.1), в том числе при ошибке. */
@@ -50,7 +56,7 @@ class UploadWorker @AssistedInject constructor(
     override suspend fun doWork(): Result {
         // Бюджет отсчитывается от начала прогона: ping, pre-check и upload расходуют его вместе.
         val budget = WorkBudget(clock)
-        return try {
+        val result = try {
             runUpload(budget)
         } catch (e: CancellationException) {
             // Остановка worker системой: UPLOADING вернётся в PENDING_UPLOAD при следующем прогоне.
@@ -60,6 +66,13 @@ class UploadWorker @AssistedInject constructor(
             Log.e(TAG, "Загрузка завершилась исключением", e)
             retryWith(SyncStatus.ERROR)
         }
+        if (result !is Result.Retry || !inputData.getBoolean(MANUAL_RETRY_KEY, false)) return result
+        // Ручной прогон не уходит в свой backoff: следующее «Повторить» и продолжения снова запустятся сразу.
+        // Автоматический повтор — за разовой цепочкой: KEEP не трогает уже ждущую backoff, а без неё ставит одну
+        // с задержкой первого backoff; дальше она повторяет с backoff. Немедленных повторов подряд нет.
+        // Итог прогона уже записан.
+        syncScheduler.enqueueUploadAfterFailure()
+        return Result.success()
     }
 
     /** Временная проблема прогона: итог Загрузчика для Files и повтор WorkManager. */
@@ -72,6 +85,7 @@ class UploadWorker @AssistedInject constructor(
         // Без пары авторизованные стадии гарантированно получат 401: до сетевых запросов останавливаем фон и не просим retry.
         if (tokenStorage.getTokens() == null) {
             Log.w(TAG, "Нет сессии — фоновая загрузка остановлена до входа")
+            cameraCheck.markServerError(CameraCheckError.NOT_SIGNED_IN)
             // Отсутствие входа UI проверяет по актуальной паре — итог прогона не пишется.
             // Последнее действие прогона: reconcile без пары отменяет periodic Загрузчика; Поставщик продолжает работу.
             // Если это сам periodic, WorkManager остановит уже завершающийся прогон — повтора не будет.
@@ -79,11 +93,19 @@ class UploadWorker @AssistedInject constructor(
             return Result.success(workDataOf(STOP_REASON_KEY to STOP_REASON_NO_SESSION))
         }
 
+        // Пауза ручной сверки без её серверной стадии: Server не нужен, очередь ждёт решения пользователя.
+        val serverCheck = cameraCheck.awaitsServer()
+        if (!serverCheck && cameraCheck.isUploadPaused()) {
+            Log.i(TAG, "Camera upload приостановлен ручной сверкой")
+            return Result.success()
+        }
+
         // Адрес берём из сохранённых настроек, а не из памяти: процесс мог быть запущен WorkManager без UI,
         // а пользователь — сменить адрес после прошлого прогона.
         val baseUrl = baseUrlProvider.reload()
         if (baseUrl.isBlank()) {
             Log.w(TAG, "Адрес сервера не задан — откладываем загрузку")
+            cameraCheck.markServerError(CameraCheckError.NO_SERVER_ADDRESS)
             // Отсутствие адреса UI проверяет по сохранённым настройкам: это не недоступность Server, итог не пишется.
             return Result.retry()
         }
@@ -91,6 +113,7 @@ class UploadWorker @AssistedInject constructor(
         // Если сервер недоступен — не гоняем pre-check и upload впустую в timeout, а сразу просим повтор.
         if (serverRepository.testConnection(baseUrl).isFailure) {
             Log.w(TAG, "Сервер недоступен — откладываем загрузку")
+            cameraCheck.markServerError(CameraCheckError.SERVER_UNAVAILABLE)
             return retryWith(SyncStatus.SERVER_UNAVAILABLE)
         }
 
@@ -98,6 +121,7 @@ class UploadWorker @AssistedInject constructor(
         // Фоновый worker не может запросить разрешение — очередь не трогаем, без retry.
         if (!applicationContext.hasMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — загрузка пропущена, очередь сохранена")
+            cameraCheck.markServerError(CameraCheckError.NO_MEDIA_PERMISSION)
             return Result.success()
         }
 
@@ -106,12 +130,42 @@ class UploadWorker @AssistedInject constructor(
             is CameraFolderOutcome.Success -> folder.folderId
             is CameraFolderOutcome.Error -> {
                 Log.w(TAG, "Не удалось получить папку Camera — откладываем загрузку: ${folder.message}")
+                cameraCheck.markServerError(CameraCheckError.SERVER_ERROR)
                 return retryWith(SyncStatus.ERROR)
             }
         }
 
+        // Серверная стадия ручной сверки — с той же CAMERA и тем же бюджетом.
+        if (serverCheck) {
+            // Стадию может начать прогон ручной цепочки, пока разовый ещё досылает файл: ответ Server о нём
+            // должен учитывать эту отправку, как когда стадия шла в той же цепочке после него.
+            fileUploadRepository.awaitIdle()
+            when (val outcome = cameraCheck.checkOnServer(cameraFolderId, budget)) {
+                is ServerCheckOutcome.Failed -> {
+                    // Смена назначения и отсутствие входа повтором не устраняются: ждут пользователя.
+                    if (!outcome.retry) return Result.success()
+                    val problem = if (outcome.error == CameraCheckError.SERVER_UNAVAILABLE) {
+                        SyncStatus.SERVER_UNAVAILABLE
+                    } else {
+                        SyncStatus.ERROR
+                    }
+                    return retryWith(problem)
+                }
+                is ServerCheckOutcome.Remaining -> {
+                    // Бюджет исчерпан: продолжение — только при прогрессе, как у обычных стадий. В цепочке ручных
+                    // прогонов, а не разовой: та может ждать backoff, а сверка при доступном Server ждать не должна.
+                    if (outcome.progressed) syncScheduler.continueUploadNow().await()
+                    syncStatusStore.recordUploaderRun(problem = null, filesUploaded = false)
+                    return Result.success()
+                }
+                ServerCheckOutcome.Done, ServerCheckOutcome.NotActive -> Unit
+            }
+        }
+        // Сверка ждёт решения (или запущена во время прогона): обычные стадии не выполняются.
+        if (cameraCheck.isUploadPaused()) return Result.success()
+
         // Pre-check: CHECKSUM_READY → SYNCED (existing) или PENDING_UPLOAD (missing).
-        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(cameraFolderId, budget)) {
+        val precheck = when (val outcome = checksumPrecheckRepository.runCameraPrecheck(cameraFolderId, budget, cameraCheck::isUploadPaused)) {
             is ChecksumPrecheckOutcome.Success -> outcome.result
             is ChecksumPrecheckOutcome.Error -> return retryWith(SyncStatus.ERROR)
         }
@@ -124,7 +178,7 @@ class UploadWorker @AssistedInject constructor(
         if (budget.isExhausted()) {
             upload = null
             retryNeeded = false
-        } else when (val outcome = fileUploadRepository.uploadPendingCameraFiles(cameraFolderId, budget)) {
+        } else when (val outcome = fileUploadRepository.uploadPendingCameraFiles(cameraFolderId, budget, cameraCheck::isUploadPaused)) {
             is UploadOutcome.Success -> {
                 upload = outcome.result
                 // Осталась очередь из-за transient-ошибки → просим повтор.

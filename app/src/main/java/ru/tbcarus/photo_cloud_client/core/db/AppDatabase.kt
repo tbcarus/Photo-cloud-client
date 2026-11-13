@@ -16,14 +16,24 @@ import ru.tbcarus.photo_cloud_client.backup.BackupSourceDao
 import ru.tbcarus.photo_cloud_client.backup.BackupTreeDao
 import ru.tbcarus.photo_cloud_client.backup.RegistrationState
 import ru.tbcarus.photo_cloud_client.backup.SourceAccess
+import ru.tbcarus.photo_cloud_client.media.CameraCheck
+import ru.tbcarus.photo_cloud_client.media.CameraCheckDao
+import ru.tbcarus.photo_cloud_client.media.CameraCheckError
+import ru.tbcarus.photo_cloud_client.media.CameraCheckItem
+import ru.tbcarus.photo_cloud_client.media.CameraCheckResult
+import ru.tbcarus.photo_cloud_client.media.CameraCheckStage
+import ru.tbcarus.photo_cloud_client.media.CameraCheckState
 import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileDao
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 
 @Database(
-    entities = [MediaFile::class, BackupSource::class, BackupFolder::class, BackupFile::class],
-    version = 7,
+    entities = [
+        MediaFile::class, BackupSource::class, BackupFolder::class, BackupFile::class,
+        CameraCheck::class, CameraCheckItem::class
+    ],
+    version = 8,
     exportSchema = true
 )
 @TypeConverters(AppDatabase.Converters::class)
@@ -34,6 +44,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun backupSourceDao(): BackupSourceDao
 
     abstract fun backupTreeDao(): BackupTreeDao
+
+    abstract fun cameraCheckDao(): CameraCheckDao
 
     class Converters {
         @TypeConverter
@@ -65,6 +77,30 @@ abstract class AppDatabase : RoomDatabase() {
 
         @TypeConverter
         fun toBackupFileStatus(value: String): BackupFileStatus = BackupFileStatus.valueOf(value)
+
+        @TypeConverter
+        fun fromCameraCheckState(state: CameraCheckState): String = state.name
+
+        @TypeConverter
+        fun toCameraCheckState(value: String): CameraCheckState = CameraCheckState.valueOf(value)
+
+        @TypeConverter
+        fun fromCameraCheckStage(stage: CameraCheckStage): String = stage.name
+
+        @TypeConverter
+        fun toCameraCheckStage(value: String): CameraCheckStage = CameraCheckStage.valueOf(value)
+
+        @TypeConverter
+        fun fromCameraCheckError(error: CameraCheckError?): String? = error?.name
+
+        @TypeConverter
+        fun toCameraCheckError(value: String?): CameraCheckError? = value?.let { CameraCheckError.valueOf(it) }
+
+        @TypeConverter
+        fun fromCameraCheckResult(result: CameraCheckResult?): String? = result?.name
+
+        @TypeConverter
+        fun toCameraCheckResult(value: String?): CameraCheckResult? = value?.let { CameraCheckResult.valueOf(it) }
     }
 
     companion object {
@@ -125,6 +161,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** Ручная сверка Camera (Q-01): только новые таблицы, очередь Camera и источники не меняются. */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `camera_check` (`id` INTEGER NOT NULL, `runId` TEXT NOT NULL, " +
+                        "`state` TEXT NOT NULL, `stage` TEXT NOT NULL, `error` TEXT, `serverUrl` TEXT NOT NULL, " +
+                        "`accountId` TEXT NOT NULL, `cameraFolderId` INTEGER, `startedAt` INTEGER NOT NULL, " +
+                        "`deferred` INTEGER NOT NULL, `finishedAt` INTEGER, `checked` INTEGER NOT NULL, " +
+                        "`confirmed` INTEGER NOT NULL, `missing` INTEGER NOT NULL, `unverifiable` INTEGER NOT NULL, " +
+                        "`queuedForUpload` INTEGER, PRIMARY KEY(`id`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `camera_check_items` (`mediaStoreId` INTEGER NOT NULL, " +
+                        "`size` INTEGER NOT NULL, `lastModified` INTEGER NOT NULL, `checksum` TEXT, `result` TEXT, " +
+                        "PRIMARY KEY(`mediaStoreId`))"
+                )
+            }
+        }
+
         private val MIGRATION_5_6_TABLES = listOf(
             "CREATE TABLE IF NOT EXISTS `backup_folders` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sourceId` INTEGER NOT NULL, `parentId` INTEGER, `name` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `documentId` TEXT NOT NULL, `serverFolderId` INTEGER, `problem` TEXT, `seenGeneration` INTEGER NOT NULL, `listedGeneration` INTEGER NOT NULL, FOREIGN KEY(`sourceId`) REFERENCES `backup_sources`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_backup_folders_sourceId_relativePath` ON `backup_folders` (`sourceId`, `relativePath`)",
@@ -147,7 +202,7 @@ abstract class AppDatabase : RoomDatabase() {
         internal fun build(context: Context, name: String): AppDatabase =
             Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, name)
                 // Без пути миграции Room отказывает в открытии БД: очередь Camera и источники не удаляются молча.
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .build()
     }
 }

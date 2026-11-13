@@ -40,6 +40,8 @@ import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
 import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
+import ru.tbcarus.photo_cloud_client.ui.screens.files.CameraCheckActions
+import ru.tbcarus.photo_cloud_client.ui.screens.files.CameraCheckCard
 import ru.tbcarus.photo_cloud_client.ui.screens.files.FilesViewModel
 import ru.tbcarus.photo_cloud_client.ui.screens.files.RetryMessage
 import ru.tbcarus.photo_cloud_client.ui.screens.files.backupCountersText
@@ -77,6 +79,21 @@ fun FilesScreen(viewModel: FilesViewModel, onOpenSettings: () -> Unit) {
         // синхронизацию ведут MediaChangeObserver + Поставщик и Загрузчик WorkManager.
         state.backupState?.let { backup ->
             BackupStateCard(backup)
+            Spacer(Modifier.height(8.dp))
+
+            CameraCheckCard(
+                view = state.cameraCheck,
+                busy = state.checkBusy,
+                message = state.checkMessage,
+                actions = CameraCheckActions(
+                    onStart = viewModel::startCheck,
+                    onCancel = viewModel::cancelCheck,
+                    onRetry = viewModel::retryCheck,
+                    onConfirm = viewModel::confirmCheckUpload,
+                    onDefer = viewModel::deferCheck,
+                    onDismiss = viewModel::dismissCheck
+                )
+            )
             Spacer(Modifier.height(8.dp))
 
             // Кнопка — только при FAILED в индексе; сообщение об итоге остаётся видимым и после сброса.

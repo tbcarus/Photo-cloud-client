@@ -11,6 +11,8 @@ import androidx.work.Operation
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import androidx.work.WorkRequest
+import androidx.work.workDataOf
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -37,6 +39,8 @@ class SyncScheduler @Inject constructor(
         const val PROVIDER_PERIODIC_WORK_NAME = "photo_provider_periodic"
         const val UPLOAD_WORK_NAME = "photo_upload"
         const val UPLOAD_PERIODIC_WORK_NAME = "photo_upload_periodic"
+        /** Ручной повтор серверной стадии сверки Camera — см. [retryUploadNow]. */
+        const val UPLOAD_RETRY_WORK_NAME = "photo_upload_retry"
         const val MEDIA_TRIGGER_WORK_NAME = "photo_media_trigger"
 
         /** Тег разовых запросов: отличает их от периодических в базе WorkManager. */
@@ -104,19 +108,55 @@ class SyncScheduler @Inject constructor(
     }
 
     /**
+     * Повтор после временной ошибки ручного прогона (Q-01.3): разовая цепочка с KEEP — ждущую backoff не трогает,
+     * а новая стартует через первую задержку backoff WorkManager, а не сразу: немедленная попытка уже была.
+     */
+    fun enqueueUploadAfterFailure() {
+        val request = OneTimeWorkRequestBuilder<UploadWorker>()
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setInitialDelay(WorkRequest.DEFAULT_BACKOFF_DELAY_MILLIS, TimeUnit.MILLISECONDS)
+            .addTag(ONE_TIME_TAG)
+            .build()
+        workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+    }
+
+    /**
      * Продолжение Загрузчика после прогона, остановленного бюджетом времени (A8.2), — по тем же правилам,
      * что [continueProvider]. Продолжению, как и любому разовому Загрузчику, нужна подключённая сеть.
      */
     fun continueUpload(): Operation =
         workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, uploadRequest())
 
-    private fun uploadRequest() = OneTimeWorkRequestBuilder<UploadWorker>()
+    /**
+     * «Повторить» серверную стадию ручной сверки (Q-01.1): прогон Загрузчика без накопленного backoff.
+     *
+     * Отдельное имя, а не REPLACE разовой цепочки: ожидающий backoff или уже работающий прогон не отменяется и не
+     * заменяется, гонки ENQUEUED → RUNNING нет. KEEP держит не больше одного ручного прогона. Параллельные прогоны
+     * Загрузчика под разными именами уже бывают (разовый и periodic): серверную стадию сериализует stageMutex
+     * [CameraCheckRepository], pre-check и upload — свои Mutex. Временную ошибку ручной прогон не повторяет сам
+     * (иначе KEEP ждал бы его backoff): автоматический повтор остаётся за разовой цепочкой, которую он при
+     * необходимости ставит с KEEP и задержкой первого backoff ([enqueueUploadAfterFailure]), и periodic.
+     */
+    fun retryUploadNow(): Operation =
+        workManager.enqueueUniqueWork(UPLOAD_RETRY_WORK_NAME, ExistingWorkPolicy.KEEP, uploadRequest(manualRetry = true))
+
+    /**
+     * Продолжение в цепочке ручных прогонов (Q-01.2): серверная стадия сверки после исчерпания бюджета и
+     * обычная синхронизация после отмены проверки в ERROR. Прогоны этой цепочки не уходят в backoff, поэтому
+     * продолжение ждёт только текущий ручной прогон, а не backoff разовой цепочки. APPEND_OR_REPLACE, как у
+     * [continueUpload]: работающий прогон не отменяется, одна регистрация добавляет один запуск.
+     */
+    fun continueUploadNow(): Operation =
+        workManager.enqueueUniqueWork(UPLOAD_RETRY_WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, uploadRequest(manualRetry = true))
+
+    private fun uploadRequest(manualRetry: Boolean = false) = OneTimeWorkRequestBuilder<UploadWorker>()
         .setConstraints(
             Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
         )
         .addTag(ONE_TIME_TAG)
+        .apply { if (manualRetry) setInputData(workDataOf(UploadWorker.MANUAL_RETRY_KEY to true)) }
         .build()
 
     /**
@@ -184,11 +224,12 @@ class SyncScheduler @Inject constructor(
             isRunning(PROVIDER_WORK_NAME),
             isRunning(PROVIDER_PERIODIC_WORK_NAME),
             isRunning(UPLOAD_WORK_NAME),
-            isRunning(UPLOAD_PERIODIC_WORK_NAME)
-        ) { provider, providerPeriodic, upload, uploadPeriodic ->
+            isRunning(UPLOAD_PERIODIC_WORK_NAME),
+            isRunning(UPLOAD_RETRY_WORK_NAME)
+        ) { provider, providerPeriodic, upload, uploadPeriodic, uploadRetry ->
             SyncActivity(
                 providerRunning = provider || providerPeriodic,
-                uploaderRunning = upload || uploadPeriodic
+                uploaderRunning = upload || uploadPeriodic || uploadRetry
             )
         }.distinctUntilChanged()
 

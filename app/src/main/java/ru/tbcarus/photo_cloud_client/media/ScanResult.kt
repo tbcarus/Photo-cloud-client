@@ -4,11 +4,13 @@ package ru.tbcarus.photo_cloud_client.media
  * Итоговая статистика синхронизации локального индекса с MediaStore.
  * [insertedOrUpdated] — количество записей, прошедших insert+update pipeline;
  * не различает «новые» и «обновлённые», так как insertAll использует OnConflict.IGNORE.
+ * [complete] — индекс совпадает с полным снимком: снимок полный и все отсутствующие в нём строки удалены.
  */
 data class ScanResult(
     val scanned: Int,
     val insertedOrUpdated: Int,
-    val deletedStale: Int
+    val deletedStale: Int,
+    val complete: Boolean
 )
 
 /** Результат MediaFileRepository.scanImages() — после синхронизации с Room. */

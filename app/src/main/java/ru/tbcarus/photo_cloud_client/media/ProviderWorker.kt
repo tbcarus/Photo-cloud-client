@@ -17,6 +17,7 @@ import kotlin.coroutines.cancellation.CancellationException
  * Хеширование ограничено бюджетом времени прогона; остаток очереди продолжает следующий прогон (A8.1).
  *
  * Не зависит от сети, адреса Server, токенов и состояния Загрузчика; продолжает работать после logout.
+ * Локальные стадии ручной сверки Camera ([CameraCheckRepository]) выполняются в этом же прогоне.
  */
 @HiltWorker
 class ProviderWorker @AssistedInject constructor(
@@ -27,7 +28,8 @@ class ProviderWorker @AssistedInject constructor(
     private val syncStatusStore: SyncStatusStore,
     private val periodicSyncCoordinator: PeriodicSyncCoordinator,
     private val syncScheduler: SyncScheduler,
-    private val clock: SyncClock
+    private val clock: SyncClock,
+    private val cameraCheck: CameraCheckRepository
 ) : CoroutineWorker(appContext, params) {
 
     private companion object {
@@ -43,9 +45,15 @@ class ProviderWorker @AssistedInject constructor(
         return Result.retry()
     }
 
-    /** KEEP: работающий или ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room. */
+    /**
+     * KEEP: работающий или ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room.
+     * На паузе ручной сверки Загрузчик нужен только её серверной стадии (в том числе после рестарта процесса):
+     * при RUNNING/SERVER — в цепочке ручных прогонов, без ожидания backoff разовой; при ERROR — как прежде.
+     */
     private suspend fun signalUploader() {
-        if (mediaFileRepository.hasReadyForUpload()) {
+        if (cameraCheck.resumeServerStage()) return
+        val uploadReady = mediaFileRepository.hasReadyForUpload() && !cameraCheck.isUploadPaused()
+        if (uploadReady || cameraCheck.awaitsServer()) {
             periodicSyncCoordinator.requestUpload()
         }
     }
@@ -69,6 +77,7 @@ class ProviderWorker @AssistedInject constructor(
         // Фоновый worker не может запросить runtime-разрешение — это не crash и не retry.
         if (!applicationContext.hasMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — локальная обработка пропущена")
+            cameraCheck.markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
             return Result.success()
         }
 
@@ -80,19 +89,34 @@ class ProviderWorker @AssistedInject constructor(
         val restored = checksumRepository.restoreRetryableFailed()
         if (restored > 0) Log.i(TAG, "Auto-retry: восстановлено retryable FAILED = $restored")
 
+        // Проверка, запущенная до этого scan, примет его как свой: снимок начат уже после запуска.
+        val checkRunId = cameraCheck.runAwaitingScan()
         val scan = when (val outcome = mediaFileRepository.scanImages()) {
             is ScanOutcome.Success -> outcome.result
-            is ScanOutcome.PermissionDenied -> return Result.success()
-            is ScanOutcome.Error -> return fail()
+            is ScanOutcome.PermissionDenied -> {
+                cameraCheck.markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
+                return Result.success()
+            }
+            is ScanOutcome.Error -> {
+                cameraCheck.markLocalError(CameraCheckError.SCAN_FAILED)
+                return fail()
+            }
         }
         scanned = true
+        if (checkRunId != null) cameraCheck.onScanFinished(checkRunId, scan.complete)
 
         // HASHING → PENDING восстанавливается в начале стадии; хэшируются только PENDING-записи.
         val checksum = when (val outcome = checksumRepository.computePendingChecksums(budget) { signalUploader() }) {
             is ChecksumOutcome.Success -> outcome.result
-            is ChecksumOutcome.PermissionDenied -> return Result.success()
+            is ChecksumOutcome.PermissionDenied -> {
+                cameraCheck.markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
+                return Result.success()
+            }
             is ChecksumOutcome.Error -> return fail()
         }
+
+        // Стадия HASH ручной сверки: checksum строк набора после собственного хеширования.
+        val check = cameraCheck.collectChecksums(budget)
 
         // Сигнал по состоянию Room, а не по «новым в этом прогоне»: потерянный ранее сигнал восстанавливается.
         signalUploader()
@@ -100,7 +124,7 @@ class ProviderWorker @AssistedInject constructor(
         // Бюджет исчерпан, а очередь осталась — следующий прогон продолжит её по состоянию Room.
         // Без прогресса продолжение не ставится: остаток подхватят события и periodic, бесконечной цепочки нет.
         // Регистрация подтверждается записью в базу WorkManager до возврата success; её сбой — ошибка прогона (retry).
-        if (checksum.processed > 0 && checksumRepository.hasPending()) {
+        if ((checksum.processed > 0 || check.progressed) && (checksumRepository.hasPending() || check.remaining)) {
             syncScheduler.continueProvider().await()
             Log.i(TAG, "Очередь хеширования не исчерпана — зарегистрировано продолжение Поставщика")
         }

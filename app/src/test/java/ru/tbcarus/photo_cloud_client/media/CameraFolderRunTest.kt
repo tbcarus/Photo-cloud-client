@@ -255,7 +255,7 @@ class CameraFolderRunTest {
                 InMemoryTokenStorage(Tokens("access", "refresh")),
                 mock(PeriodicSyncCoordinator::class.java),
                 SyncScheduler(appContext),
-                SyncClock.SYSTEM
+                SyncClock.SYSTEM, idleCameraCheck(appContext, db)
             )
         }
         return TestListenableWorkerBuilder<UploadWorker>(context).setWorkerFactory(factory).build().doWork()

@@ -89,7 +89,7 @@ class MediaTriggerWorkerTest {
                 MediaTriggerWorker::class.java.name -> MediaTriggerWorker(appContext, workerParameters, scheduler)
                 ProviderWorker::class.java.name -> ProviderWorker(
                     appContext, workerParameters, mediaFileRepository, checksumRepository, syncStatusStore, coordinator,
-                    scheduler, SyncClock.SYSTEM
+                    scheduler, SyncClock.SYSTEM, idleCameraCheck(appContext, db)
                 )
                 else -> null // Загрузчик здесь не выполняется: без пары он и не ставится.
             }
