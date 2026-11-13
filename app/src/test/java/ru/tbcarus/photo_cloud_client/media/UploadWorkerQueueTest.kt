@@ -232,8 +232,9 @@ class UploadWorkerQueueTest {
                 json("""{"existing":${existing.toJson()},"missing":${missing.toJson()}}""")
             }
             path == "/api/v1/files/upload" -> {
+                val body = request.body.readByteArray()
                 beforeUploadResponse()
-                json("""{"id":$SERVER_FILE_ID}""")
+                json(uploadResponseJson(SERVER_FILE_ID, body))
             }
             else -> MockResponse().setResponseCode(404)
         }

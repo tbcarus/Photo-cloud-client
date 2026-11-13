@@ -414,6 +414,25 @@ class CameraCheckTest {
     // --- 11, 12, 13: «Позже», рестарт, «Отказаться от проверки» ---
 
     @Test
+    fun uploaderSignalDuringPauseDoesNotUploadCameraFiles() = runBlocking {
+        file(1, MediaFileStatus.SYNCED)
+        val ready = file(2, MediaFileStatus.CHECKSUM_READY)
+        check.start()
+        drain()
+        assertTrue(check.defer())
+        assertTrue(check.isUploadPaused())
+
+        // Прогон Поставщика и прямой сигнал Загрузчику (Q-02.1): запуск Загрузчика на паузе ничего не отправляет.
+        scheduler.enqueueProvider()
+        scheduler.signalUpload()
+        drain()
+
+        assertTrue(uploads.isEmpty())
+        assertEquals(MediaFileStatus.CHECKSUM_READY, dao.single(ready.id).status)
+        assertTrue(check.isUploadPaused())
+    }
+
+    @Test
     fun laterKeepsResultAndPauseAcrossRestartUntilDiscarded() = runBlocking {
         file(1, MediaFileStatus.SYNCED)
         val ready = file(2, MediaFileStatus.CHECKSUM_READY)
@@ -1267,11 +1286,12 @@ class CameraCheckTest {
                 }
             }
             "/api/v1/files/upload" -> {
-                val id = Regex("filename=\"IMG_(\\d+)\\.jpg\"").find(request.body.readUtf8())!!.groupValues[1].toLong()
+                val body = request.body.readByteArray()
+                val id = Regex("filename=\"IMG_(\\d+)\\.jpg\"").find(body.toString(Charsets.ISO_8859_1))!!.groupValues[1].toLong()
                 onUpload(id)
                 uploads += id
-                existing += sha256(images.getValue(id).bytes)
-                json("""{"id":${nextFileId.getAndIncrement()}}""")
+                existing += uploadedChecksum(body)
+                json(uploadResponseJson(nextFileId.getAndIncrement(), body))
             }
             else -> MockResponse().setResponseCode(404)
         }

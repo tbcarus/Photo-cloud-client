@@ -71,4 +71,11 @@ class PeriodicSyncCoordinator @Inject constructor(
             syncScheduler.enqueueUpload()
         }
     }
+
+    /** Сигнал Поставщика о готовых записях ([SyncScheduler.signalUpload]); без пары не ставится, как [requestUpload]. */
+    suspend fun signalUpload() {
+        if (authRepository.getTokens() != null) {
+            syncScheduler.signalUpload()
+        }
+    }
 }

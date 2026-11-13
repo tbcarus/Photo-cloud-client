@@ -191,6 +191,14 @@ class UploadWorker @AssistedInject constructor(
             }
         }
 
+        // Несовпадение checksum вернуло строки в PENDING (Q-02): повторный hash — работа Поставщика. Его продолжение
+        // ставится после текущего прогона, а не KEEP: уже завершающий хеширование прогон эти строки не возьмёт.
+        // Регистрация подтверждается до продолжения; её сбой — ошибка прогона (retry), строки остаются в PENDING.
+        if ((upload?.rehashQueued ?: 0) > 0) {
+            syncScheduler.continueProvider().await()
+            Log.i(TAG, "Несовпадение checksum upload — зарегистрировано продолжение Поставщика")
+        }
+
         // Время отправки фиксируется один раз за прогон: existing pre-check — не передача файла.
         filesUploaded = (upload?.succeeded ?: 0) > 0
 

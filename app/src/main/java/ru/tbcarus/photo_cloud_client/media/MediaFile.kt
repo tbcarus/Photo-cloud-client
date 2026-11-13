@@ -19,5 +19,8 @@ data class MediaFile(
     val status: MediaFileStatus = MediaFileStatus.PENDING,
     val failureReason: FailureReason? = null, // причина последнего FAILED, null если не падал
     val retryCount: Int = 0,        // число попыток, закончившихся FAILED (для лимита auto-retry)
-    val lastFailureAt: Long? = null // время последнего FAILED (ms), для cooldown
+    val lastFailureAt: Long? = null, // время последнего FAILED (ms), для cooldown
+    // Подтверждённые несовпадения checksum ответа upload с локальным (Q-02). Успешный hash его не обнуляет,
+    // в отличие от retryCount: иначе лимит автоматических восстановлений не действовал бы.
+    val uploadMismatchCount: Int = 0
 )

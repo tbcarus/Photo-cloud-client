@@ -293,6 +293,7 @@ private fun formatFailureReason(reason: FailureReason): String = when (reason) {
     FailureReason.HTTP_400       -> "HTTP 400"
     FailureReason.HTTP_409       -> "HTTP 409"
     FailureReason.HTTP_413       -> "HTTP 413"
+    FailureReason.CHANGED_DURING_UPLOAD -> "Содержимое файла изменяется во время загрузки"
     FailureReason.UNKNOWN        -> "Unknown error"
 }
 

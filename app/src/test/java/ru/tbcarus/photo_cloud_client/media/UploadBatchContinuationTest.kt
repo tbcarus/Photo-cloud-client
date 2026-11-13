@@ -596,7 +596,7 @@ class UploadBatchContinuationTest {
                 val code = uploadCodes[id]
                 if (code != null) return MockResponse().setResponseCode(code)
                 val serverId = serverIds.computeIfAbsent(id) { nextServerId.getAndIncrement().toLong() }
-                val response = """{"id":$serverId}"""
+                val response = """{"id":$serverId,"checksum":"${sha256(filePartContent(body).toByteArray())}"}"""
                 if (lostResponses.computeIfPresent(id) { _, left -> left - 1 }?.let { it >= 0 } == true) {
                     // Файл сохранён, но клиент не получает последний байт ответа: соединение закрыто раньше.
                     json(response.dropLast(1))

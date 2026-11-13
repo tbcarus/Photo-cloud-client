@@ -46,7 +46,8 @@ class ProviderWorker @AssistedInject constructor(
     }
 
     /**
-     * KEEP: работающий или ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room.
+     * Ожидающий Загрузчик не дублируется — он сам дочитает очередь из Room; к выполняющемуся добавляется один
+     * следующий запуск, чтобы сигнал не потерялся ([SyncScheduler.signalUpload]).
      * На паузе ручной сверки Загрузчик нужен только её серверной стадии (в том числе после рестарта процесса):
      * при RUNNING/SERVER — в цепочке ручных прогонов, без ожидания backoff разовой; при ERROR — как прежде.
      */
@@ -54,7 +55,7 @@ class ProviderWorker @AssistedInject constructor(
         if (cameraCheck.resumeServerStage()) return
         val uploadReady = mediaFileRepository.hasReadyForUpload() && !cameraCheck.isUploadPaused()
         if (uploadReady || cameraCheck.awaitsServer()) {
-            periodicSyncCoordinator.requestUpload()
+            periodicSyncCoordinator.signalUpload()
         }
     }
 

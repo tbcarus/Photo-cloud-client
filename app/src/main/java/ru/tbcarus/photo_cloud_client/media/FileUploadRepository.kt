@@ -24,7 +24,8 @@ import javax.inject.Singleton
 /**
  * Upload-слой этапа 5D.
  * Берёт локальные записи со статусом PENDING_UPLOAD и грузит их в системную папку CAMERA:
- *  - success → markUploaded(mediaStoreId, fileItem.id) → SYNCED + serverFileId;
+ *  - success с checksum ответа, равным локальному → markUploaded(mediaStoreId, fileItem.id) → SYNCED + serverFileId;
+ *  - success с другим checksum (Q-02) → PENDING к Поставщику без checksum, после лимита восстановлений — FAILED;
  *  - permanent error → FAILED;
  *  - transient error → возврат файла в PENDING_UPLOAD и остановка текущего прогона.
  * Все переходы условные (A4.1): строку, которую Поставщик сбросил или обновил во время отправки,
@@ -43,6 +44,10 @@ class FileUploadRepository @Inject constructor(
 
     private companion object {
         const val TAG = "FileUploadRepository"
+
+        // Q-02: автоматических восстановлений после несовпадения checksum ответа; следующее несовпадение — FAILED.
+        const val MAX_MISMATCH_RECOVERIES = 3
+        val SHA256_HEX = Regex("[0-9a-fA-F]{64}")
     }
 
     /**
@@ -85,6 +90,7 @@ class FileUploadRepository @Inject constructor(
         var succeeded = 0
         var failed = 0
         var leftPending = 0
+        var rehashQueued = 0
 
         var stopped = false
         while (!stopped) {
@@ -141,13 +147,26 @@ class FileUploadRepository @Inject constructor(
                     leftPending++
                     return UploadOutcome.Error(
                         e.message ?: "Сетевая ошибка при upload",
-                        UploadResult(attempted, succeeded, failed, leftPending)
+                        UploadResult(attempted, succeeded, failed, leftPending, rehashQueued)
                     )
                 }
 
                 if (response.isSuccessful) {
-                    val id = response.body()?.id
-                    if (id != null && id > 0) {
+                    val body = response.body()
+                    val id = body?.id
+                    // checksum ответа — SHA-256 байтов, принятых Server в этом (последнем) запросе, в том числе duplicate.
+                    val accepted = body?.checksum?.takeIf { SHA256_HEX.matches(it) }?.lowercase()
+                    if (id == null || id <= 0 || accepted == null) {
+                        // 200, но тело пустое, без id или без корректного checksum → transient: изменение файла не доказано.
+                        mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
+                        leftPending++
+                        return UploadOutcome.Error(
+                            if (accepted == null && id != null && id > 0) "Upload вернул некорректный checksum"
+                            else "Upload вернул пустой или некорректный id",
+                            UploadResult(attempted, succeeded, failed, leftPending, rehashQueued)
+                        )
+                    }
+                    if (accepted == file.checksum?.lowercase()) {
                         // Идемпотентный ответ сервера (существующий FileItem) — тоже success.
                         // Если фото изменилось во время отправки, строка остаётся за Поставщиком: новая версия пройдёт заново.
                         if (mediaFileDao.markUploadedIfUnchanged(
@@ -157,13 +176,15 @@ class FileUploadRepository @Inject constructor(
                             succeeded++
                         }
                     } else {
-                        // 200, но тело пустое/без id → transient.
-                        mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
-                        leftPending++
-                        return UploadOutcome.Error(
-                            "Upload вернул пустой или некорректный id",
-                            UploadResult(attempted, succeeded, failed, leftPending)
-                        )
+                        // Server сохранил другое содержимое: повторный hash и pre-check найдут его без новой передачи.
+                        Log.w(TAG, "checksum ответа upload не совпал с локальным, mediaStoreId=${file.mediaStoreId}")
+                        if (mediaFileDao.applyUploadMismatchIfUnchanged(
+                                file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                                file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()
+                            ) > 0
+                        ) {
+                            if (file.uploadMismatchCount < MAX_MISMATCH_RECOVERIES) rehashQueued++ else failed++
+                        }
                     }
                 } else {
                     val code = response.code()
@@ -181,7 +202,7 @@ class FileUploadRepository @Inject constructor(
                         leftPending++
                         return UploadOutcome.Error(
                             message,
-                            UploadResult(attempted, succeeded, failed, leftPending)
+                            UploadResult(attempted, succeeded, failed, leftPending, rehashQueued)
                         )
                     }
                 }
@@ -190,7 +211,7 @@ class FileUploadRepository @Inject constructor(
             if (!progressed) break
         }
 
-        return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, leftPending))
+        return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, leftPending, rehashQueued))
     }
 
     /**

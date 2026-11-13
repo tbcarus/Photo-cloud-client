@@ -51,6 +51,9 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import java.net.InetAddress
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 
@@ -82,14 +85,22 @@ class ProviderUploadEndToEndTest {
     private val workManager get() = WorkManager.getInstance(context)
     private val dao get() = db.mediaFileDao()
 
-    // Server: нет ни одного checksum, id новых файлов растут с 100.
+    // Server: вначале нет ни одного checksum, id новых файлов растут с 100; checksum считается по принятым байтам,
+    // повтор того же содержимого получает прежний id (duplicate), pre-check видит всё принятое.
     private val nextFileId = AtomicLong(100)
+    private val serverIds = ConcurrentHashMap<String, Long>()
     private val paths = CopyOnWriteArrayList<String>()
     private val requestedChecksums = CopyOnWriteArrayList<String>()
     private val uploadedBodies = CopyOnWriteArrayList<ByteArray>()
 
     // Статусы строки в моменты, когда её видят MediaStore-поток и Server.
     private val trace = CopyOnWriteArrayList<MediaFileStatus>()
+
+    @Volatile private var uploaderRunRecorded: () -> Unit = {}
+
+    // Upload: действие во время запроса и код ответа вместо успешного (null — успех).
+    @Volatile private var onUploadRequest: () -> Unit = {}
+    @Volatile private var uploadErrorCode: Int? = null
 
     @Before
     fun setUp() {
@@ -112,6 +123,8 @@ class ProviderUploadEndToEndTest {
         val apiServiceFactory = ApiServiceFactory(baseUrlProvider, client, client, client)
         val folderRepository = FolderRepository(apiServiceFactory)
         val syncStatusStore = testSyncStatusStore()
+        // Итог Загрузчик пишет после последней проверки очереди: хук попадает в окно до завершения задачи.
+        val uploaderStatusStore = testSyncStatusStore(wallClock = { uploaderRunRecorded(); System.currentTimeMillis() })
         // Общие экземпляры, как @Singleton в приложении: Mutex стадий действуют на все задачи.
         mediaFileRepository = MediaFileRepository(dao, MediaStoreRepository(context))
         val checksumRepository = ChecksumRepository(dao, MediaStreamOpener(context), context)
@@ -137,7 +150,7 @@ class ProviderUploadEndToEndTest {
                 )
                 UploadWorker::class.java.name -> UploadWorker(
                     appContext, workerParameters, folderRepository, precheckRepository, uploadRepository, serverRepository,
-                    baseUrlProvider, syncStatusStore, storage, coordinator, scheduler, SyncClock.SYSTEM, idleCameraCheck(appContext, db)
+                    baseUrlProvider, uploaderStatusStore, storage, coordinator, scheduler, SyncClock.SYSTEM, idleCameraCheck(appContext, db)
                 )
                 else -> null
             }
@@ -319,7 +332,7 @@ class ProviderUploadEndToEndTest {
 
     @Test
     @Config(sdk = [34]) // MediaStore.setRequireOriginal — API 29+
-    fun locationRevokedBetweenChecksumAndUploadDoesNotFailUpload() = runBlocking {
+    fun locationRevokedBetweenChecksumAndUploadSyncsAcceptedVersionWithoutSecondTransfer() = runBlocking {
         shadowOf(context).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
         val image = media.add(imageWithGps(1))
         mediaFileRepository.scanImages()
@@ -328,11 +341,129 @@ class ProviderUploadEndToEndTest {
         assertEquals(sha256(GPS_ORIGINAL), dao.single(image.id).checksum)
 
         shadowOf(context).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
-        assertEquals(WorkInfo.State.SUCCEEDED, runSignalledUpload(uploadsBefore).state)
+        runUploadThenRehash(uploadsBefore)
 
-        // Отправлена доступная версия; расхождение с checksum — известное ограничение смены разрешения между чтениями.
-        assertEquals(MediaFileStatus.SYNCED, dao.single(image.id).status)
-        assertEquals(image.bytes.toString(Charsets.ISO_8859_1), uploadedFilePart())
+        // Отправлена доступная версия: Server вернул её checksum, Android перехешировал файл тем же правилом выбора
+        // потока, и pre-check нашёл принятую копию — SYNCED с checksum отправленных байтов без второй передачи.
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256(GPS_REDACTED), synced.checksum)
+        assertEquals(0, synced.uploadMismatchCount)
+        assertEquals(GPS_REDACTED.toString(Charsets.ISO_8859_1), uploadedFilePart())
+        assertEquals(listOf(sha256(GPS_ORIGINAL), sha256(GPS_REDACTED)), requestedChecksums.toList())
+    }
+
+    // --- Несовпадение checksum ответа upload (Q-02) ---
+
+    @Test
+    fun contentChangedBetweenHashAndUploadIsTransferredOnce() = runBlocking {
+        val image = media.add(image(1, "content-A"))
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        runProvider()
+        assertEquals(sha256("content-A".toByteArray()), dao.single(image.id).checksum)
+        // Тот же размер и время изменения: scan изменения не видит, upload читает уже новые байты.
+        image.bytes = "content-B".toByteArray()
+
+        runUploadThenRehash(uploadsBefore)
+
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256(image.bytes), synced.checksum)
+        assertEquals(0, synced.uploadMismatchCount)
+        // Передача одна: B уже на Server, повторный hash и pre-check его подтвердили.
+        assertEquals(1, paths.count { it == "/api/v1/files/upload" })
+        assertEquals("content-B", uploadedFilePart())
+        assertEquals(listOf(sha256("content-A".toByteArray()), sha256(image.bytes)), requestedChecksums.toList())
+    }
+
+    @Test
+    fun contentChangedAgainBeforeRehashIsUploadedWithNewChecksum() = runBlocking {
+        val image = media.add(image(1, "content-A"))
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        runProvider()
+        image.bytes = "content-B".toByteArray()
+
+        // К повторному hash файл изменился ещё раз: C на Server нет — обычный upload с новой проверкой ответа.
+        runUploadThenRehash(uploadsBefore) { image.bytes = "content-C".toByteArray() }
+
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256("content-C".toByteArray()), synced.checksum)
+        assertEquals(101L, synced.serverFileId)
+        assertEquals(0, synced.uploadMismatchCount)
+        assertEquals(2, paths.count { it == "/api/v1/files/upload" })
+    }
+
+    @Test
+    fun rehashFinishedWhileUploaderIsStillRunningStartsPrecheckWithoutSecondTransfer() = runBlocking {
+        val image = media.add(image(1, "content-A"))
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        runProvider()
+        image.bytes = "content-B".toByteArray()
+        val upload = awaitNewId(SyncScheduler.UPLOAD_WORK_NAME, uploadsBefore)
+        val providersBefore = ids(SyncScheduler.PROVIDER_WORK_NAME)
+
+        // Поставщик, поставленный несовпадением, начинает повторный hash только после того, как Загрузчик прошёл
+        // последнюю проверку очереди (строка ещё PENDING), и успевает завершиться и подать сигнал, пока задача
+        // Загрузчика всё ещё RUNNING.
+        val rehashAllowed = CountDownLatch(1)
+        media.beforeQuery = { rehashAllowed.await(10, TimeUnit.SECONDS) }
+        val providerState = java.util.concurrent.atomic.AtomicReference<WorkInfo.State?>()
+        val uploadStateAtSignal = java.util.concurrent.atomic.AtomicReference<WorkInfo.State?>()
+        uploaderRunRecorded = {
+            uploaderRunRecorded = {}
+            rehashAllowed.countDown()
+            providerState.set(awaitFinished(awaitNewId(SyncScheduler.PROVIDER_WORK_NAME, providersBefore)).state)
+            uploadStateAtSignal.set(workManager.getWorkInfoById(upload).get()!!.state)
+        }
+        WorkManagerTestInitHelper.getTestDriver(context)!!.setAllConstraintsMet(upload)
+        assertEquals(WorkInfo.State.SUCCEEDED, awaitFinished(upload).state)
+        media.beforeQuery = {}
+        assertEquals(WorkInfo.State.SUCCEEDED, providerState.get())
+        assertEquals(WorkInfo.State.RUNNING, uploadStateAtSignal.get())
+        assertEquals(MediaFileStatus.CHECKSUM_READY, dao.single(image.id).status)
+        assertEquals(sha256(image.bytes), dao.single(image.id).checksum)
+
+        // Сигнал не потерян: следующий прогон Загрузчика стартует сам, pre-check находит B на Server.
+        val next = awaitNewId(SyncScheduler.UPLOAD_WORK_NAME, uploadsBefore + upload)
+        assertEquals(WorkInfo.State.SUCCEEDED, runSignalledUpload(uploadsBefore + upload).state)
+        val synced = dao.single(image.id)
+        assertEquals(MediaFileStatus.SYNCED, synced.status)
+        assertEquals(sha256(image.bytes), synced.checksum)
+        assertEquals(1, paths.count { it == "/api/v1/files/upload" })
+        assertEquals(listOf(sha256("content-A".toByteArray()), sha256(image.bytes)), requestedChecksums.toList())
+        // Ровно один дополнительный прогон, бесконечной цепочки нет.
+        assertEquals(setOf(upload, next), ids(SyncScheduler.UPLOAD_WORK_NAME) - uploadsBefore)
+    }
+
+    @Test
+    fun signalDuringRunningUploaderKeepsBackoffAfterServerError() = runBlocking {
+        media.add(image(1, "photo-1"))
+        val uploadsBefore = ids(SyncScheduler.UPLOAD_WORK_NAME)
+        runProvider()
+        val upload = awaitNewId(SyncScheduler.UPLOAD_WORK_NAME, uploadsBefore)
+        // Пока Загрузчик отправляет первое фото, Поставщик готовит второе и сигналит; затем Server отвечает 500.
+        uploadErrorCode = 500
+        onUploadRequest = {
+            onUploadRequest = {}
+            media.add(image(2, "photo-2"))
+            runProvider()
+        }
+
+        WorkManagerTestInitHelper.getTestDriver(context)!!.setAllConstraintsMet(upload)
+        awaitUntil { workManager.getWorkInfoById(upload).get()!!.let { it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount == 1 } }
+
+        // Прогон ждёт backoff; добавленный сигналом запуск стоит после него и раньше не начнётся.
+        val runs = infos(SyncScheduler.UPLOAD_WORK_NAME).filter { it.id !in uploadsBefore }
+        assertEquals(2, runs.size)
+        assertEquals(WorkInfo.State.ENQUEUED, runs.single { it.id == upload }.state)
+        assertEquals(WorkInfo.State.BLOCKED, runs.single { it.id != upload }.state)
+        // Повторный сигнал при ожидающем прогоне ничего не добавляет и backoff не обходит.
+        runProvider()
+        Thread.sleep(300)
+        assertEquals(runs.map { it.id }.toSet(), ids(SyncScheduler.UPLOAD_WORK_NAME) - uploadsBefore)
+        assertEquals(WorkInfo.State.ENQUEUED, workManager.getWorkInfoById(upload).get()!!.state)
+        assertEquals(1, paths.count { it == "/api/v1/files/upload" })
     }
 
     // --- Ручной повтор FAILED (кнопка «Повторить ошибки» на Files) ---
@@ -478,6 +609,28 @@ class ProviderUploadEndToEndTest {
         runSignalledUpload(uploadsBefore)
     }
 
+    /**
+     * Загрузчик по сигналу, получивший несовпадение checksum, затем продолжение Поставщика, которое он поставил,
+     * и Загрузчик по сигналу этого Поставщика. Поставщик ждёт, пока тест прочитает итог первого Загрузчика: иначе
+     * его сигнал (KEEP) мог бы прийтись на ещё выполняющийся прогон, а KEEP после окончания удаляет завершённую
+     * задачу из базы WorkManager. [beforeRehash] меняет файл до повторного hash.
+     */
+    private fun runUploadThenRehash(uploadsBefore: Set<UUID>, beforeRehash: () -> Unit = {}) {
+        val upload = awaitNewId(SyncScheduler.UPLOAD_WORK_NAME, uploadsBefore)
+        val providersBefore = ids(SyncScheduler.PROVIDER_WORK_NAME)
+        val uploadChecked = CountDownLatch(1)
+        media.beforeQuery = { _ ->
+            uploadChecked.await(10, TimeUnit.SECONDS)
+            beforeRehash()
+        }
+        WorkManagerTestInitHelper.getTestDriver(context)!!.setAllConstraintsMet(upload)
+        assertEquals(WorkInfo.State.SUCCEEDED, awaitFinished(upload).state)
+        uploadChecked.countDown()
+        assertEquals(WorkInfo.State.SUCCEEDED, awaitFinished(awaitNewId(SyncScheduler.PROVIDER_WORK_NAME, providersBefore)).state)
+        media.beforeQuery = {}
+        assertEquals(WorkInfo.State.SUCCEEDED, runSignalledUpload(uploadsBefore + upload).state)
+    }
+
     // Разовый Поставщик без constraints выполняется сразу; Загрузчику нужна сеть.
     private fun runProvider(): WorkInfo =
         runNew(SyncScheduler.PROVIDER_WORK_NAME, needsNetwork = false) { scheduler.enqueueProvider() }
@@ -537,15 +690,22 @@ class ProviderUploadEndToEndTest {
             "/api/v1/files/checksums/exists" -> {
                 val requested = Regex("[0-9a-f]{64}").findAll(request.body.readUtf8()).map { it.value }.toList()
                 requestedChecksums += requested
-                json("""{"existing":[],"missing":${requested.joinToString(",", "[", "]") { "\"$it\"" }}}""")
+                val (existing, missing) = requested.partition { serverIds.containsKey(it) }
+                json("""{"existing":${existing.asJson()},"missing":${missing.asJson()}}""")
             }
             "/api/v1/files/upload" -> {
-                uploadedBodies += request.body.readByteArray()
-                json("""{"id":${nextFileId.getAndIncrement()}}""")
+                val body = request.body.readByteArray()
+                onUploadRequest()
+                uploadErrorCode?.let { return MockResponse().setResponseCode(it) }
+                uploadedBodies += body
+                val checksum = uploadedChecksum(body)
+                json("""{"id":${serverIds.computeIfAbsent(checksum) { nextFileId.getAndIncrement() }},"checksum":"$checksum"}""")
             }
             else -> MockResponse().setResponseCode(404)
         }
     }
+
+    private fun List<String>.asJson() = joinToString(",", "[", "]") { "\"$it\"" }
 
     private fun json(body: String) = MockResponse().setHeader("Content-Type", "application/json").setBody(body)
 

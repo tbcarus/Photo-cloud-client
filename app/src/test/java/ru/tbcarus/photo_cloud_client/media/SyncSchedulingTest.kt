@@ -134,6 +134,20 @@ class SyncSchedulingTest {
         assertEquals(WorkInfo.State.ENQUEUED, infos(SyncScheduler.UPLOAD_WORK_NAME).single().state)
     }
 
+    @Test
+    fun providerSignalNeedsSessionAndDoesNotAddToWaitingUploader() = kotlinx.coroutines.runBlocking {
+        coordinator.signalUpload()
+        assertTrue(infos(SyncScheduler.UPLOAD_WORK_NAME).isEmpty())
+
+        storage.saveTokens(Tokens("access", "refresh"))
+        coordinator.signalUpload()
+        coordinator.signalUpload()
+
+        // Ждущий сеть прогон дочитает очередь сам: ни замены, ни добавления.
+        assertEquals(1, infos(SyncScheduler.UPLOAD_WORK_NAME).size)
+        assertEquals(WorkInfo.State.ENQUEUED, infos(SyncScheduler.UPLOAD_WORK_NAME).single().state)
+    }
+
     private fun grantFullAccess() = shadowOf(context).grantPermissions(mediaReadPermission)
 
     private fun infos(name: String): List<WorkInfo> = workManager.getWorkInfosForUniqueWork(name).get()

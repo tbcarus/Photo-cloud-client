@@ -283,7 +283,7 @@ class CameraFolderRunTest {
                 """{"id":${cameraId ?: CAMERA_ID.also { cameraId = it }},"name":"Camera","folderType":"CAMERA"}"""
             )
             "/api/v1/files/checksums/exists" -> precheck(request.body.readUtf8())
-            "/api/v1/files/upload" -> upload(request.body.readUtf8())
+            "/api/v1/files/upload" -> upload(request.body.readByteArray())
             else -> MockResponse().setResponseCode(404)
         }
     }
@@ -297,7 +297,8 @@ class CameraFolderRunTest {
         return json("""{"existing":${existing.toJson()},"missing":${(requested - existing.toSet()).toJson()}}""")
     }
 
-    private fun upload(body: String): MockResponse {
+    private fun upload(bytes: ByteArray): MockResponse {
+        val body = bytes.toString(Charsets.ISO_8859_1)
         val id = Regex("IMG_(\\d+)\\.jpg").find(body)!!.groupValues[1].toLong()
         val folderId = Regex("name=\"folderId\"[\\s\\S]*?\r\n\r\n(\\d+)").find(body)?.groupValues?.get(1)?.toLong()
         uploads += Upload(id, folderId)
@@ -306,7 +307,7 @@ class CameraFolderRunTest {
         val currentCamera = cameraId
         onUpload()
         if (folderId != currentCamera) return MockResponse().setResponseCode(404)
-        return if (cameraId != currentCamera) MockResponse().setResponseCode(404) else json("""{"id":${1000 + id}}""")
+        return if (cameraId != currentCamera) MockResponse().setResponseCode(404) else json(uploadResponseJson(1000 + id, bytes))
     }
 
     private fun List<String>.toJson() = joinToString(",", "[", "]") { "\"$it\"" }

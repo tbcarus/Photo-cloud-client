@@ -3,12 +3,14 @@ package ru.tbcarus.photo_cloud_client.media
 /**
  * Итоговая статистика одного прогона upload.
  * [leftPending] — файлы, оставленные/возвращённые в PENDING_UPLOAD из-за transient-ошибки.
+ * [rehashQueued] — файлы, возвращённые Поставщику после несовпадения checksum ответа (Q-02).
  */
 data class UploadResult(
     val attempted: Int,
     val succeeded: Int,
     val failed: Int,
-    val leftPending: Int
+    val leftPending: Int,
+    val rehashQueued: Int = 0
 )
 
 /** Результат всего запуска [FileUploadRepository.uploadPendingCameraFiles]. */

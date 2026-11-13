@@ -69,7 +69,7 @@ class FailedHttp400MigrationTest {
         val rows = db.mediaFileDao().getAll().first().associateBy { it.mediaStoreId }
 
         assertEquals(6, rows.size)
-        assertEquals(8, db.openHelper.readableDatabase.version)
+        assertEquals(9, db.openHelper.readableDatabase.version)
         val restored = rows.getValue(1)
         assertEquals(MediaFileStatus.CHECKSUM_READY, restored.status)
         assertNull(restored.failureReason)

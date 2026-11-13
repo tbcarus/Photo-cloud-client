@@ -48,11 +48,13 @@ interface MediaFileDao {
      * Условный переход статуса (A4.1): применяется, только если строка всё ещё в [expectedStatus]
      * и описывает ту же версию файла (checksum, size, lastModified), что была прочитана перед операцией.
      * Поздний результат hash/pre-check/upload не перезаписывает строку, которую scan уже сбросил или обновил.
+     * Переход в SYNCED завершает серию восстановлений после несовпадения checksum (Q-02).
      * @return 1 — переход применён, 0 — строка изменилась или удалена.
      */
     @Query("""
         UPDATE media_files
-        SET status = :newStatus
+        SET status = :newStatus,
+            uploadMismatchCount = CASE WHEN :newStatus = 'SYNCED' THEN 0 ELSE uploadMismatchCount END
         WHERE mediaStoreId = :mediaStoreId
           AND status = :expectedStatus
           AND checksum IS :checksum
@@ -152,6 +154,7 @@ interface MediaFileDao {
      * Ручной повтор по действию пользователя: все FAILED одним UPDATE возвращаются в начало обработки —
      * PENDING без checksum и serverFileId: файл будет заново прочитан, прежний checksum его актуальность не подтверждает.
      * Только здесь, кроме успешного checksum, обнуляется retryCount: лимит авто-повтора снова отсчитывается с нуля.
+     * Так же с нуля начинается серия восстановлений после несовпадения checksum upload.
      * Условие status = 'FAILED' не трогает строки, которые обработка или scan уже перевели в другое состояние.
      * @return число строк, возвращённых в очередь.
      */
@@ -162,7 +165,8 @@ interface MediaFileDao {
             serverFileId = NULL,
             failureReason = NULL,
             retryCount = 0,
-            lastFailureAt = NULL
+            lastFailureAt = NULL,
+            uploadMismatchCount = 0
         WHERE status = 'FAILED'
     """)
     suspend fun resetAllFailedForManualRetry(): Int
@@ -189,6 +193,8 @@ interface MediaFileDao {
                               THEN 0 ELSE retryCount END,
             lastFailureAt = CASE WHEN size != :size OR lastModified != :lastModified
                                  THEN NULL ELSE lastFailureAt END,
+            uploadMismatchCount = CASE WHEN size != :size OR lastModified != :lastModified
+                                       THEN 0 ELSE uploadMismatchCount END,
             displayName = :displayName,
             relativePath = :relativePath,
             mimeType = :mimeType,
@@ -231,7 +237,7 @@ interface MediaFileDao {
         }
     }
 
-    // Успешный upload → SYNCED, чистим failure-метаданные (Stage 5K).
+    // Успешный upload → SYNCED, чистим failure-метаданные (Stage 5K) и счётчик несовпадений (Q-02).
     // Только для той же UPLOADING-версии: изменённая во время отправки фотография остаётся в работе Поставщика.
     @Query("""
         UPDATE media_files
@@ -239,7 +245,8 @@ interface MediaFileDao {
             serverFileId = :serverFileId,
             failureReason = NULL,
             retryCount = 0,
-            lastFailureAt = NULL
+            lastFailureAt = NULL,
+            uploadMismatchCount = 0
         WHERE mediaStoreId = :mediaStoreId
           AND status = 'UPLOADING'
           AND checksum IS :checksum
@@ -252,6 +259,39 @@ interface MediaFileDao {
         checksum: String?,
         size: Long,
         lastModified: Long
+    ): Int
+
+    /**
+     * Server принял не те байты, которым принадлежит локальный checksum (Q-02). Одним UPDATE той же UPLOADING-версии
+     * (включая прочитанный счётчик) checksum и serverFileId очищаются, счётчик растёт. Пока восстановлений меньше
+     * [maxRecoveries], строка возвращается в PENDING к Поставщику; дальше — FAILED CHANGED_DURING_UPLOAD без авто-повтора.
+     * Выражения SET вычисляются по прежнему значению счётчика.
+     * @return 1 — переход применён, 0 — строка изменилась или удалена.
+     */
+    @Query("""
+        UPDATE media_files
+        SET status = CASE WHEN uploadMismatchCount < :maxRecoveries THEN 'PENDING' ELSE 'FAILED' END,
+            checksum = NULL,
+            serverFileId = NULL,
+            failureReason = CASE WHEN uploadMismatchCount < :maxRecoveries THEN NULL ELSE 'CHANGED_DURING_UPLOAD' END,
+            retryCount = CASE WHEN uploadMismatchCount < :maxRecoveries THEN retryCount ELSE retryCount + 1 END,
+            lastFailureAt = CASE WHEN uploadMismatchCount < :maxRecoveries THEN NULL ELSE :failureAt END,
+            uploadMismatchCount = uploadMismatchCount + 1
+        WHERE mediaStoreId = :mediaStoreId
+          AND status = 'UPLOADING'
+          AND checksum IS :checksum
+          AND size = :size
+          AND lastModified = :lastModified
+          AND uploadMismatchCount = :uploadMismatchCount
+    """)
+    suspend fun applyUploadMismatchIfUnchanged(
+        mediaStoreId: Long,
+        checksum: String?,
+        size: Long,
+        lastModified: Long,
+        uploadMismatchCount: Int,
+        maxRecoveries: Int,
+        failureAt: Long
     ): Int
 
     /**
@@ -279,7 +319,8 @@ interface MediaFileDao {
             serverFileId = NULL,
             failureReason = NULL,
             retryCount = 0,
-            lastFailureAt = NULL
+            lastFailureAt = NULL,
+            uploadMismatchCount = 0
         WHERE mediaStoreId = :mediaStoreId
           AND status = 'FAILED'
           AND size = :size

@@ -12,6 +12,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkRequest
+import androidx.work.await
 import androidx.work.workDataOf
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -105,6 +106,21 @@ class SyncScheduler @Inject constructor(
     /** Разовый прогон Загрузчика при подключённой сети; KEEP — как у Поставщика. */
     fun enqueueUpload() {
         workManager.enqueueUniqueWork(UPLOAD_WORK_NAME, ExistingWorkPolicy.KEEP, uploadRequest())
+    }
+
+    /**
+     * Сигнал Поставщика Загрузчику (Q-02.1). Ждущий запуск разовой цепочки (ENQUEUED/BLOCKED, в том числе backoff
+     * после ошибки) не трогается: он сам дочитает очередь из Room. Выполняющийся прогон мог уже пройти последнюю
+     * проверку очереди, и KEEP потерял бы сигнал до periodic, поэтому к нему добавляется один следующий запуск
+     * ([continueUpload]); последующие сигналы видят его ожидающим и ничего не добавляют. Без активной цепочки — KEEP.
+     */
+    suspend fun signalUpload() {
+        val states = workManager.getWorkInfosForUniqueWork(UPLOAD_WORK_NAME).await().map { it.state }
+        when {
+            states.any { it == WorkInfo.State.ENQUEUED || it == WorkInfo.State.BLOCKED } -> Unit
+            WorkInfo.State.RUNNING in states -> continueUpload().await()
+            else -> enqueueUpload()
+        }
     }
 
     /**

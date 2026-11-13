@@ -12,6 +12,7 @@ enum class FailureReason {
     HTTP_400,
     HTTP_409,
     HTTP_413,
+    CHANGED_DURING_UPLOAD, // checksum принятых Server байтов снова не совпал после лимита восстановлений (Q-02)
     UNKNOWN;
 
     /** Сейчас автоматически повторяем только временные IO-ошибки checksum. */

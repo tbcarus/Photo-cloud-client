@@ -251,7 +251,7 @@ class ProviderBatchContinuationTest {
                     "/api/v1/files/upload" -> {
                         uploadStarted.countDown()
                         releaseUpload.await(10, TimeUnit.SECONDS)
-                        json("""{"id":500}""")
+                        json(uploadResponseJson(500, request.body.readByteArray()))
                     }
                     else -> MockResponse().setResponseCode(404)
                 }
