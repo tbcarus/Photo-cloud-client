@@ -29,11 +29,14 @@ data class UploadSessionRecord(
     val serverSessionId: String? = null,
     val confirmedOffset: Long = 0,
     val cancelPending: Boolean = false,
-    val collection: MediaCollection = MediaCollection.IMAGE
+    val collection: MediaCollection = MediaCollection.IMAGE,
+    val backupSource: String? = null
 )
 
 @Dao
 interface UploadSessionDao {
+    @Query("SELECT * FROM upload_sessions WHERE clientRequestId = :requestId")
+    suspend fun get(requestId: String): UploadSessionRecord?
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(record: UploadSessionRecord)
 
@@ -51,6 +54,9 @@ interface UploadSessionDao {
 
     @Query("UPDATE upload_sessions SET cancelPending = 1 WHERE clientRequestId = :requestId")
     suspend fun requestCancel(requestId: String)
+
+    @Query("UPDATE upload_sessions SET cancelPending = 1 WHERE sourceKind = 'SAF' AND serverUrl = :serverUrl AND accountId = :accountId AND backupSource = :sourceUuid")
+    suspend fun requestCancelSafSource(serverUrl: String, accountId: String, sourceUuid: String)
 
     @Query("DELETE FROM upload_sessions WHERE clientRequestId = :requestId")
     suspend fun delete(requestId: String)

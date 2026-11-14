@@ -16,10 +16,17 @@ sealed interface CameraSourceState {
 }
 
 /** Только адаптер Camera; протокол передачи не знает о MediaStore и будет пригоден для SAF. */
+interface UploadByteSource {
+    suspend fun currentState(record: UploadSessionRecord): CameraSourceState
+    fun open(record: UploadSessionRecord, offset: Long): InputStream
+}
+
 open class CameraUploadSource @Inject constructor(
     @ApplicationContext private val context: Context,
     private val opener: MediaStreamOpener
-) {
+) : UploadByteSource {
+    override suspend fun currentState(record: UploadSessionRecord): CameraSourceState = state(record)
+
     open fun state(record: UploadSessionRecord): CameraSourceState {
         if (!context.hasMediaReadPermission(record.collection)) return CameraSourceState.Unavailable
         if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) return CameraSourceState.Unavailable
@@ -45,7 +52,7 @@ open class CameraUploadSource @Inject constructor(
         }
     }
 
-    open fun open(record: UploadSessionRecord, offset: Long): InputStream =
+    override fun open(record: UploadSessionRecord, offset: Long): InputStream =
         opener.openAt(Uri.parse(record.uri), record.originalMode, offset)
 
     open fun originalMode(): Boolean = opener.readsOriginal()

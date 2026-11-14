@@ -11,15 +11,16 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import ru.tbcarus.photo_cloud_client.api.models.FileItemDto
 import ru.tbcarus.photo_cloud_client.media.SyncConfig
+import ru.tbcarus.photo_cloud_client.media.UploadSizeClass
+import ru.tbcarus.photo_cloud_client.media.ResumableUpload
+import ru.tbcarus.photo_cloud_client.media.ResumableResult
 import ru.tbcarus.photo_cloud_client.media.WorkBudget
 import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
 import ru.tbcarus.photo_cloud_client.transfer.LocalSourceException
 import ru.tbcarus.photo_cloud_client.transfer.MAX_TREE_DEPTH
-import ru.tbcarus.photo_cloud_client.transfer.TransferManager
 import ru.tbcarus.photo_cloud_client.transfer.UploadRequestBody
 import ru.tbcarus.photo_cloud_client.transfer.UploadTooLargeException
 import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
-import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 import javax.inject.Inject
@@ -51,10 +52,11 @@ open class FolderBackupEngine @Inject constructor(
 
     internal companion object {
         const val TAG = "FolderBackupEngine"
-        const val MAX_BYTES = TransferManager.MAX_UPLOAD_BYTES
+        const val MAX_BYTES = SyncConfig.RESUMABLE_MAX_BYTES
 
         const val EMPTY = "Пустой файл: Server пока не принимает такие файлы"
-        const val TOO_LARGE = "Файл больше 100 МиБ"
+        const val TOO_LARGE = "FILE_TOO_LARGE: файл больше 20 ГиБ"
+        const val SIZE_UNKNOWN = "SIZE_UNKNOWN: SAF-провайдер не сообщил размер файла"
         const val VIRTUAL = "Документ без локального содержимого"
         const val UNREADABLE = "Файл не читается; повтор при следующем обходе"
         const val CHANGED_DURING_UPLOAD = "Файл изменился во время передачи; сверка при следующем обходе"
@@ -88,6 +90,7 @@ open class FolderBackupEngine @Inject constructor(
 
     // Один прогон одновременно: разовый и periodic не обрабатывают одно дерево параллельно.
     private val mutex = Mutex()
+    @Inject lateinit var resumableUpload: ResumableUpload
 
     /** null — идёт другой прогон: он сам продолжит работу. */
     open suspend fun run(budget: WorkBudget, fullScan: Boolean): FolderBackupRun? {
@@ -100,9 +103,11 @@ open class FolderBackupEngine @Inject constructor(
     }
 
     private suspend fun runLocked(budget: WorkBudget, fullScan: Boolean): FolderBackupRun {
-        // Отправка, прерванная гибелью процесса или отменой, начинается заново: Server идемпотентен по имени и checksum.
+        // Multipart после прерывания начинается заново; resumable восстанавливает подтверждённый offset из Room и Server.
         tree.resetUploading()
         val account = accounts.current() ?: return FolderBackupRun(progress = false, remaining = false, retry = false)
+        if (::resumableUpload.isInitialized && !resumableUpload.cleanupSaf(budget))
+            return FolderBackupRun(progress = false, remaining = true, retry = true)
         val runs = sources.listActive(account.serverUrl, account.accountId).mapNotNull { source ->
             val uri = Uri.parse(source.treeUri)
             val state = access.check(uri)
@@ -148,6 +153,7 @@ open class FolderBackupEngine @Inject constructor(
             }
         }
         var progress = scan(run, fullScan, budget)
+        if (::resumableUpload.isInitialized && !resumableUpload.cleanupSaf(budget)) return Turn.RETRY
         when (val folders = createFolders(run, account, budget)) {
             Turn.PROGRESS -> progress = true
             Turn.IDLE -> Unit
@@ -188,6 +194,8 @@ open class FolderBackupEngine @Inject constructor(
     private suspend fun disable(source: BackupSource, reason: String): Turn {
         Log.w(TAG, "Источник ${source.id} больше не активен на сервере: $reason")
         sources.markRemoteDisabled(source.id, reason)
+        if (::resumableUpload.isInitialized)
+            resumableUpload.markSafSourceCancel(source.serverUrl, source.accountId, source.sourceUuid)
         return Turn.STOP
     }
 
@@ -410,15 +418,21 @@ open class FolderBackupEngine @Inject constructor(
             return finish(file, BackupFileStatus.FAILED, folder?.problem?.let { "Папка не создана: $it" } ?: FOLDER_NOT_READY)
         }
         libraryNameProblem(file.name)?.let { return finish(file, BackupFileStatus.SKIPPED, it) }
+        if (file.size == null || file.size < 0) return finish(file, BackupFileStatus.SKIPPED, SIZE_UNKNOWN)
         if (file.size == 0L) return finish(file, BackupFileStatus.SKIPPED, EMPTY)
-        if (file.size != null && file.size > MAX_BYTES) return finish(file, BackupFileStatus.SKIPPED, TOO_LARGE)
+        if (SyncConfig.uploadSizeClass(file.size) == UploadSizeClass.TOO_LARGE)
+            return finish(file, BackupFileStatus.SKIPPED, TOO_LARGE)
 
         // CHANGED и ARCHIVED сохраняют свой этап на время чтения: гибель процесса его не теряет.
         val working = if (file.status == BackupFileStatus.PENDING) file.copy(status = BackupFileStatus.UPLOADING) else file
         if (working !== file) tree.updateFile(working)
         val uri = documents.documentUri(run.treeUri, file.documentId)
+        val savedChecksum = if (file.serverFileId == null &&
+            SyncConfig.uploadSizeClass(file.size) == UploadSizeClass.RESUMABLE && ::resumableUpload.isInitialized)
+            resumableUpload.savedSafChecksum(file, run.source.sourceUuid, uri.toString(), serverFolderId) else null
         val read = try {
-            documents.open(uri).use(::digest)
+            if (savedChecksum != null) Read(file.size, savedChecksum)
+            else documents.open(uri).use { digest(it) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -428,6 +442,14 @@ open class FolderBackupEngine @Inject constructor(
         }
         if (read.size == 0L) return finish(working, BackupFileStatus.SKIPPED, EMPTY)
         if (read.size > MAX_BYTES) return finish(working, BackupFileStatus.SKIPPED, TOO_LARGE)
+        if (read.size != file.size) {
+            val result = finish(working, BackupFileStatus.FAILED, CHANGED_DURING_UPLOAD)
+            if (::resumableUpload.isInitialized) {
+                resumableUpload.markSafFileCancel(file)
+                if (!resumableUpload.cleanupSaf(budget)) return Turn.RETRY
+            }
+            return result
+        }
         // Прошлое прочитанное содержимое этого пути: после потерянного ответа upload оно опознаёт свою копию.
         val prior = file.checksum
         val hashed = working.copy(checksum = read.sha256)
@@ -441,6 +463,27 @@ open class FolderBackupEngine @Inject constructor(
         if (accounts.current() != account) return back(hashed, Turn.ACCOUNT_CHANGED)
         // checksum отправляемого содержимого записывается до передачи.
         tree.updateFile(hashed)
+        if (SyncConfig.uploadSizeClass(read.size) == UploadSizeClass.RESUMABLE) {
+            if (!::resumableUpload.isInitialized) return back(hashed, Turn.RETRY)
+            return when (val result = resumableUpload.saf(hashed, run.source.sourceUuid, uri.toString(), serverFolderId, budget) {
+                budget.isExhausted() || accounts.current() != account ||
+                    sources.get(run.source.id)?.registrationState != RegistrationState.ACTIVE
+            }) {
+                is ResumableResult.Complete -> uploaded(run, hashed, result.file).also {
+                    if (it == Turn.PROGRESS) resumableUpload.forgetSaf(hashed)
+                }
+                ResumableResult.Progress -> {
+                    tree.updateFile(hashed.copy(status = if (hashed.status == BackupFileStatus.UPLOADING)
+                        BackupFileStatus.PENDING else hashed.status))
+                    if (budget.isExhausted()) Turn.PROGRESS else Turn.RETRY
+                }
+                ResumableResult.Retry -> back(hashed, Turn.RETRY)
+                ResumableResult.SourceChanged -> back(hashed, Turn.RETRY)
+                ResumableResult.ChecksumMismatch -> finish(hashed, BackupFileStatus.FAILED, CHANGED_DURING_UPLOAD)
+                ResumableResult.ManagedTree -> back(hashed, recheck(run))
+                is ResumableResult.Failed -> finish(hashed, BackupFileStatus.SKIPPED, "Server отклонил сессию: ${result.reason}")
+            }
+        }
         return when (val result = send(run, hashed, serverFolderId, budget)) {
             is BackupResult.Ok -> uploaded(run, hashed, result.value)
             is BackupResult.Http -> when {
@@ -591,7 +634,7 @@ open class FolderBackupEngine @Inject constructor(
     private suspend fun send(run: SourceRun, file: BackupFile, folderId: Long, budget: WorkBudget): BackupResult<FileItemDto> {
         val uri = documents.documentUri(run.treeUri, file.documentId)
         suspend fun attempt() = remote.upload(
-            folderId, file.name, UploadRequestBody({ documents.open(uri) }, file.mimeType, MAX_BYTES) {}, run.source.sourceUuid
+            folderId, file.name, UploadRequestBody({ documents.open(uri) }, file.mimeType, SyncConfig.MULTIPART_MAX_BYTES) {}, run.source.sourceUuid
         )
         val first = attempt()
         if (first !is BackupResult.Network || first.cause is LocalSourceException || first.cause is UploadTooLargeException) return first
@@ -675,11 +718,12 @@ open class FolderBackupEngine @Inject constructor(
     private class Read(val size: Long, val sha256: String)
 
     // Читает не больше лимита + 1 байт: размер больше лимита известен без чтения всего файла.
-    private fun digest(input: InputStream): Read {
+    private suspend fun digest(input: InputStream): Read {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         while (true) {
+            currentCoroutineContext().ensureActive()
             val read = input.read(buffer)
             if (read == -1) break
             digest.update(buffer, 0, read)

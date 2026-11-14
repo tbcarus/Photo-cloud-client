@@ -27,6 +27,11 @@ import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupAccountProvider
 import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
+import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
+import ru.tbcarus.photo_cloud_client.transfer.LocalFile
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadJob
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadSource
+import android.net.Uri
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.net.ServerSocket
@@ -34,6 +39,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.HexFormat
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /** Включается явно: Docker PostgreSQL, отдельный Server на случайном порту и временный storage. */
@@ -112,6 +118,7 @@ class ResumableUploadS1SmokeTest {
             val api = mock(ApiServiceFactory::class.java)
             val network = mock(Network::class.java)
             `when`(api.authUploadSessionService(baseUrl, network)).thenReturn(service)
+            `when`(api.authUploadSessionService(baseUrl)).thenReturn(service)
             val wifi = mock(WifiUploadNetwork::class.java)
             `when`(wifi.current()).thenReturn(network)
             val accounts = mock(BackupAccountProvider::class.java)
@@ -142,6 +149,38 @@ class ResumableUploadS1SmokeTest {
             val download = request(http, baseUrl, "GET", "api/v1/files/${saved.id}/download", token = token)
             assertEquals(200, download.code)
             assertArrayEquals(bytes, download.body)
+
+            val root = request(http, baseUrl, "GET", "api/v1/folders/root", token = token)
+            assertEquals(200, root.code)
+            val rootId = JsonParser.parseString(String(root.body, Charsets.UTF_8)).asJsonObject.get("id").asLong
+            val manualBytes = ByteArray(SyncConfig.MULTIPART_MAX_BYTES.toInt() + 1) { (it % 239).toByte() }
+            val manualChecksum = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(manualBytes))
+            val manualUri = Uri.parse("content://a4-smoke/manual")
+            val manualDocs = object : LocalDocuments(ApplicationProvider.getApplicationContext()) {
+                override fun hasPersistedRead(uri: Uri) = uri == manualUri
+                override fun describe(uri: Uri) = LocalFile(uri, "a4-manual.bin", manualBytes.size.toLong(), "application/octet-stream")
+                override fun lastModified(uri: Uri): Long? = 2
+                override fun openAt(uri: Uri, offset: Long): InputStream =
+                    ByteArrayInputStream(manualBytes, offset.toInt(), manualBytes.size - offset.toInt())
+            }
+            upload.manualSource = ManualUploadSource(manualDocs)
+            val manualJob = ManualUploadJob(UUID.randomUUID().toString(), baseUrl, account.accountId,
+                manualUri.toString(), "a4-manual.bin", manualBytes.size.toLong(), "application/octet-stream",
+                2, rootId, true, manualChecksum, UUID.randomUUID().toString(), status = ManualUploadJob.RUNNING)
+            var manualResult: ResumableResult = ResumableResult.Retry
+            repeat(20) {
+                if (manualResult !is ResumableResult.Complete) {
+                    manualResult = upload.manual(manualJob, WorkBudget.UNLIMITED, { false }, { })
+                    if (manualResult !is ResumableResult.Complete) kotlinx.coroutines.delay(1_000)
+                }
+            }
+            assertTrue("A4 result=$manualResult; log=${String(Files.readAllBytes(log)).takeLast(1000)}",
+                manualResult is ResumableResult.Complete)
+            val manualFile = (manualResult as ResumableResult.Complete).file
+            assertEquals(manualChecksum, manualFile.checksum)
+            val manualDownload = request(http, baseUrl, "GET", "api/v1/files/${manualFile.id}/download", token = token)
+            assertEquals(200, manualDownload.code)
+            assertArrayEquals(manualBytes, manualDownload.body)
         } finally {
             db?.close()
             server?.destroyForcibly()

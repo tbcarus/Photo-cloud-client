@@ -1,6 +1,7 @@
 package ru.tbcarus.photo_cloud_client.backup
 
 import android.app.Application
+import android.net.Network
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.async
@@ -17,6 +18,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.`when`
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
@@ -24,7 +26,15 @@ import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import ru.tbcarus.photo_cloud_client.core.server.ServerPreferences
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import ru.tbcarus.photo_cloud_client.media.SyncClock
+import ru.tbcarus.photo_cloud_client.media.SyncConfig
 import ru.tbcarus.photo_cloud_client.media.WorkBudget
+import ru.tbcarus.photo_cloud_client.media.ResumableUpload
+import ru.tbcarus.photo_cloud_client.media.CameraUploadSource
+import ru.tbcarus.photo_cloud_client.media.MediaStreamOpener
+import ru.tbcarus.photo_cloud_client.media.WifiUploadNetwork
+import ru.tbcarus.photo_cloud_client.api.UploadSessionService
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
 import java.net.InetAddress
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -167,16 +177,18 @@ class FolderBackupEngineTest {
     @Test
     fun emptyTooLargeInvalidVirtualAndUnreadableFilesAreNotSent() = runBlocking {
         tree.file("empty.txt", "")
-        tree.file("huge.bin", "x").reportedSize = 200L * 1024 * 1024
+        tree.file("huge.bin", "x").reportedSize = SyncConfig.RESUMABLE_MAX_BYTES + 1
         tree.file("bad:name.txt", "bad")
         tree.file("cloud.doc", "cloud").virtual = true
         tree.file("locked.txt", "locked").unreadable = true
+        tree.file("unknown.bin", "unknown").sizeUnknown = true
 
         run()
 
         val rows = db.backupTreeDao().files(sourceId).associateBy { it.name }
         assertEquals(FolderBackupEngine.EMPTY, rows.getValue("empty.txt").failureReason)
         assertEquals(FolderBackupEngine.TOO_LARGE, rows.getValue("huge.bin").failureReason)
+        assertEquals(FolderBackupEngine.SIZE_UNKNOWN, rows.getValue("unknown.bin").failureReason)
         assertEquals(BackupFileStatus.SKIPPED, rows.getValue("bad:name.txt").status)
         assertEquals(FolderBackupEngine.VIRTUAL, rows.getValue("cloud.doc").failureReason)
         assertEquals(BackupFileStatus.FAILED, rows.getValue("locked.txt").status)
@@ -187,6 +199,45 @@ class FolderBackupEngineTest {
         run()
         assertEquals(BackupFileStatus.SYNCED, db.backupTreeDao().files(sourceId).single { it.name == "locked.txt" }.status)
         assertEquals(listOf("locked.txt"), fake.uploads)
+        tree.at("unknown.bin").sizeUnknown = false
+        run()
+        assertEquals(BackupFileStatus.SYNCED, db.backupTreeDao().files(sourceId).single { it.name == "unknown.bin" }.status)
+    }
+
+    @Test
+    fun largeSafFileUsesSharedResumableProtocolAndKeepsFifo() = runBlocking {
+        val size = (SyncConfig.MULTIPART_MAX_BYTES + 1).toInt()
+        val content = ByteArray(size) { (it % 251).toByte() }
+        tree.file("large.bin", "x").bytes = content
+        tree.file("small.txt", "small")
+        var largeOpens = 0
+        tree.onOpen = { if (it.name == "large.bin") largeOpens++ }
+        val service = Retrofit.Builder().baseUrl(server.url("/"))
+            .client(OkHttpClient.Builder().readTimeout(30, TimeUnit.SECONDS).build())
+            .addConverterFactory(GsonConverterFactory.create()).build().create(UploadSessionService::class.java)
+        val api = mock(ApiServiceFactory::class.java)
+        val network = mock(Network::class.java)
+        `when`(api.authUploadSessionService(account.serverUrl, network)).thenReturn(service)
+        val wifi = mock(WifiUploadNetwork::class.java)
+        `when`(wifi.current()).thenReturn(null, network)
+        val uploader = ResumableUpload(db.uploadSessionDao(), db.mediaFileDao(), accounts, api,
+            CameraUploadSource(context, mock(MediaStreamOpener::class.java)), wifi)
+        uploader.safSource = SafUploadSource(db.backupSourceDao(), db.backupTreeDao(), tree, access)
+        engine.resumableUpload = uploader
+
+        assertTrue(run().retry)
+        assertEquals(1, largeOpens)
+        assertEquals(1, db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).size)
+        val result = engine.run(WorkBudget.UNLIMITED, fullScan = false)!!
+
+        assertFalse(result.retry)
+        assertEquals(content.size, fake.fileAt(serverRoot, "large.bin")!!.bytes.size)
+        assertEquals("small", String(fake.fileAt(serverRoot, "small.txt")!!.bytes))
+        assertEquals(1, fake.sessionCreates.size)
+        assertEquals((0L until size.toLong() step SyncConfig.RESUMABLE_CHUNK_BYTES).toList(), fake.sessionPatches)
+        assertEquals(1 + fake.sessionPatches.size, largeOpens)
+        assertTrue(db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).isEmpty())
+        assertTrue(db.backupTreeDao().files(sourceId).all { it.status == BackupFileStatus.SYNCED })
     }
 
     @Test

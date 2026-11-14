@@ -149,6 +149,7 @@ fun LibraryScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val transfer by viewModel.transferState.collectAsState()
+    val manualUploads by viewModel.manualUploads.collectAsState()
     val gridView by viewModel.gridView.collectAsState()
     // Выбор назначения и список «Доступно мне» (владелец и срок — во второй строке) всегда показываются списком.
     val showGrid = gridView && !state.picking && !state.atSharedList && !state.inGranted
@@ -304,6 +305,8 @@ fun LibraryScreen(
             )
         }
         TransferPanel(transfer, onCancel = viewModel::cancelTransfer, onDismiss = viewModel::dismissTransfer)
+        ManualUploadPanel(manualUploads, onCancel = viewModel::cancelManualUpload,
+            onRetry = viewModel::retryManualUpload, onDismiss = viewModel::dismissManualUpload)
         HorizontalDivider()
 
         Box(

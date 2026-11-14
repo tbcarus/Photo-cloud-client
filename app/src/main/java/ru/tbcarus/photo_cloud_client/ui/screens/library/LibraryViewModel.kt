@@ -36,6 +36,8 @@ import ru.tbcarus.photo_cloud_client.library.video.isPlayableVideo
 import ru.tbcarus.photo_cloud_client.transfer.isReservedRootName
 import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
 import ru.tbcarus.photo_cloud_client.transfer.TransferKind
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadJob
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadQueue
 import ru.tbcarus.photo_cloud_client.transfer.TransferManager
 import ru.tbcarus.photo_cloud_client.transfer.TransferState
 import ru.tbcarus.photo_cloud_client.transfer.UploadDestination
@@ -52,7 +54,8 @@ class LibraryViewModel @Inject constructor(
     tokenStorage: TokenStorage,
     private val transfers: TransferManager,
     private val sources: BackupSourceRepository,
-    private val externalFiles: ExternalFiles
+    private val externalFiles: ExternalFiles,
+    private val manualQueue: ManualUploadQueue? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LibraryUiState())
@@ -205,6 +208,8 @@ class LibraryViewModel @Inject constructor(
 
     /** Ручная передача живёт дольше экрана: состояние берётся у [TransferManager]. */
     val transferState: StateFlow<TransferState> = transfers.state
+    private val _manualUploads = MutableStateFlow<List<ManualUploadJob>>(emptyList())
+    val manualUploads: StateFlow<List<ManualUploadJob>> = _manualUploads.asStateFlow()
 
     private var context: LibrarySession? = null
     private var loadJob: Job? = null
@@ -237,6 +242,20 @@ class LibraryViewModel @Inject constructor(
         private set
 
     init {
+        manualQueue?.let { queue ->
+            viewModelScope.launch {
+                queue.observe().collect { jobs ->
+                    val previous = _manualUploads.value.associateBy { it.id }
+                    _manualUploads.value = jobs
+                    jobs.filter { it.status == ManualUploadJob.COMPLETED && previous[it.id]?.status != ManualUploadJob.COMPLETED }
+                        .forEach { job ->
+                            val state = _uiState.value
+                            if (context?.baseUrl == job.serverUrl && context?.user == job.accountId &&
+                                state.status == LibraryStatus.Content && state.currentFolder?.id == job.folderId) refresh()
+                        }
+                }
+            }
+        }
         // Контекст задают адрес и subject: refresh меняет токены, но не пользователя.
         viewModelScope.launch {
             librarySessionFlow(baseUrlProvider, tokenStorage).collect(::onContextChanged)
@@ -617,8 +636,15 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun uploadFiles(destination: UploadDestination, uris: List<Uri>) {
-        transfers.uploadFiles(destination, uris)
+        if (manualQueue == null) transfers.uploadFiles(destination, uris)
+        else manualQueue.enqueueInBackground(destination, uris)
     }
+
+    fun cancelManualUpload(id: String) { viewModelScope.launch { manualQueue?.cancel(id) } }
+
+    fun retryManualUpload(id: String) { viewModelScope.launch { manualQueue?.retry(id) } }
+
+    fun dismissManualUpload(id: String) { viewModelScope.launch { manualQueue?.dismiss(id) } }
 
     fun uploadFolder(destination: UploadDestination, treeUri: Uri) {
         transfers.uploadFolder(destination, treeUri)

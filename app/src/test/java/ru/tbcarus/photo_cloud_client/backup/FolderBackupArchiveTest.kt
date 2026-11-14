@@ -556,6 +556,7 @@ class FolderBackupArchiveTest {
         while (true) {
             val next = engine.run(WorkBudget(SyncClock { tick++ }, 6), fullScan = false)!!
             continuations++
+            assertTrue("Продолжения не завершаются: $next ${db.backupTreeDao().files(sourceId).map { it.name + ":" + it.status }}", continuations < 100)
             if (!next.remaining) break
             assertTrue("$next ${db.backupTreeDao().files(sourceId).map { it.name + ":" + it.status }}", next.progress)
         }

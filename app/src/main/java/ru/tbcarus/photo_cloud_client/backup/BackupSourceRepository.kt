@@ -1,6 +1,7 @@
 package ru.tbcarus.photo_cloud_client.backup
 
 import android.net.Uri
+import androidx.work.await
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
@@ -10,6 +11,7 @@ import ru.tbcarus.photo_cloud_client.transfer.libraryNameProblem
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import ru.tbcarus.photo_cloud_client.media.UploadSessionDao
 
 /** Итог действия пользователя с источником; message — текст для Settings. */
 sealed interface SourceActionResult {
@@ -60,6 +62,7 @@ class BackupSourceRepository @Inject constructor(
 
     // Одна регистрация одновременно: двойное нажатие не отправит два запроса одного источника.
     private val mutex = Mutex()
+    @Inject lateinit var sessions: UploadSessionDao
 
     fun observe(account: BackupAccount): Flow<List<BackupSource>> = dao.observe(account.serverUrl, account.accountId)
 
@@ -130,7 +133,19 @@ class BackupSourceRepository @Inject constructor(
         if (accounts.current() != expected) return SourceActionResult.Failed(DISABLE_CONTEXT_CHANGED)
         when (outcome) {
             DisableOutcome.Disabled -> {
-                withContext(Dispatchers.IO) { dao.markDisabled(expected.serverUrl, expected.accountId, folderId, sourceUuid) }
+                val disabled = withContext(Dispatchers.IO) {
+                    val local = dao.list(expected.serverUrl, expected.accountId)
+                        .filter { it.serverRootFolderId == folderId && it.registrationState == RegistrationState.ACTIVE &&
+                            (sourceUuid == null || it.sourceUuid.equals(sourceUuid, ignoreCase = true)) }
+                    if (::sessions.isInitialized) local.forEach {
+                        sessions.requestCancelSafSource(expected.serverUrl, expected.accountId, it.sourceUuid)
+                    }
+                    dao.markDisabled(expected.serverUrl, expected.accountId, folderId, sourceUuid)
+                    local
+                }
+                if (disabled.isNotEmpty() && ::sessions.isInitialized) {
+                    scheduler.continueRun().await()
+                }
                 SourceActionResult.Done
             }
             DisableOutcome.NotFound -> SourceActionResult.Failed(DISABLE_NOT_FOUND)

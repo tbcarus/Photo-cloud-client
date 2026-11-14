@@ -98,6 +98,9 @@ class ApiServiceFactory @Inject constructor(
         return build(baseUrl, networkClient(baseUrl, network)).create(UploadSessionService::class.java)
     }
 
+    fun authUploadSessionService(baseUrl: String): UploadSessionService =
+        build(baseUrl, authClient).create(UploadSessionService::class.java)
+
     @Synchronized
     private fun networkClient(baseUrl: String, network: Network): OkHttpClient {
         val key = baseUrl to network

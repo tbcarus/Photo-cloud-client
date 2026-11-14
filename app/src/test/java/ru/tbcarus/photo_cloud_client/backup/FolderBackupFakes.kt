@@ -14,10 +14,12 @@ import org.json.JSONObject
 import ru.tbcarus.photo_cloud_client.transfer.DocumentRow
 import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.FileNotFoundException
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.UUID
 
 /**
  * Дерево SAF в памяти. Корень — документ "primary:<имя>" как у ExternalStorageProvider; ID вложенных — путь.
@@ -32,6 +34,7 @@ class FakeTree(context: Context, rootName: String) : LocalDocuments(context) {
         var bytes: ByteArray = ByteArray(0),
         var lastModified: Long? = 1,
         var reportedSize: Long? = null,
+        var sizeUnknown: Boolean = false,
         var unreadable: Boolean = false,
         var virtual: Boolean = false
     ) {
@@ -45,6 +48,8 @@ class FakeTree(context: Context, rootName: String) : LocalDocuments(context) {
 
     /** После чтения содержимого файла меняет сведения: файл изменился во время передачи. */
     var onOpen: (Node) -> Unit = {}
+    val openedOffsets = mutableListOf<Long>()
+    var nonSeekable = false
 
     fun dir(path: String): Node = node(path, directory = true)
 
@@ -80,8 +85,22 @@ class FakeTree(context: Context, rootName: String) : LocalDocuments(context) {
     override fun open(uri: Uri): InputStream {
         val node = nodes[Uri.decode(uri.toString().removePrefix("fake://doc/"))] ?: throw FileNotFoundException(uri.toString())
         if (node.unreadable) throw FileNotFoundException("unreadable")
-        val stream = ByteArrayInputStream(node.bytes.copyOf())
+        val stream = ByteArrayInputStream(node.bytes)
         onOpen(node)
+        return stream
+    }
+
+    override fun openAt(uri: Uri, offset: Long): InputStream {
+        openedOffsets += offset
+        val stream = open(uri)
+        if (nonSeekable) {
+            var remaining = offset
+            while (remaining > 0) {
+                val skipped = stream.skip(remaining)
+                if (skipped <= 0) throw FileNotFoundException("offset beyond end")
+                remaining -= skipped
+            }
+        } else stream.skip(offset)
         return stream
     }
 
@@ -89,7 +108,7 @@ class FakeTree(context: Context, rootName: String) : LocalDocuments(context) {
         id = id,
         name = name,
         mimeType = if (directory) Document.MIME_TYPE_DIR else "application/octet-stream",
-        size = if (directory) null else reportedSize ?: bytes.size.toLong(),
+        size = if (directory || sizeUnknown) null else reportedSize ?: bytes.size.toLong(),
         flags = if (virtual) Document.FLAG_VIRTUAL_DOCUMENT else 0,
         lastModified = if (directory) null else lastModified
     )
@@ -111,6 +130,14 @@ class FakeLibraryServer : Dispatcher() {
     val files = LinkedHashMap<Long, File>()
     val requests = CopyOnWriteArrayList<String>()
     val uploads = CopyOnWriteArrayList<String>()
+    val sessionPatches = CopyOnWriteArrayList<Long>()
+    val sessionCreates = CopyOnWriteArrayList<String>()
+    private class Session(val id: String, val folderId: Long, val name: String, val size: Long, val checksum: String,
+                          val source: String) {
+        val bytes = ByteArrayOutputStream()
+        var result: File? = null
+    }
+    private val sessions = HashMap<String, Session>()
     /** Имена из PATCH файлов в порядке запросов. */
     val renames = CopyOnWriteArrayList<String>()
 
@@ -183,6 +210,8 @@ class FakeLibraryServer : Dispatcher() {
             request.method == "POST" && path == "/api/v1/folders" -> createFolder(JSONObject(request.body.readUtf8()))
             request.method == "POST" && path == "/api/v1/folders/backup" -> error(500, "UNEXPECTED")
             request.method == "POST" && path == "/api/v1/files/upload" -> upload(request)
+            request.method == "POST" && path == "/api/v1/upload-sessions" -> createSession(request)
+            path.startsWith("/api/v1/upload-sessions/") -> sessionRequest(request, path)
             request.method == "GET" && FILE_ID.matches(path) -> {
                 val id = path.substringAfterLast('/').toLong()
                 onFileGet(id)
@@ -294,6 +323,57 @@ class FakeLibraryServer : Dispatcher() {
         }
         return json(fileJson(file).toString())
     }
+
+    private fun createSession(request: RecordedRequest): MockResponse {
+        val body = JSONObject(request.body.readUtf8())
+        val requestId = body.getString("clientRequestId")
+        sessionCreates += requestId
+        val folderId = body.getLong("folderId")
+        val source = body.optString("backupSource", "")
+        if (folderId !in folders) return error(404, "NOT_FOUND")
+        if (activeSourceOf(folderId) != source) return error(409, "FOLDER_MANAGED")
+        val session = sessions.getOrPut(requestId) {
+            Session(UUID.randomUUID().toString(), folderId, body.getString("originalFilename"), body.getLong("size"),
+                body.getString("checksum"), source)
+        }
+        return json(sessionJson(session).toString())
+    }
+
+    private fun sessionRequest(request: RecordedRequest, path: String): MockResponse {
+        val id = path.removePrefix("/api/v1/upload-sessions/").substringBefore('/')
+        val session = sessions.values.firstOrNull { it.id == id } ?: return error(404, "NOT_FOUND")
+        return when {
+            request.method == "GET" -> json(sessionJson(session).toString())
+            request.method == "PATCH" -> {
+                val offset = request.getHeader("Upload-Offset")?.toLongOrNull() ?: return error(400, "BAD_REQUEST")
+                if (offset != session.bytes.size().toLong()) return error(409, "OFFSET_MISMATCH")
+                sessionPatches += offset
+                session.bytes.write(request.body.readByteArray())
+                json(sessionJson(session).toString())
+            }
+            request.method == "POST" && path.endsWith("/complete") -> {
+                if (session.bytes.size().toLong() != session.size || sha256(session.bytes.toByteArray()) != session.checksum)
+                    return error(409, "CHECKSUM_MISMATCH")
+                if (session.result == null) {
+                    val existing = fileAt(session.folderId, session.name)
+                    session.result = existing?.takeIf { it.checksum == session.checksum }
+                        ?: if (existing != null) return error(409, "CONFLICT")
+                        else File(nextId++, session.folderId, session.name, session.bytes.toByteArray()).also { files[it.id] = it }
+                }
+                json(sessionJson(session).toString())
+            }
+            request.method == "DELETE" -> {
+                sessions.entries.removeIf { it.value.id == id }
+                MockResponse().setResponseCode(204)
+            }
+            else -> error(404, "NOT_FOUND")
+        }
+    }
+
+    private fun sessionJson(session: Session) = JSONObject()
+        .put("id", session.id).put("confirmedOffset", session.bytes.size()).put("maxChunkSizeBytes", 8 * 1024 * 1024)
+        .put("state", if (session.result == null) "UPLOADING" else "COMPLETED")
+        .put("result", session.result?.let(::fileJson) ?: JSONObject.NULL)
 
     /** UUID активного источника, к дереву которого относится папка; "" — папка вне активного дерева. */
     private fun activeSourceOf(folderId: Long): String {

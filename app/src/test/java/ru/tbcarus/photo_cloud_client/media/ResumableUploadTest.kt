@@ -2,6 +2,7 @@ package ru.tbcarus.photo_cloud_client.media
 
 import android.app.Application
 import android.net.Network
+import android.net.Uri
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
@@ -30,8 +31,21 @@ import retrofit2.converter.gson.GsonConverterFactory
 import ru.tbcarus.photo_cloud_client.api.UploadSessionService
 import ru.tbcarus.photo_cloud_client.backup.BackupAccount
 import ru.tbcarus.photo_cloud_client.backup.BackupAccountProvider
+import ru.tbcarus.photo_cloud_client.backup.BackupFile
+import ru.tbcarus.photo_cloud_client.backup.BackupFileStatus
+import ru.tbcarus.photo_cloud_client.backup.BackupFolder
+import ru.tbcarus.photo_cloud_client.backup.BackupSource
+import ru.tbcarus.photo_cloud_client.backup.FakeAccess
+import ru.tbcarus.photo_cloud_client.backup.FakeTree
+import ru.tbcarus.photo_cloud_client.backup.RegistrationState
+import ru.tbcarus.photo_cloud_client.backup.SafUploadSource
+import ru.tbcarus.photo_cloud_client.backup.SourceAccess
 import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
+import ru.tbcarus.photo_cloud_client.transfer.LocalDocuments
+import ru.tbcarus.photo_cloud_client.transfer.LocalFile
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadJob
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadSource
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.net.InetAddress
@@ -40,6 +54,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
@@ -52,6 +67,8 @@ class ResumableUploadTest {
     private val sessionId = UUID.randomUUID().toString()
     private val offset = AtomicLong()
     private val patches = mutableListOf<Int>()
+    private val createIds = mutableListOf<String>()
+    private val backupSources = mutableListOf<String?>()
     private val openedOffsets = mutableListOf<Long>()
     private val creates = AtomicInteger()
     private val completes = AtomicInteger()
@@ -63,6 +80,9 @@ class ResumableUploadTest {
     private var holdGet = false
     private val getStarted = CountDownLatch(1)
     private lateinit var wifi: WifiUploadNetwork
+    private lateinit var safTree: FakeTree
+    private lateinit var safAccess: FakeAccess
+    private var safSourceId = 0L
     private var loseCreate = false
     private var losePatch = false
     private var loseComplete = false
@@ -89,6 +109,7 @@ class ResumableUploadTest {
         val api = mock(ApiServiceFactory::class.java)
         val network = mock(Network::class.java)
         `when`(api.authUploadSessionService(account.serverUrl, network)).thenReturn(service)
+        `when`(api.authUploadSessionService(account.serverUrl)).thenReturn(service)
         wifi = mock(WifiUploadNetwork::class.java)
         `when`(wifi.current()).thenReturn(network)
         val accounts = mock(BackupAccountProvider::class.java)
@@ -144,6 +165,46 @@ class ResumableUploadTest {
         assertTrue(uploader.camera(file, 7, WorkBudget.UNLIMITED) { false } is ResumableResult.Complete)
         assertTrue(creates.get() >= 2)
         assertEquals(stored.clientRequestId, db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single().clientRequestId)
+    }
+
+    @Test fun manualLostCreatePatchAndCompleteReuseSameSession() = runBlocking {
+        val uri = Uri.parse("content://manual/file")
+        val docs = object : LocalDocuments(ApplicationProvider.getApplicationContext()) {
+            override fun hasPersistedRead(uri: Uri) = true
+            override fun describe(uri: Uri) = LocalFile(uri, "manual.bin", bytes.size.toLong(), "application/octet-stream")
+            override fun lastModified(uri: Uri): Long? = 2
+            override fun openAt(uri: Uri, offset: Long): InputStream {
+                openedOffsets += offset
+                return ByteArrayInputStream(bytes, offset.toInt(), bytes.size - offset.toInt())
+            }
+        }
+        uploader.manualSource = ManualUploadSource(docs)
+        val requestId = UUID.randomUUID().toString()
+        val job = ManualUploadJob(UUID.randomUUID().toString(), account.serverUrl, account.accountId,
+            uri.toString(), "manual.bin", bytes.size.toLong(), "application/octet-stream", 2, 7, false,
+            checksum, requestId, status = ManualUploadJob.RUNNING)
+        loseCreate = true
+        assertEquals(ResumableResult.Retry, uploader.manual(job, WorkBudget.UNLIMITED, { false }, { }))
+        losePatch = true
+        loseComplete = true
+        val offsets = mutableListOf<Long>()
+        assertTrue(uploader.manual(job, WorkBudget.UNLIMITED, { false }, { offsets += it }) is ResumableResult.Complete)
+        assertEquals(1, createIds.distinct().size)
+        assertEquals(requestId, createIds.first())
+        assertEquals(bytes.size.toLong(), offsets.last())
+        assertEquals(listOf(SyncConfig.RESUMABLE_CHUNK_BYTES.toInt(), 3), patches)
+    }
+
+    @Test fun manualCancelAfterServerCompletionReturnsPublishedFile() = runBlocking {
+        completed = true
+        val requestId = UUID.randomUUID().toString()
+        db.uploadSessionDao().insert(UploadSessionRecord(requestId, account.serverUrl, account.accountId,
+            "MANUAL", "job-1", "content://manual/file", 7, "manual.bin", bytes.size.toLong(), 2,
+            false, checksum, sessionId))
+        val result = uploader.cancelManual(requestId)
+        assertTrue(result is ResumableResult.Complete)
+        assertEquals(101L, (result as ResumableResult.Complete).file.id)
+        assertTrue(db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).isEmpty())
     }
 
     @Test fun budgetStopsAfterConfirmedBlockAndNextRunUsesOffset() = runBlocking {
@@ -224,6 +285,100 @@ class ResumableUploadTest {
         assertEquals(1, db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).size)
     }
 
+    @Test fun safNonSeekableResumesLostCreatePatchAndCompleteWithoutRepeatingBytes() = runBlocking {
+        val file = safFile()
+        safTree.nonSeekable = true
+        loseCreate = true
+        assertEquals(ResumableResult.Retry, uploader.saf(file, "source-uuid", safUri(file), 7, WorkBudget.UNLIMITED) { false })
+        val saved = db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single()
+        losePatch = true
+        loseComplete = true
+        assertTrue(uploader.saf(file, "source-uuid", safUri(file), 7, WorkBudget.UNLIMITED) { false } is ResumableResult.Complete)
+        assertEquals(listOf(saved.clientRequestId, saved.clientRequestId), createIds)
+        assertEquals(listOf("source-uuid", "source-uuid"), backupSources)
+        assertEquals(listOf(SyncConfig.RESUMABLE_CHUNK_BYTES.toInt(), 3), patches)
+        assertEquals(listOf(0L, SyncConfig.RESUMABLE_CHUNK_BYTES), safTree.openedOffsets)
+    }
+
+    @Test fun safUnavailableRetainsSessionButConfirmedChangeAndDisableCancelIt() = runBlocking {
+        val file = safFile()
+        advanceClockAfterPatch = true
+        assertEquals(ResumableResult.Progress, uploader.saf(file, "source-uuid", safUri(file), 7,
+            WorkBudget(SyncClock { clockMs.get() }, 1)) { false })
+        val requestId = db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single().clientRequestId
+        safAccess.states[safTree.treeUri] = SourceAccess.PERMISSION_LOST
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(requestId, db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single().clientRequestId)
+        assertEquals(0, cancels.get())
+        safAccess.states.clear()
+        safTree.at("large.bin").sizeUnknown = true
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(0, cancels.get())
+        safTree.at("large.bin").sizeUnknown = false
+        safTree.at("large.bin").lastModified = null
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(0, cancels.get())
+        safTree.at("large.bin").lastModified = 1
+        db.backupTreeDao().updateFile(file.copy(size = null, lastModified = null))
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(0, cancels.get())
+        db.backupTreeDao().updateFile(file)
+        safTree.at("large.bin").lastModified = 2
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(1, cancels.get())
+        assertTrue(db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).isEmpty())
+
+        clockMs.set(0)
+        advanceClockAfterPatch = false
+        offset.set(0)
+        completed = false
+        safTree.at("large.bin").lastModified = 1
+        uploader.saf(file, "source-uuid", safUri(file), 7, WorkBudget(SyncClock { clockMs.get() }, 1)) { true }
+        db.backupSourceDao().markRemoteDisabled(safSourceId, "disabled")
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(2, cancels.get())
+    }
+
+    @Test fun safMissingDocumentCancelsOnlyAfterCompleteScan() = runBlocking {
+        val file = safFile()
+        uploader.saf(file, "source-uuid", safUri(file), 7, WorkBudget.UNLIMITED) { true }
+        safTree.remove("large.bin")
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(0, cancels.get())
+        assertEquals(1, db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).size)
+
+        db.backupTreeDao().markMissing(safSourceId, 2, 1234)
+        assertTrue(uploader.cleanupSaf())
+        assertEquals(1, cancels.get())
+        assertTrue(db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).isEmpty())
+    }
+
+    private suspend fun safFile(): BackupFile {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        safTree = FakeTree(context, "Docs")
+        safTree.file("large.bin", "x").also { it.bytes = bytes }
+        safAccess = FakeAccess(context)
+        safSourceId = db.backupSourceDao().insert(BackupSource(
+            sourceUuid = "source-uuid", treeUri = safTree.treeUri.toString(), localName = "Docs", serverName = "Docs",
+            serverRootFolderId = 7, serverUrl = account.serverUrl, accountId = account.accountId,
+            registrationState = RegistrationState.ACTIVE, registrationError = null,
+            accessState = SourceAccess.AVAILABLE, createdAt = 1
+        ))
+        val folderId = db.backupTreeDao().insertFolder(BackupFolder(
+            sourceId = safSourceId, parentId = null, name = "Docs", relativePath = "", documentId = safTree.rootId,
+            serverFolderId = 7, problem = null, seenGeneration = 1, listedGeneration = 1
+        ))
+        val file = BackupFile(sourceId = safSourceId, folderId = folderId, name = "large.bin", relativePath = "large.bin",
+            documentId = safTree.at("large.bin").id, mimeType = "application/octet-stream", size = bytes.size.toLong(),
+            lastModified = 1, checksum = checksum, serverFileId = null, syncedChecksum = null,
+            status = BackupFileStatus.PENDING, failureReason = null, lastFailureAt = null, seenGeneration = 1, missingSince = null)
+        val id = db.backupTreeDao().insertFile(file)
+        uploader.safSource = SafUploadSource(db.backupSourceDao(), db.backupTreeDao(), safTree, safAccess)
+        return file.copy(id = id)
+    }
+
+    private fun safUri(file: BackupFile) = safTree.documentUri(safTree.treeUri, file.documentId).toString()
+
     private fun file() = MediaFile(
         mediaStoreId = 42, uri = "content://media/42", displayName = "photo.jpg", relativePath = "DCIM/Camera/",
         mimeType = "image/jpeg", size = bytes.size.toLong(), createdAt = 1, lastModified = 2,
@@ -235,6 +390,9 @@ class ResumableUploadTest {
         return when {
             request.method == "POST" && path == "/api/v1/upload-sessions" -> {
                 creates.incrementAndGet()
+                val body = JSONObject(request.body.readUtf8())
+                createIds += body.getString("clientRequestId")
+                backupSources += body.optString("backupSource").takeUnless { it.isEmpty() }
                 if (loseCreate) {
                     loseCreate = false
                     MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
@@ -271,7 +429,8 @@ class ResumableUploadTest {
             }
             request.method == "DELETE" && path.endsWith(sessionId) -> {
                 cancels.incrementAndGet()
-                MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody("{}")
+                MockResponse().setResponseCode(if (completed) 409 else 200)
+                    .setHeader("Content-Type", "application/json").setBody("{}")
             }
             else -> MockResponse().setResponseCode(404)
         }

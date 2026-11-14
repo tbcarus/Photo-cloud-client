@@ -200,7 +200,7 @@ class FileUploadRepository @Inject constructor(
                             mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                             return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, 0, rehashQueued))
                         }
-                        ResumableResult.Retry -> {
+                        ResumableResult.Retry, ResumableResult.ManagedTree -> {
                             mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
                             return UploadOutcome.Error("Resumable upload ожидает повторного прогона", UploadResult(attempted, succeeded, failed, 1, rehashQueued))
                         }

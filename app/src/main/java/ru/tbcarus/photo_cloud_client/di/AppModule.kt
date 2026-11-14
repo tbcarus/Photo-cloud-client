@@ -15,6 +15,7 @@ import ru.tbcarus.photo_cloud_client.media.MediaFileDao
 import ru.tbcarus.photo_cloud_client.media.UploadSessionDao
 import ru.tbcarus.photo_cloud_client.media.SyncClock
 import ru.tbcarus.photo_cloud_client.media.SyncStatusStore
+import ru.tbcarus.photo_cloud_client.transfer.ManualUploadDao
 import javax.inject.Singleton
 
 @Module
@@ -32,6 +33,9 @@ object AppModule {
 
     @Provides
     fun provideUploadSessionDao(db: AppDatabase): UploadSessionDao = db.uploadSessionDao()
+
+    @Provides
+    fun provideManualUploadDao(db: AppDatabase): ManualUploadDao = db.manualUploadDao()
 
     @Provides
     @Singleton

@@ -61,7 +61,7 @@ class BackupTreeMigrationTest {
 
         val db = AppDatabase.build(context, DB_NAME)
         try {
-            assertEquals(11, db.openHelper.readableDatabase.version)
+            assertEquals(13, db.openHelper.readableDatabase.version)
             assertEquals(2, db.mediaFileDao().getAll().first().size)
             val source = db.backupSourceDao().list("http://10.0.2.2:8080/", "a@test.local").single()
             assertEquals(42L, source.serverRootFolderId)
@@ -118,7 +118,7 @@ class BackupTreeMigrationTest {
 
         val db = AppDatabase.build(context, DB_NAME)
         try {
-            assertEquals(11, db.openHelper.readableDatabase.version)
+            assertEquals(13, db.openHelper.readableDatabase.version)
             assertEquals(1, db.mediaFileDao().getAll().first().size)
             val source = db.backupSourceDao().list("http://10.0.2.2:8080/", "a@test.local").single()
             assertEquals(3, source.scanGeneration)

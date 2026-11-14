@@ -3,12 +3,14 @@ package ru.tbcarus.photo_cloud_client.transfer
 import android.content.Context
 import android.database.Cursor
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
 import android.provider.OpenableColumns
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import javax.inject.Inject
@@ -83,6 +85,24 @@ open class LocalDocuments @Inject constructor(
         LocalFile(uri, null, null, null, problem = UNREADABLE)
     }
 
+    open fun lastModified(uri: Uri): Long? = try {
+        resolver.query(uri, arrayOf(Document.COLUMN_LAST_MODIFIED), null, null, null)
+            ?.use { if (it.moveToFirst()) it.longOrNull(Document.COLUMN_LAST_MODIFIED) else null }
+    } catch (_: Exception) {
+        null
+    }
+
+    open fun persistRead(uri: Uri) {
+        resolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    open fun hasPersistedRead(uri: Uri): Boolean =
+        resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+
+    open fun releaseRead(uri: Uri) {
+        resolver.releasePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
     open fun walk(treeUri: Uri): LocalDir {
         val rootId = try {
             DocumentsContract.getTreeDocumentId(treeUri)
@@ -109,6 +129,34 @@ open class LocalDocuments @Inject constructor(
 
     open fun open(uri: Uri): InputStream =
         resolver.openInputStream(uri) ?: throw FileNotFoundException("Документ не открывается: $uri")
+
+    /** Дескриптор с seek предпочтителен; потоковый provider читается повторно с точным пропуском байтов. */
+    open fun openAt(uri: Uri, offset: Long): InputStream {
+        require(offset >= 0)
+        try {
+            val descriptor = resolver.openFileDescriptor(uri, "r")
+            if (descriptor != null) {
+                val stream = ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+                try {
+                    stream.channel.position(offset)
+                    return stream
+                } catch (_: IOException) {
+                    stream.close()
+                }
+            }
+        } catch (_: UnsupportedOperationException) {
+            // Некоторые SAF-провайдеры поддерживают только openInputStream.
+        } catch (_: FileNotFoundException) {
+            // Потоковый доступ может быть доступен и без файлового дескриптора.
+        }
+        val stream = open(uri)
+        try {
+            return stream.skipExactly(offset)
+        } catch (e: Exception) {
+            stream.close()
+            throw e
+        }
+    }
 
     // "wt": без усечения часть провайдеров оставляет хвост прежнего содержимого.
     open fun openOutput(uri: Uri): OutputStream =
@@ -169,6 +217,19 @@ open class LocalDocuments @Inject constructor(
         val index = getColumnIndex(column)
         return if (index < 0 || isNull(index)) null else getLong(index)
     }
+}
+
+internal fun InputStream.skipExactly(offset: Long): InputStream {
+    var remaining = offset
+    val buffer = ByteArray(64 * 1024)
+    while (remaining > 0) {
+        val skipped = skip(remaining)
+        if (skipped > 0) { remaining -= skipped; continue }
+        val read = read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
+        if (read < 0) throw IOException("SAF-файл короче подтверждённого смещения")
+        remaining -= read
+    }
+    return this
 }
 
 internal const val UNREADABLE = "Нет доступа к файлу"
