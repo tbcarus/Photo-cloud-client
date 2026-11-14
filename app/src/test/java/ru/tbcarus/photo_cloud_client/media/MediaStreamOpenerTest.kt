@@ -113,6 +113,17 @@ class MediaStreamOpenerTest {
         assertEquals(original.size.toLong(), body.contentLength())
     }
 
+    @Test
+    fun resumableRangeReopensOriginalAtSameOffset() {
+        grantLocation()
+        val first = opener.openAt(image.uri, true, 5).use { it.readBytes() }
+        val second = opener.openAt(image.uri, true, 5).use { it.readBytes() }
+
+        assertArrayEquals(original.copyOfRange(5, original.size), first)
+        assertArrayEquals(first, second)
+        assertEquals(2, media.originalOpenCount(image.id))
+    }
+
     private fun grantLocation() = shadowOf(context).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
 
     private fun read(): ByteArray = requireNotNull(opener.open(image.uri)).use { it.readBytes() }

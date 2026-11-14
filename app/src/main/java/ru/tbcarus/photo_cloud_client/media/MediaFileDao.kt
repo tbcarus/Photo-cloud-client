@@ -294,6 +294,13 @@ interface MediaFileDao {
         failureAt: Long
     ): Int
 
+    @Query("""
+        UPDATE media_files SET status = 'PENDING', checksum = NULL, serverFileId = NULL
+        WHERE mediaStoreId = :mediaStoreId AND status = 'UPLOADING'
+          AND checksum IS :checksum AND size = :size AND lastModified = :lastModified
+    """)
+    suspend fun resetChangedSource(mediaStoreId: Long, checksum: String?, size: Long, lastModified: Long): Int
+
     /**
      * Есть ли записи для Загрузчика: CHECKSUM_READY с checksum (pre-check), PENDING_UPLOAD (upload)
      * и UPLOADING (восстановление прерванной отправки).

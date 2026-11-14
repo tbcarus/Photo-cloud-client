@@ -1,6 +1,9 @@
 package ru.tbcarus.photo_cloud_client.core.network
 
+import android.net.Network
 import okhttp3.OkHttpClient
+import okhttp3.Dns
+import okhttp3.ConnectionPool
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import ru.tbcarus.photo_cloud_client.api.AuthService
@@ -9,10 +12,12 @@ import ru.tbcarus.photo_cloud_client.api.FolderService
 import ru.tbcarus.photo_cloud_client.api.NotificationService
 import ru.tbcarus.photo_cloud_client.api.ShareService
 import ru.tbcarus.photo_cloud_client.api.TestService
+import ru.tbcarus.photo_cloud_client.api.UploadSessionService
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import javax.inject.Inject
 import javax.inject.Named
 import javax.inject.Singleton
+import java.net.InetAddress
 
 @Singleton
 class ApiServiceFactory @Inject constructor(
@@ -21,6 +26,9 @@ class ApiServiceFactory @Inject constructor(
     @Named("auth") private val authClient: OkHttpClient,
     @Named("register") private val registerClient: OkHttpClient
 ) {
+    private var uploadServiceKey: Pair<String, Network>? = null
+    private var uploadService: UploadSessionService? = null
+    private var uploadClient: OkHttpClient? = null
     private fun build(baseUrl: String, client: OkHttpClient): Retrofit =
         Retrofit.Builder()
             .baseUrl(baseUrl)
@@ -62,6 +70,28 @@ class ApiServiceFactory @Inject constructor(
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
         return build(baseUrl, authClient).create(FileService::class.java)
+    }
+
+    @Synchronized
+    fun authUploadSessionService(baseUrl: String, network: Network): UploadSessionService {
+        val key = baseUrl to network
+        if (uploadServiceKey == key) uploadService?.let { return it }
+        uploadClient?.connectionPool?.evictAll()
+        val client = authClient.newBuilder()
+            .connectionPool(ConnectionPool())
+            .socketFactory(network.socketFactory)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> = network.getAllByName(hostname).toList()
+            })
+            .addInterceptor { chain ->
+                chain.proceed(chain.request().newBuilder().tag(Network::class.java, network).build())
+            }
+            .build()
+        return build(baseUrl, client).create(UploadSessionService::class.java).also {
+            uploadServiceKey = key
+            uploadService = it
+            uploadClient = client
+        }
     }
 
     fun authFolderService(): FolderService {

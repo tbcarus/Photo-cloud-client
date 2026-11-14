@@ -4,7 +4,20 @@ package ru.tbcarus.photo_cloud_client.media
  * Технические параметры пакетной синхронизации (A8) — единственное место их задания.
  * Размеры партий — единица выборки из Room; длительность прогона ограничивает [WORKER_TIME_BUDGET_MS].
  */
+enum class UploadSizeClass { UNKNOWN, MULTIPART, RESUMABLE, TOO_LARGE }
+
 object SyncConfig {
+
+    const val MULTIPART_MAX_BYTES = 50L * 1024 * 1024
+    const val RESUMABLE_MAX_BYTES = 20L * 1024 * 1024 * 1024
+    const val RESUMABLE_CHUNK_BYTES = 8L * 1024 * 1024
+
+    fun uploadSizeClass(size: Long): UploadSizeClass = when {
+        size <= 0 -> UploadSizeClass.UNKNOWN
+        size <= MULTIPART_MAX_BYTES -> UploadSizeClass.MULTIPART
+        size <= RESUMABLE_MAX_BYTES -> UploadSizeClass.RESUMABLE
+        else -> UploadSizeClass.TOO_LARGE
+    }
 
     /** Строк PENDING, выбираемых Поставщиком для хеширования за раз; после каждой партии будится Загрузчик. */
     const val PROVIDER_BATCH_SIZE = 100

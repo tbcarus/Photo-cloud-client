@@ -9,6 +9,8 @@ enum class FailureReason {
     FILE_NOT_FOUND,  // файл не открывается / удалён / перемещён
     PERMISSION,      // SecurityException при доступе к файлу
     NOT_IMAGE,       // не image (на текущем этапе грузим только фото)
+    SIZE_UNKNOWN,
+    FILE_TOO_LARGE,
     HTTP_400,
     HTTP_409,
     HTTP_413,

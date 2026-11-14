@@ -42,7 +42,7 @@ class UploadMismatchMigrationTest {
 
         val db = AppDatabase.build(context, DB_NAME)
         try {
-            assertEquals(9, db.openHelper.readableDatabase.version)
+            assertEquals(10, db.openHelper.readableDatabase.version)
             val rows = db.mediaFileDao().getAll().first().associateBy { it.mediaStoreId }
             assertEquals(MediaFileStatus.SYNCED, rows.getValue(1).status)
             assertEquals(100L, rows.getValue(1).serverFileId)

@@ -40,6 +40,8 @@ class FileUploadRepository @Inject constructor(
     private val streamOpener: MediaStreamOpener
 ) {
 
+    @Inject lateinit var resumableUpload: ResumableUpload
+
     private val mutex = Mutex()
 
     private companion object {
@@ -84,6 +86,8 @@ class FileUploadRepository @Inject constructor(
             targetStatus = MediaFileStatus.PENDING_UPLOAD
         )
 
+        if (::resumableUpload.isInitialized) resumableUpload.cleanupOrphans(budget)
+
         val folderIdPart = folderId.toString().toRequestBody("text/plain".toMediaTypeOrNull())
 
         var attempted = 0
@@ -119,9 +123,24 @@ class FileUploadRepository @Inject constructor(
                     continue
                 }
 
+                val sizeClass = SyncConfig.uploadSizeClass(file.size)
+                val sizeReason = when (sizeClass) {
+                    UploadSizeClass.UNKNOWN -> FailureReason.SIZE_UNKNOWN
+                    UploadSizeClass.TOO_LARGE -> FailureReason.FILE_TOO_LARGE
+                    else -> null
+                }
+                if (sizeReason != null) {
+                    if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, sizeReason) > 0) {
+                        progressed = true
+                        attempted++
+                        failed++
+                    }
+                    continue
+                }
+
                 // Проверяем доступ к локальному файлу заранее — так отличаем
                 // постоянную ошибку файла от сетевой ошибки во время upload.
-                val openFailure = openFailureReason(file.uri)
+                val openFailure = if (sizeClass == UploadSizeClass.MULTIPART) openFailureReason(file.uri) else null
                 if (openFailure != null) {
                     if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, openFailure) > 0) {
                         progressed = true
@@ -137,6 +156,54 @@ class FileUploadRepository @Inject constructor(
                 }
                 progressed = true
                 attempted++
+
+                if (sizeClass == UploadSizeClass.RESUMABLE) {
+                    val outcome = if (::resumableUpload.isInitialized) {
+                        resumableUpload.camera(file, folderId, budget, isPaused)
+                    } else ResumableResult.Retry
+                    when (outcome) {
+                        is ResumableResult.Complete -> {
+                            val result = outcome.file
+                            val accepted = result.checksum?.takeIf { SHA256_HEX.matches(it) }?.lowercase()
+                            val id = result.id
+                            if (id == null || id <= 0 || accepted == null) {
+                                mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
+                                return UploadOutcome.Error("Некорректная квитанция resumable upload", UploadResult(attempted, succeeded, failed, 1, rehashQueued))
+                            }
+                            if (accepted == file.checksum?.lowercase()) {
+                                if (mediaFileDao.markUploadedIfUnchanged(file.mediaStoreId, id, file.checksum, file.size, file.lastModified) > 0) succeeded++
+                                resumableUpload.forgetBySource(file)
+                            } else {
+                                if (mediaFileDao.applyUploadMismatchIfUnchanged(file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                                        file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()) > 0) {
+                                    if (file.uploadMismatchCount < MAX_MISMATCH_RECOVERIES) rehashQueued++ else failed++
+                                }
+                                resumableUpload.forgetBySource(file)
+                            }
+                        }
+                        ResumableResult.ChecksumMismatch -> {
+                            if (mediaFileDao.applyUploadMismatchIfUnchanged(file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                                    file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()) > 0) {
+                                if (file.uploadMismatchCount < MAX_MISMATCH_RECOVERIES) rehashQueued++ else failed++
+                            }
+                        }
+                        ResumableResult.SourceChanged -> {
+                            if (mediaFileDao.resetChangedSource(file.mediaStoreId, file.checksum, file.size, file.lastModified) > 0) rehashQueued++
+                        }
+                        ResumableResult.Progress -> {
+                            mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
+                            return UploadOutcome.Success(UploadResult(attempted, succeeded, failed, 0, rehashQueued))
+                        }
+                        ResumableResult.Retry -> {
+                            mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
+                            return UploadOutcome.Error("Resumable upload ожидает повторного прогона", UploadResult(attempted, succeeded, failed, 1, rehashQueued))
+                        }
+                        is ResumableResult.Failed -> {
+                            if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.UPLOADING, outcome.reason) > 0) failed++
+                        }
+                    }
+                    continue
+                }
 
                 val response = try {
                     sendWithSingleRetry(file, folderIdPart, budget)

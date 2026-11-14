@@ -12,6 +12,7 @@ import ru.tbcarus.photo_cloud_client.backup.BackupSourceDao
 import ru.tbcarus.photo_cloud_client.backup.BackupTreeDao
 import ru.tbcarus.photo_cloud_client.core.db.AppDatabase
 import ru.tbcarus.photo_cloud_client.media.MediaFileDao
+import ru.tbcarus.photo_cloud_client.media.UploadSessionDao
 import ru.tbcarus.photo_cloud_client.media.SyncClock
 import ru.tbcarus.photo_cloud_client.media.SyncStatusStore
 import javax.inject.Singleton
@@ -28,6 +29,9 @@ object AppModule {
     @Provides
     @Singleton
     fun provideMediaFileDao(db: AppDatabase): MediaFileDao = db.mediaFileDao()
+
+    @Provides
+    fun provideUploadSessionDao(db: AppDatabase): UploadSessionDao = db.uploadSessionDao()
 
     @Provides
     @Singleton

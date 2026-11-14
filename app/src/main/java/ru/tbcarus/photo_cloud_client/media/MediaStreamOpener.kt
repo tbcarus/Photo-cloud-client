@@ -7,6 +7,7 @@ import android.provider.MediaStore
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.InputStream
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,4 +47,21 @@ class MediaStreamOpener @Inject constructor(
         }
         return context.contentResolver.openInputStream(uri)
     }
+
+    /** Для блока исходная версия и позиция фиксируются заново при каждом HTTP retry. */
+    fun openAt(uri: Uri, requireOriginal: Boolean, offset: Long): InputStream {
+        val target = if (requireOriginal) MediaStore.setRequireOriginal(uri) else uri
+        val descriptor = context.contentResolver.openFileDescriptor(target, "r")
+            ?: throw IOException("MediaStore не вернул дескриптор: $uri")
+        return try {
+            ParcelFileDescriptor.AutoCloseInputStream(descriptor).also { stream ->
+                stream.channel.position(offset)
+            }
+        } catch (e: Exception) {
+            descriptor.close()
+            throw e
+        }
+    }
+
+    fun readsOriginal(): Boolean = context.hasMediaLocationPermission()
 }

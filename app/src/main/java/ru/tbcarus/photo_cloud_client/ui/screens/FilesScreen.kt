@@ -290,6 +290,8 @@ private fun formatFailureReason(reason: FailureReason): String = when (reason) {
     FailureReason.FILE_NOT_FOUND -> "File not found"
     FailureReason.PERMISSION     -> "Permission denied"
     FailureReason.NOT_IMAGE      -> "Not an image"
+    FailureReason.SIZE_UNKNOWN   -> "Размер файла неизвестен"
+    FailureReason.FILE_TOO_LARGE -> "Файл больше 20 GiB"
     FailureReason.HTTP_400       -> "HTTP 400"
     FailureReason.HTTP_409       -> "HTTP 409"
     FailureReason.HTTP_413       -> "HTTP 413"

@@ -1,7 +1,9 @@
 package ru.tbcarus.photo_cloud_client.core.network
 
+import android.net.Network
 import android.util.Log
 import okhttp3.Authenticator
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -14,6 +16,7 @@ import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.core.storage.Tokens
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
 import java.io.IOException
+import java.net.InetAddress
 import javax.inject.Inject
 import javax.inject.Named
 
@@ -31,10 +34,15 @@ class TokenAuthenticator @Inject constructor(
 
     private val lock = Any()
 
-    private fun refreshService(baseUrl: String): AuthService = Retrofit.Builder()
+    private fun refreshService(baseUrl: String, network: Network?): AuthService = Retrofit.Builder()
         .baseUrl(baseUrl)
         .addConverterFactory(GsonConverterFactory.create())
-        .client(okHttpClient)
+        .client(if (network == null) okHttpClient else okHttpClient.newBuilder()
+            .socketFactory(network.socketFactory)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> = network.getAllByName(hostname).toList()
+            })
+            .build())
         .build()
         .create(AuthService::class.java)
 
@@ -61,7 +69,7 @@ class TokenAuthenticator @Inject constructor(
             }
 
             // null — окончательный отказ refresh; временный отказ выходит отсюда как IOException.
-            val refreshed = requestNewTokens(baseUrl, current)
+            val refreshed = requestNewTokens(baseUrl, current, response.request.tag(Network::class.java))
             if (refreshed == null) {
                 // replaceIf не тронет пару, если её уже сменили login/logout: стирается только отвергнутая сессия.
                 storage.replaceIf(current, null)
@@ -83,10 +91,10 @@ class TokenAuthenticator @Inject constructor(
      * null — окончательный отказ Server: refresh недействителен или отозван.
      * Любой другой исход временный: IOException без токенов в тексте, пара при этом не меняется.
      */
-    private fun requestNewTokens(baseUrl: String, current: Tokens): Tokens? {
+    private fun requestNewTokens(baseUrl: String, current: Tokens, network: Network?): Tokens? {
         // Сетевые ошибки и timeout пробрасываются как есть — это IOException.
         val refreshResp = try {
-            refreshService(baseUrl).refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
+            refreshService(baseUrl, network).refreshToken(RefreshTokenRequest(current.refreshToken)).execute()
         } catch (e: RuntimeException) {
             // Тело 2xx не разобралось как ответ refresh. Причину не прикладываем: в ней мог быть фрагмент тела.
             throw IOException("Token refresh returned an invalid response")

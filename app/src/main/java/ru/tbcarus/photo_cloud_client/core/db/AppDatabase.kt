@@ -27,19 +27,22 @@ import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileDao
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
+import ru.tbcarus.photo_cloud_client.media.UploadSessionRecord
+import ru.tbcarus.photo_cloud_client.media.UploadSessionDao
 
 @Database(
     entities = [
         MediaFile::class, BackupSource::class, BackupFolder::class, BackupFile::class,
-        CameraCheck::class, CameraCheckItem::class
+        CameraCheck::class, CameraCheckItem::class, UploadSessionRecord::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 @TypeConverters(AppDatabase.Converters::class)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun mediaFileDao(): MediaFileDao
+    abstract fun uploadSessionDao(): UploadSessionDao
 
     abstract fun backupSourceDao(): BackupSourceDao
 
@@ -187,6 +190,13 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS `upload_sessions` (`clientRequestId` TEXT NOT NULL, `serverUrl` TEXT NOT NULL, `accountId` TEXT NOT NULL, `sourceKind` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `uri` TEXT NOT NULL, `folderId` INTEGER NOT NULL, `originalFilename` TEXT NOT NULL, `size` INTEGER NOT NULL, `lastModified` INTEGER NOT NULL, `originalMode` INTEGER NOT NULL, `checksum` TEXT NOT NULL, `serverSessionId` TEXT, `confirmedOffset` INTEGER NOT NULL, `cancelPending` INTEGER NOT NULL, PRIMARY KEY(`clientRequestId`))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_sessions_serverUrl_accountId_sourceKind_sourceId` ON `upload_sessions` (`serverUrl`, `accountId`, `sourceKind`, `sourceId`)")
+            }
+        }
+
         private val MIGRATION_5_6_TABLES = listOf(
             "CREATE TABLE IF NOT EXISTS `backup_folders` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sourceId` INTEGER NOT NULL, `parentId` INTEGER, `name` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `documentId` TEXT NOT NULL, `serverFolderId` INTEGER, `problem` TEXT, `seenGeneration` INTEGER NOT NULL, `listedGeneration` INTEGER NOT NULL, FOREIGN KEY(`sourceId`) REFERENCES `backup_sources`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_backup_folders_sourceId_relativePath` ON `backup_folders` (`sourceId`, `relativePath`)",
@@ -209,7 +219,7 @@ abstract class AppDatabase : RoomDatabase() {
         internal fun build(context: Context, name: String): AppDatabase =
             Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, name)
                 // Без пути миграции Room отказывает в открытии БД: очередь Camera и источники не удаляются молча.
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .build()
     }
 }
