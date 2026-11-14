@@ -42,7 +42,7 @@ class FailedRetry @Inject constructor(
 
     suspend fun retryAll(): FailedRetryResult = mutex.withLock {
         // Без полного доступа файл снова упадёт с PERMISSION: сброс только сжёг бы попытку пользователя.
-        if (!context.hasMediaReadPermission()) return FailedRetryResult.NoPermission
+        if (!context.hasAnyMediaReadPermission()) return FailedRetryResult.NoPermission
         val count = mediaFileDao.resetAllFailedForManualRetry()
         if (count == 0) return FailedRetryResult.NothingToRetry
         // Записи уже PENDING в Room. Продолжение, а не KEEP: работающий Поставщик не заменяется, и даже если он

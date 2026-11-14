@@ -28,7 +28,8 @@ data class UploadSessionRecord(
     val checksum: String,
     val serverSessionId: String? = null,
     val confirmedOffset: Long = 0,
-    val cancelPending: Boolean = false
+    val cancelPending: Boolean = false,
+    val collection: MediaCollection = MediaCollection.IMAGE
 )
 
 @Dao

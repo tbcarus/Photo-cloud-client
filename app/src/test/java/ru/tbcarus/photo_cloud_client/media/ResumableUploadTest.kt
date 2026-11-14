@@ -122,6 +122,19 @@ class ResumableUploadTest {
         assertEquals(bytes.size.toLong(), db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single().confirmedOffset)
     }
 
+    @Test fun videoUsesSameResumableProtocolAndKeepsCollectionInSession() = runBlocking {
+        val video = file().copy(
+            uri = "content://media/external/video/media/42", displayName = "video.mp4",
+            mimeType = "video/mp4", collection = MediaCollection.VIDEO
+        )
+
+        assertTrue(uploader.camera(video, 7, WorkBudget.UNLIMITED) { false } is ResumableResult.Complete)
+        assertEquals(listOf(SyncConfig.RESUMABLE_CHUNK_BYTES.toInt(), 3), patches)
+        // Успешная сессия остаётся до подтверждения обработки результата Загрузчиком.
+        assertEquals(MediaCollection.VIDEO,
+            db.uploadSessionDao().forAccount(account.serverUrl, account.accountId).single().collection)
+    }
+
     @Test fun lostCreateResponseReusesPersistedRequestId() = runBlocking {
         loseCreate = true
         val file = file()
@@ -145,7 +158,7 @@ class ResumableUploadTest {
 
     @Test fun budgetExhaustedDuringGetDoesNotStartNextBlock() = runBlocking {
         db.uploadSessionDao().insert(UploadSessionRecord(UUID.randomUUID().toString(), account.serverUrl, account.accountId,
-            "CAMERA", "42", "content://media/42", 7, "photo.jpg", bytes.size.toLong(), 2,
+            "CAMERA", "content://media/42", "content://media/42", 7, "photo.jpg", bytes.size.toLong(), 2,
             false, checksum, sessionId))
         advanceClockAfterGet = true
         val budget = WorkBudget(SyncClock { clockMs.get() }, 1)
@@ -155,7 +168,7 @@ class ResumableUploadTest {
 
     @Test fun confirmedRemoteProgressAfterRestartAvoidsBackoff() = runBlocking {
         db.uploadSessionDao().insert(UploadSessionRecord(UUID.randomUUID().toString(), account.serverUrl, account.accountId,
-            "CAMERA", "42", "content://media/42", 7, "photo.jpg", bytes.size.toLong(), 2,
+            "CAMERA", "content://media/42", "content://media/42", 7, "photo.jpg", bytes.size.toLong(), 2,
             false, checksum, sessionId))
         offset.set(SyncConfig.RESUMABLE_CHUNK_BYTES)
         advanceClockAfterGet = true

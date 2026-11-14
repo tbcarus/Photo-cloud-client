@@ -212,8 +212,8 @@ class UploadWorkerQueueTest {
         val newSize = image.size + 10
         val newModified = image.lastModifiedMs + 60_000
         dao.applyScannedMetadata(
-            image.id, "IMG_${image.id}.jpg", image.relativePath, image.mimeType,
-            newSize, image.lastModifiedMs, newModified, image.uri.toString()
+            image.uri.toString(), "IMG_${image.id}.jpg", image.relativePath, image.mimeType,
+            newSize, image.lastModifiedMs, newModified
         )
     }
 

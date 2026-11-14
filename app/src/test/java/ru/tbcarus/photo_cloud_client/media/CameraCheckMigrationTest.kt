@@ -52,7 +52,7 @@ class CameraCheckMigrationTest {
 
         val db = AppDatabase.build(context, DB_NAME)
         try {
-            assertEquals(10, db.openHelper.readableDatabase.version)
+            assertEquals(11, db.openHelper.readableDatabase.version)
             assertEquals(MediaFileStatus.SYNCED, db.mediaFileDao().getAll().first().single().status)
             assertNull(db.cameraCheckDao().get())
             assertEquals(CameraCheckCounts(), db.cameraCheckDao().counts())

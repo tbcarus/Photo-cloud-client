@@ -1,7 +1,7 @@
 package ru.tbcarus.photo_cloud_client.media
 
 /**
- * Снимок metadata одного файла из MediaStore.Images.
+ * Снимок metadata одного файла из MediaStore.Images или MediaStore.Video.
  * Только локальные данные устройства — не серверная модель, не Room entity.
  * Timestamps нормализованы в миллисекунды.
  */
@@ -13,5 +13,8 @@ data class MediaStoreImage(
     val mimeType: String,
     val size: Long,
     val createdAt: Long,     // ms: DATE_TAKEN, или DATE_MODIFIED*1000, или DATE_ADDED*1000
-    val lastModified: Long   // ms: DATE_MODIFIED*1000
+    val lastModified: Long,   // ms: DATE_MODIFIED*1000
+    val collection: MediaCollection = MediaCollection.IMAGE
 )
+
+enum class MediaCollection { IMAGE, VIDEO }

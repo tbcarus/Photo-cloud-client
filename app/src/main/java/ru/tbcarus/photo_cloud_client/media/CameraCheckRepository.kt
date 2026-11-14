@@ -45,6 +45,12 @@ class CameraCheckRepository @Inject constructor(
     private val syncScheduler: SyncScheduler,
     private val tokenStorage: TokenStorage
 ) {
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
+
+    private suspend fun fileService() = if (::automaticBackupNetwork.isInitialized) {
+        val network = automaticBackupNetwork.current() ?: throw IOException("Нет разрешённой сети для Camera backup")
+        apiServiceFactory.authFileService(network)
+    } else apiServiceFactory.authFileService()
 
     private companion object {
         const val TAG = "CameraCheck"
@@ -66,7 +72,7 @@ class CameraCheckRepository @Inject constructor(
 
     suspend fun start(): CheckStartResult = actionMutex.withLock {
         withContext(Dispatchers.IO) {
-            if (!context.hasMediaReadPermission()) return@withContext CheckStartResult.NoPermission
+            if (!context.hasMediaReadPermission() || !context.hasVideoReadPermission()) return@withContext CheckStartResult.NoPermission
             val account = accounts.current()
                 ?: return@withContext if (tokenStorage.getTokens() == null) {
                     CheckStartResult.NotSignedIn
@@ -162,7 +168,7 @@ class CameraCheckRepository @Inject constructor(
         withContext(Dispatchers.IO) {
             val check = dao.get()
             if (check?.state != CameraCheckState.AWAITING_DECISION) return@withContext ConfirmUploadResult.NotAwaiting
-            if (!context.hasMediaReadPermission()) return@withContext ConfirmUploadResult.NoPermission
+            if (!context.hasMediaReadPermission() || !context.hasVideoReadPermission()) return@withContext ConfirmUploadResult.NoPermission
             val account = accounts.current() ?: return@withContext ConfirmUploadResult.NotSignedIn
             if (!check.matches(account)) return@withContext ConfirmUploadResult.DestinationChanged
 
@@ -173,7 +179,7 @@ class CameraCheckRepository @Inject constructor(
                     return@withTransaction false
                 }
                 for (item in dao.missingItems()) {
-                    val row = media.getById(item.mediaStoreId) ?: continue
+                    val row = media.getByUri(item.uri) ?: continue
                     if (row.size != item.size || row.lastModified != item.lastModified) continue
                     when (row.status) {
                         MediaFileStatus.SYNCED ->
@@ -181,7 +187,7 @@ class CameraCheckRepository @Inject constructor(
                                 media.updateStatusIfUnchanged(row, MediaFileStatus.SYNCED, MediaFileStatus.CHECKSUM_READY) > 0
                             ) queued++
                         MediaFileStatus.FAILED ->
-                            if (media.resetFailedForManualRetryIfUnchanged(row.mediaStoreId, row.size, row.lastModified) > 0) {
+                            if (media.resetFailedForManualRetryIfUnchanged(row.uri, row.size, row.lastModified) > 0) {
                                 queued++
                                 resetFailed = true
                             }
@@ -262,7 +268,7 @@ class CameraCheckRepository @Inject constructor(
             val check = dao.get()
             if (check == null || !check.isActive || check.stage != CameraCheckStage.HASH) return@withContext StageProgress.NONE
             val runId = check.runId
-            if (!context.hasMediaReadPermission()) {
+            if (!context.hasMediaReadPermission() || !context.hasVideoReadPermission()) {
                 markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
                 return@withContext StageProgress.NONE
             }
@@ -270,14 +276,16 @@ class CameraCheckRepository @Inject constructor(
             if (check.state == CameraCheckState.ERROR) dao.setActiveState(runId, CameraCheckState.RUNNING, null)
 
             var progressed = false
-            var after = Long.MIN_VALUE
+            var afterId = Long.MIN_VALUE
+            var afterUri = ""
             loop@ while (!budget.isExhausted()) {
-                val batch = dao.itemsWithoutChecksum(after, SyncConfig.PROVIDER_BATCH_SIZE)
+                val batch = dao.itemsWithoutChecksum(afterId, afterUri, SyncConfig.PROVIDER_BATCH_SIZE)
                 if (batch.isEmpty()) break
                 for (item in batch) {
                     if (budget.isExhausted()) break@loop
                     if (!isCurrent(runId)) return@withContext StageProgress.NONE
-                    after = item.mediaStoreId
+                    afterId = item.mediaStoreId
+                    afterUri = item.uri
                     if (collectOne(runId, item)) progressed = true
                 }
             }
@@ -291,20 +299,22 @@ class CameraCheckRepository @Inject constructor(
 
     /** @return true — строка набора получила checksum или итог. */
     private suspend fun collectOne(runId: String, item: CameraCheckItem): Boolean {
-        val row = media.getById(item.mediaStoreId) ?: return inRun(runId) { dao.deleteItem(item.mediaStoreId) }
+        val row = media.getByUri(item.uri) ?: return inRun(runId) { dao.deleteItem(item.uri) }
         val known = row.checksum
         return when {
             row.status == MediaFileStatus.PENDING || row.status == MediaFileStatus.HASHING -> false
-            known != null -> inRun(runId) { dao.setItemChecksum(item.mediaStoreId, known, row.size, row.lastModified) }
+            known != null -> inRun(runId) { dao.setItemChecksum(item.uri, known, row.size, row.lastModified) }
             row.status == MediaFileStatus.FAILED -> hashFailed(runId, row)
             // Строка без checksum вне hash-стадий не должна встречаться — не проверяется.
-            else -> inRun(runId) { dao.setItemResult(item.mediaStoreId, CameraCheckResult.UNVERIFIABLE) }
+            else -> inRun(runId) { dao.setItemResult(item.uri, CameraCheckResult.UNVERIFIABLE) }
         }
     }
 
     private suspend fun hashFailed(runId: String, row: MediaFile): Boolean {
         val checksum = try {
-            streamOpener.open(Uri.parse(row.uri))?.use { ChecksumUtil.sha256(it) }
+            val uri = Uri.parse(row.uri)
+            (if (row.collection == MediaCollection.IMAGE) streamOpener.open(uri)
+             else streamOpener.open(uri, row.collection))?.use { ChecksumUtil.sha256(it) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -312,13 +322,13 @@ class CameraCheckRepository @Inject constructor(
             null
         }
         return inRun(runId) {
-            val current = media.getById(row.mediaStoreId)
+            val current = media.getByUri(row.uri)
             when {
-                current == null -> dao.deleteItem(row.mediaStoreId)
+                current == null -> dao.deleteItem(row.uri)
                 // Файл изменился во время чтения — следующий проход возьмёт новую версию.
                 current.size != row.size || current.lastModified != row.lastModified -> return@inRun
-                checksum == null -> dao.setItemResult(row.mediaStoreId, CameraCheckResult.UNVERIFIABLE)
-                else -> dao.setItemChecksum(row.mediaStoreId, checksum, row.size, row.lastModified)
+                checksum == null -> dao.setItemResult(row.uri, CameraCheckResult.UNVERIFIABLE)
+                else -> dao.setItemChecksum(row.uri, checksum, row.size, row.lastModified)
             }
         }
     }
@@ -355,7 +365,7 @@ class CameraCheckRepository @Inject constructor(
                 val byChecksum = batch.groupBy { it.checksum!!.lowercase() }
 
                 val response = try {
-                    apiServiceFactory.authFileService()
+                    fileService()
                         .checksumsExist(ChecksumExistsRequest(folderId, byChecksum.keys.toList()))
                         .execute()
                 } catch (e: IOException) {
@@ -400,17 +410,17 @@ class CameraCheckRepository @Inject constructor(
 
     /** Результат одной строки внутри транзакции партии; @return 1 — строка разрешена. */
     private suspend fun applyServerResult(item: CameraCheckItem, checksum: String, result: CameraCheckResult): Int {
-        val row = media.getById(item.mediaStoreId)
+        val row = media.getByUri(item.uri)
         when {
             row == null -> {
-                dao.deleteItem(item.mediaStoreId)
+                dao.deleteItem(item.uri)
                 return 1
             }
             // Файл изменился после получения checksum: ответ относится к прежнему содержимому.
             row.size != item.size || row.lastModified != item.lastModified ->
-                dao.setItemResult(item.mediaStoreId, CameraCheckResult.UNVERIFIABLE)
+                dao.setItemResult(item.uri, CameraCheckResult.UNVERIFIABLE)
             else -> {
-                dao.setItemResult(item.mediaStoreId, result)
+                dao.setItemResult(item.uri, result)
                 // Подтверждение existing для ещё не проверенной строки — тот же переход, что у pre-check.
                 if (result == CameraCheckResult.EXISTS && row.status == MediaFileStatus.CHECKSUM_READY &&
                     row.checksum.equals(checksum, ignoreCase = true)

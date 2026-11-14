@@ -48,6 +48,9 @@ class MediaStreamOpener @Inject constructor(
         return context.contentResolver.openInputStream(uri)
     }
 
+    fun open(uri: Uri, collection: MediaCollection): InputStream? =
+        if (collection == MediaCollection.VIDEO) context.contentResolver.openInputStream(uri) else open(uri)
+
     /** Для блока исходная версия и позиция фиксируются заново при каждом HTTP retry. */
     fun openAt(uri: Uri, requireOriginal: Boolean, offset: Long): InputStream {
         val target = if (requireOriginal) MediaStore.setRequireOriginal(uri) else uri

@@ -1,5 +1,7 @@
 package ru.tbcarus.photo_cloud_client.media
 
+import android.content.Context
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -10,6 +12,7 @@ import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.cancellation.CancellationException
+import java.io.IOException
 
 /**
  * Pre-check слой этапа 5C.
@@ -26,6 +29,14 @@ class ChecksumPrecheckRepository @Inject constructor(
     private val mediaFileDao: MediaFileDao,
     private val apiServiceFactory: ApiServiceFactory
 ) {
+
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
+    @Inject @ApplicationContext lateinit var appContext: Context
+
+    private suspend fun fileService() = if (::automaticBackupNetwork.isInitialized) {
+        val network = automaticBackupNetwork.current() ?: throw IOException("Нет разрешённой сети для Camera backup")
+        apiServiceFactory.authFileService(network)
+    } else apiServiceFactory.authFileService()
 
     private val mutex = Mutex()
 
@@ -57,9 +68,13 @@ class ChecksumPrecheckRepository @Inject constructor(
         try {
             // Пауза читается из Room перед каждой партией: сверка могла начаться во время прошлого запроса.
             while (!budget.isExhausted() && !isPaused()) {
-                val batch = mediaFileDao.getByStatusWithChecksumOnce(
-                    MediaFileStatus.CHECKSUM_READY,
-                    SyncConfig.PRECHECK_BATCH_SIZE
+                val batch = if (::appContext.isInitialized) {
+                    mediaFileDao.getReadableByStatusWithChecksumOnce(
+                        MediaFileStatus.CHECKSUM_READY, SyncConfig.PRECHECK_BATCH_SIZE,
+                        appContext.hasMediaReadPermission(), appContext.hasVideoReadPermission()
+                    )
+                } else mediaFileDao.getByStatusWithChecksumOnce(
+                    MediaFileStatus.CHECKSUM_READY, SyncConfig.PRECHECK_BATCH_SIZE
                 )
                 if (batch.isEmpty()) break
 
@@ -71,7 +86,7 @@ class ChecksumPrecheckRepository @Inject constructor(
                 if (checksums.isEmpty()) break // защитно: не должно случиться
 
                 val request = ChecksumExistsRequest(folderId = folderId, checksums = checksums)
-                val response = apiServiceFactory.authFileService().checksumsExist(request).execute()
+                val response = fileService().checksumsExist(request).execute()
 
                 if (!response.isSuccessful) {
                     // Уже обновлённые предыдущие батчи остаются; текущий не трогаем.

@@ -6,6 +6,7 @@ import androidx.work.Configuration
 import dagger.hilt.android.HiltAndroidApp
 import ru.tbcarus.photo_cloud_client.backup.FolderBackupTrigger
 import ru.tbcarus.photo_cloud_client.media.ProcessStartSync
+import ru.tbcarus.photo_cloud_client.media.AutomaticBackupNetwork
 import javax.inject.Inject
 
 @HiltAndroidApp
@@ -20,6 +21,9 @@ class App : Application(), Configuration.Provider {
     @Inject
     lateinit var folderBackupTrigger: FolderBackupTrigger
 
+    @Inject
+    lateinit var automaticBackupNetwork: AutomaticBackupNetwork
+
     override fun onCreate() {
         // Hilt внедряет зависимости в super.onCreate(), до этого поля не инициализированы.
         super.onCreate()
@@ -27,6 +31,7 @@ class App : Application(), Configuration.Provider {
         processStartSync.onProcessStart()
         // Резервирование папок — отдельная очередь: ставится при старте, входе и смене Server.
         folderBackupTrigger.start()
+        automaticBackupNetwork.start()
     }
 
     // HiltWorkerFactory нужен, чтобы WorkManager умел инжектить зависимости в @HiltWorker.

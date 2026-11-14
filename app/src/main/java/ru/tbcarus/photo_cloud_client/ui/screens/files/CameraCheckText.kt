@@ -98,7 +98,7 @@ fun checkFinishedText(view: CameraCheckView): String {
     val queued = view.check.queuedForUpload
     return when {
         queued != null -> "Отсутствующие файлы возвращены в обычную синхронизацию: $queued. Автоматическая загрузка возобновлена."
-        view.check.checked == 0 -> "Нет фотографий для проверки."
+        view.check.checked == 0 -> "Нет файлов для проверки."
         view.check.unverifiable > 0 -> "Отсутствующих на сервере файлов не найдено. Часть файлов проверить не удалось."
         else -> "Все проверенные файлы есть на сервере."
     }

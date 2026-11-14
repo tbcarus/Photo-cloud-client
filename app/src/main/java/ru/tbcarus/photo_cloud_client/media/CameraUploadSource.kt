@@ -21,11 +21,11 @@ open class CameraUploadSource @Inject constructor(
     private val opener: MediaStreamOpener
 ) {
     open fun state(record: UploadSessionRecord): CameraSourceState {
-        if (!context.hasMediaReadPermission()) return CameraSourceState.Unavailable
+        if (!context.hasMediaReadPermission(record.collection)) return CameraSourceState.Unavailable
         if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) return CameraSourceState.Unavailable
         val uri = Uri.parse(record.uri)
         return try {
-            val projection = arrayOf(MediaStore.Images.Media.SIZE, MediaStore.Images.Media.DATE_MODIFIED)
+            val projection = arrayOf(MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_MODIFIED)
             val cursor = context.contentResolver.query(uri, projection, null, null, null)
                 ?: return CameraSourceState.Unavailable
             cursor.use {
@@ -33,7 +33,8 @@ open class CameraUploadSource @Inject constructor(
                 val size = if (it.isNull(0)) -1L else it.getLong(0)
                 val modified = if (it.isNull(1) || it.getLong(1) <= 0) record.lastModified
                     else it.getLong(1) * 1000L
-                if (size != record.size || modified != record.lastModified || opener.readsOriginal() != record.originalMode) {
+                if (size != record.size || modified != record.lastModified ||
+                    (record.collection == MediaCollection.IMAGE && opener.readsOriginal() != record.originalMode)) {
                     CameraSourceState.Changed
                 } else CameraSourceState.Current
             }

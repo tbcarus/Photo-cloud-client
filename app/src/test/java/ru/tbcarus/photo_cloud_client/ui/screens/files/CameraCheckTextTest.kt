@@ -75,7 +75,7 @@ class CameraCheckTextTest {
         )
         assertEquals(checkSummaryLines(awaiting), checkSummaryLines(finished))
         assertEquals("Все проверенные файлы есть на сервере.", checkFinishedText(finished.copy(check = finished.check.copy(queuedForUpload = null, missing = 0, unverifiable = 0))))
-        assertEquals("Нет фотографий для проверки.", checkFinishedText(finished.copy(check = finished.check.copy(queuedForUpload = null, checked = 0, confirmed = 0, missing = 0, unverifiable = 0))))
+        assertEquals("Нет файлов для проверки.", checkFinishedText(finished.copy(check = finished.check.copy(queuedForUpload = null, checked = 0, confirmed = 0, missing = 0, unverifiable = 0))))
         assertEquals(
             "Отсутствующие файлы возвращены в обычную синхронизацию: 4. Автоматическая загрузка возобновлена.",
             checkFinishedText(finished)

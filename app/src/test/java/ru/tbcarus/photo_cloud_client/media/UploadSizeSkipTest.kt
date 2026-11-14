@@ -28,10 +28,10 @@ class UploadSizeSkipTest {
             dao.insert(file(2, SyncConfig.RESUMABLE_MAX_BYTES + 1))
             val upload = FileUploadRepository(dao, mock(ApiServiceFactory::class.java), mock(MediaStreamOpener::class.java))
             upload.uploadPendingCameraFiles(7)
-            assertEquals(FailureReason.SIZE_UNKNOWN, dao.getById(1)!!.failureReason)
-            assertEquals(FailureReason.FILE_TOO_LARGE, dao.getById(2)!!.failureReason)
-            assertEquals(MediaFileStatus.FAILED, dao.getById(1)!!.status)
-            assertEquals(MediaFileStatus.FAILED, dao.getById(2)!!.status)
+            assertEquals(FailureReason.SIZE_UNKNOWN, dao.single(1).failureReason)
+            assertEquals(FailureReason.FILE_TOO_LARGE, dao.single(2).failureReason)
+            assertEquals(MediaFileStatus.FAILED, dao.single(1).status)
+            assertEquals(MediaFileStatus.FAILED, dao.single(2).status)
         } finally { db.close() }
     }
 }

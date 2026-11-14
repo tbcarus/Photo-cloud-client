@@ -107,13 +107,13 @@ class MediaScanBatchTest {
 
         assertTrue(interrupted is ScanOutcome.Error)
         // Первая порция применена целиком, остальные — нет; отсутствующая строка не удалена.
-        assertEquals(SyncConfig.SCAN_WRITE_BATCH_SIZE + 1, dao.getAllMediaStoreIds().size)
+        assertEquals(SyncConfig.SCAN_WRITE_BATCH_SIZE + 1, dao.getAllUris(MediaCollection.IMAGE).size)
         assertNotNull(dao.find(gone.id))
 
         val completed = MediaFileRepository(dao, MediaStoreRepository(context)).scanImages() as ScanOutcome.Success
 
         assertEquals(1, completed.result.deletedStale)
-        assertEquals(LIBRARY_SIZE, dao.getAllMediaStoreIds().size)
+        assertEquals(LIBRARY_SIZE, dao.getAllUris(MediaCollection.IMAGE).size)
         assertNull(dao.find(gone.id))
         assertTrue(dao.getAll().first().all { it.status == MediaFileStatus.PENDING })
     }

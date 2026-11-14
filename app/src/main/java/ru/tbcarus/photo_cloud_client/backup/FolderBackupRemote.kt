@@ -20,6 +20,7 @@ import ru.tbcarus.photo_cloud_client.api.models.FilePageDto
 import ru.tbcarus.photo_cloud_client.api.models.FolderDto
 import ru.tbcarus.photo_cloud_client.api.models.RenameFileRequest
 import ru.tbcarus.photo_cloud_client.core.network.ApiServiceFactory
+import ru.tbcarus.photo_cloud_client.media.AutomaticBackupNetwork
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,6 +38,17 @@ val BackupResult.Http.isFolderManaged: Boolean get() = code == 409 && errorCode 
 open class FolderBackupRemote @Inject constructor(
     private val apiServiceFactory: ApiServiceFactory
 ) {
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
+
+    private suspend fun fileService() = if (::automaticBackupNetwork.isInitialized) {
+        val network = automaticBackupNetwork.current() ?: throw IOException("Нет разрешённой сети для SAF backup")
+        apiServiceFactory.authFileService(network)
+    } else apiServiceFactory.authFileService()
+
+    private suspend fun folderService() = if (::automaticBackupNetwork.isInitialized) {
+        val network = automaticBackupNetwork.current() ?: throw IOException("Нет разрешённой сети для SAF backup")
+        apiServiceFactory.authFolderService(network)
+    } else apiServiceFactory.authFolderService()
 
     companion object {
         const val FOLDER_MANAGED = "FOLDER_MANAGED"
@@ -44,33 +56,33 @@ open class FolderBackupRemote @Inject constructor(
         private val gson = Gson()
     }
 
-    open suspend fun root(): BackupResult<FolderDto> = request { apiServiceFactory.authFolderService().getRoot() }
+    open suspend fun root(): BackupResult<FolderDto> = request { folderService().getRoot() }
 
     open suspend fun children(folderId: Long): BackupResult<List<FolderDto>> =
-        request { apiServiceFactory.authFolderService().getChildren(folderId) }
+        request { folderService().getChildren(folderId) }
 
     open suspend fun files(folderId: Long, page: Int): BackupResult<FilePageDto> =
-        request { apiServiceFactory.authFileService().getFiles(folderId, page, FILES_PAGE_SIZE, null) }
+        request { fileService().getFiles(folderId, page, FILES_PAGE_SIZE, null) }
 
-    open suspend fun file(id: Long): BackupResult<FileItemDto> = request { apiServiceFactory.authFileService().getFile(id) }
+    open suspend fun file(id: Long): BackupResult<FileItemDto> = request { fileService().getFile(id) }
 
     open suspend fun rename(id: Long, name: String, backupSource: String): BackupResult<FileItemDto> =
-        request { apiServiceFactory.authFileService().renameFile(id, RenameFileRequest(name, backupSource)) }
+        request { fileService().renameFile(id, RenameFileRequest(name, backupSource)) }
 
     open suspend fun createFolder(parentId: Long, name: String, backupSource: String): BackupResult<FolderDto> =
-        request { apiServiceFactory.authFolderService().createFolder(CreateFolderRequest(parentId, name, backupSource)) }
+        request { folderService().createFolder(CreateFolderRequest(parentId, name, backupSource)) }
 
     open suspend fun upload(folderId: Long, name: String, body: RequestBody, backupSource: String): BackupResult<FileItemDto> {
         val file = MultipartBody.Part.createFormData("file", name, body)
         val text = "text/plain".toMediaType()
         return request {
-            apiServiceFactory.authFileService()
+            fileService()
                 .uploadBackupFile(file, folderId.toString().toRequestBody(text), backupSource.toRequestBody(text))
         }
     }
 
     // awaitResponse при отмене корутины прерывает и сам HTTP-запрос.
-    private suspend fun <T : Any> request(call: () -> Call<T>): BackupResult<T> = withContext(Dispatchers.IO) {
+    private suspend fun <T : Any> request(call: suspend () -> Call<T>): BackupResult<T> = withContext(Dispatchers.IO) {
         try {
             val response = call().awaitResponse()
             val body = response.body()

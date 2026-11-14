@@ -108,6 +108,7 @@ class CameraCheckTest {
         }
         media = FakeMediaStore.install(context)
         shadowOf(context).grantPermissions(mediaReadPermission)
+        shadowOf(context).grantPermissions(videoReadPermission)
         val serverPreferences = ServerPreferences(context)
         runBlocking { serverPreferences.saveConnection("127.0.0.1", server.port.toString()) }
         baseUrlProvider = BaseUrlProvider(serverPreferences)
@@ -209,6 +210,26 @@ class CameraCheckTest {
     }
 
     // --- 2: всё есть на Server ---
+
+    @Test
+    fun checkIncludesPhotoAndVideoWithSameNumericId() = runBlocking {
+        file(1, MediaFileStatus.SYNCED, onServer = true)
+        val video = media.add(FakeMediaStore.Image(
+            id = 1, bytes = "video-1".toByteArray(), dateModifiedSec = 1_700_000_001L,
+            mimeType = "video/mp4", collection = MediaCollection.VIDEO
+        ))
+        dao.insert(row(video, MediaFileStatus.SYNCED, sha256(video.bytes)))
+        existing += sha256(video.bytes)
+
+        assertEquals(CheckStartResult.Started(scheduled = true), check.start())
+        drain()
+
+        val result = view()!!
+        assertEquals(CameraCheckState.FINISHED, result.check.state)
+        assertEquals(2, result.check.checked)
+        assertEquals(2, result.check.confirmed)
+        assertEquals(2, dao.getAll().first().size)
+    }
 
     @Test
     fun allPresentFinishesAndLiftsPauseWithoutDecision() = runBlocking {

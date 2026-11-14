@@ -33,7 +33,7 @@ class PeriodicSyncCoordinator @Inject constructor(
         authRepository.getTokens() != null && authRepository.isReady()
 
     fun reconcile() {
-        val hasMediaPermission = context.hasMediaReadPermission()
+        val hasMediaPermission = context.hasAnyMediaReadPermission()
         if (hasMediaPermission) {
             syncScheduler.enqueueProviderPeriodic()
             syncScheduler.enqueueMediaTrigger()
@@ -56,7 +56,7 @@ class PeriodicSyncCoordinator @Inject constructor(
      * Вызывается Поставщиком, в том числе periodic, — отдельного механизма восстановления нет.
      */
     fun ensureMediaTrigger() {
-        if (context.hasMediaReadPermission()) {
+        if (context.hasAnyMediaReadPermission()) {
             syncScheduler.enqueueMediaTrigger()
         }
     }

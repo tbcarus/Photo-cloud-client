@@ -54,6 +54,11 @@ class MediaChangeObserver @Inject constructor(
             /* notifyForDescendants = */ true,
             observer
         )
+        context.contentResolver.registerContentObserver(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            true,
+            observer
+        )
         registered = true
         Log.i(TAG, "MediaChangeObserver зарегистрирован")
     }

@@ -114,6 +114,17 @@ class MediaStreamOpenerTest {
     }
 
     @Test
+    fun videoUsesRegularStreamEvenWhenMediaLocationIsGranted() {
+        grantLocation()
+        val video = media.add(FakeMediaStore.Image(2, "video".toByteArray(), 1_700_000_002L,
+            mimeType = "video/mp4", collection = MediaCollection.VIDEO))
+
+        assertArrayEquals(video.bytes, opener.open(video.uri, MediaCollection.VIDEO)!!.use { it.readBytes() })
+        assertEquals(0, media.originalOpenCount(video.id))
+        assertEquals(1, media.openCount(video.id))
+    }
+
+    @Test
     fun resumableRangeReopensOriginalAtSameOffset() {
         grantLocation()
         val first = opener.openAt(image.uri, true, 5).use { it.readBytes() }

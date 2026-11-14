@@ -49,8 +49,45 @@ class MediaFileRepository @Inject constructor(
             when (val outcome = mediaStoreRepository.loadImages()) {
                 is MediaStoreScanOutcome.PermissionDenied -> ScanOutcome.PermissionDenied
                 is MediaStoreScanOutcome.Error -> ScanOutcome.Error(outcome.message)
-                is MediaStoreScanOutcome.Success -> applyToRoom(outcome.images, outcome.isComplete)
+                is MediaStoreScanOutcome.Success -> applyToRoom(outcome.images, outcome.isComplete, MediaCollection.IMAGE)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ScanOutcome.Error(e.message ?: "Ошибка при синхронизации индекса")
+        }
+    }
+
+    suspend fun scanCameraMedia(): ScanOutcome = mutex.withLock {
+        try {
+            val image = mediaStoreRepository.loadImages()
+            val video = mediaStoreRepository.loadVideos()
+            if (image is MediaStoreScanOutcome.PermissionDenied && video is MediaStoreScanOutcome.PermissionDenied) {
+                return@withLock ScanOutcome.PermissionDenied
+            }
+            var scanned = 0
+            var updated = 0
+            var deleted = 0
+            var complete = true
+            var scanError: String? = null
+            for ((collection, outcome) in listOf(MediaCollection.IMAGE to image, MediaCollection.VIDEO to video)) {
+                when (outcome) {
+                    is MediaStoreScanOutcome.Success -> {
+                        val result = applyToRoom(outcome.images, outcome.isComplete, collection).result
+                        scanned += result.scanned
+                        updated += result.insertedOrUpdated
+                        deleted += result.deletedStale
+                        complete = complete && result.complete
+                    }
+                    is MediaStoreScanOutcome.Error -> {
+                        complete = false
+                        scanError = outcome.message
+                    }
+                    else -> complete = false
+                }
+            }
+            if (scanError != null) return@withLock ScanOutcome.Error(scanError)
+            ScanOutcome.Success(ScanResult(scanned, updated, deleted, complete))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -61,7 +98,8 @@ class MediaFileRepository @Inject constructor(
     /** Есть ли в Room записи для Загрузчика (граница Поставщик → Загрузчик). */
     suspend fun hasReadyForUpload(): Boolean = dao.countReadyForUpload() > 0
 
-    private suspend fun applyToRoom(images: List<MediaStoreImage>, isComplete: Boolean): ScanOutcome.Success {
+    private suspend fun applyToRoom(images: List<MediaStoreImage>, isComplete: Boolean,
+                                    collection: MediaCollection): ScanOutcome.Success {
         // 1–2. Порция за порцией: новые записи вставляются (существующие по mediaStoreId игнорируются),
         // у всех обновляются MediaStore-поля. Изменившийся файл (size/lastModified) в том же UPDATE
         // возвращается в PENDING из любого статуса; у неизменённого статус и checksum сохраняются.
@@ -73,17 +111,17 @@ class MediaFileRepository @Inject constructor(
         // 3. Stale detection: удаляем из Room файлы, которых больше нет в MediaStore.
         // Неполный снимок не доказывает удаления — строки не трогаем. Server при этом не затрагивается.
         // null — массовое исчезновение не подтверждено: строки оставлены, индекс не совпадает со снимком.
-        val staleIds = if (isComplete) {
-            confirmedStaleIds(images)
+        val staleUris = if (isComplete) {
+            confirmedStaleUris(images, collection)
         } else {
             Log.w(TAG, "Снимок MediaStore неполный — удаление отсутствующих строк пропущено")
             null
         }
 
-        if (!staleIds.isNullOrEmpty()) {
+        if (!staleUris.isNullOrEmpty()) {
             // SQLite имеет лимит bind-параметров (~999), удаляем пачками
-            staleIds.chunked(500).forEach { chunk ->
-                dao.deleteByMediaStoreIds(chunk)
+            staleUris.chunked(500).forEach { chunk ->
+                dao.deleteByUris(chunk)
             }
         }
 
@@ -93,8 +131,8 @@ class MediaFileRepository @Inject constructor(
                 // insertedOrUpdated — кол-во записей, прошедших insert+update pipeline,
                 // а не только новых; insert с IGNORE не различает «добавлено» и «проигнорировано»
                 insertedOrUpdated  = images.size,
-                deletedStale       = staleIds?.size ?: 0,
-                complete           = staleIds != null
+                deletedStale       = staleUris?.size ?: 0,
+                complete           = staleUris != null
             )
         )
     }
@@ -104,24 +142,27 @@ class MediaFileRepository @Inject constructor(
      * большая часть индекса, через паузу выполняется повторный снимок: удаляются только строки,
      * отсутствующие в обоих. Неудачный или неполный повтор — ничего не удаляем до следующего scan (null).
      */
-    private suspend fun confirmedStaleIds(images: List<MediaStoreImage>): List<Long>? {
-        val dbIds      = dao.getAllMediaStoreIds()
-        val scannedIds = images.mapTo(HashSet()) { it.mediaStoreId }
-        val staleIds   = dbIds.filter { it !in scannedIds }
+    private suspend fun confirmedStaleUris(images: List<MediaStoreImage>, collection: MediaCollection): List<String>? {
+        val dbUris      = dao.getAllUris(collection)
+        val scannedUris = images.mapTo(HashSet()) { it.uri }
+        val staleUris   = dbUris.filter { it !in scannedUris }
 
-        val massDisappearance = staleIds.isNotEmpty() && (images.isEmpty() ||
-            (staleIds.size >= MASS_DELETE_MIN_ROWS && staleIds.size * 2 >= dbIds.size))
-        if (!massDisappearance) return staleIds
+        val massDisappearance = staleUris.isNotEmpty() && (images.isEmpty() ||
+            (staleUris.size >= MASS_DELETE_MIN_ROWS && staleUris.size * 2 >= dbUris.size))
+        if (!massDisappearance) return staleUris
 
-        Log.w(TAG, "Из снимка пропало ${staleIds.size} из ${dbIds.size} строк — повторная проверка")
+        Log.w(TAG, "Из снимка пропало ${staleUris.size} из ${dbUris.size} строк — повторная проверка")
         delay(MASS_DELETE_RECHECK_DELAY_MS)
-        val recheck = mediaStoreRepository.loadImages()
+        val recheck = when (collection) {
+            MediaCollection.IMAGE -> mediaStoreRepository.loadImages()
+            MediaCollection.VIDEO -> mediaStoreRepository.loadVideos()
+        }
         if (recheck !is MediaStoreScanOutcome.Success || !recheck.isComplete) {
             Log.w(TAG, "Повторный снимок недостоверен — удаление отсутствующих строк пропущено")
             return null
         }
-        val recheckIds = recheck.images.mapTo(HashSet()) { it.mediaStoreId }
-        return staleIds.filter { it !in recheckIds }
+        val recheckUris = recheck.images.mapTo(HashSet()) { it.uri }
+        return staleUris.filter { it !in recheckUris }
     }
 
     /** Преобразует MediaStore-снимок в новую запись локального индекса. */
@@ -136,6 +177,7 @@ class MediaFileRepository @Inject constructor(
         createdAt    = createdAt,
         lastModified = lastModified,
         checksum     = null,
-        status       = MediaFileStatus.PENDING
+        status       = MediaFileStatus.PENDING,
+        collection   = collection
     )
 }

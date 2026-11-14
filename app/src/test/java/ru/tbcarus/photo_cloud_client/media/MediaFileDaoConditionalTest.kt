@@ -50,7 +50,7 @@ class MediaFileDaoConditionalTest {
     fun uploadResultForUnchangedRowIsApplied() = runBlocking {
         dao.insert(original)
 
-        val applied = dao.markUploadedIfUnchanged(1, 55, original.checksum, original.size, original.lastModified)
+        val applied = dao.markUploadedIfUnchanged(original.uri, 55, original.checksum, original.size, original.lastModified)
 
         assertEquals(1, applied)
         assertEquals(MediaFileStatus.SYNCED, dao.single(1).status)
@@ -62,7 +62,7 @@ class MediaFileDaoConditionalTest {
         dao.insert(original)
         dao.applyScan(original, size = 200, lastModified = 2_000)
 
-        val applied = dao.markUploadedIfUnchanged(1, 55, original.checksum, original.size, original.lastModified)
+        val applied = dao.markUploadedIfUnchanged(original.uri, 55, original.checksum, original.size, original.lastModified)
 
         assertEquals(0, applied)
         val file = dao.single(1)
@@ -93,7 +93,7 @@ class MediaFileDaoConditionalTest {
         dao.insert(hashing)
         dao.applyScan(hashing, size = 200, lastModified = 2_000)
 
-        assertEquals(0, dao.updateChecksumIfUnchanged(1, "c".repeat(64), hashing.size, hashing.lastModified))
+        assertEquals(0, dao.updateChecksumIfUnchanged(original.uri, "c".repeat(64), hashing.size, hashing.lastModified))
         assertEquals(0, dao.markFailedIfUnchanged(hashing, MediaFileStatus.HASHING, FailureReason.CHECKSUM_IO))
         val file = dao.single(1)
         assertEquals(MediaFileStatus.PENDING, file.status)
@@ -140,7 +140,7 @@ class MediaFileDaoConditionalTest {
         assertEquals(1, dao.updateStatusIfUnchanged(pending, MediaFileStatus.PENDING, MediaFileStatus.HASHING))
         dao.applyScan(pending, size = 200, lastModified = 2_000)
 
-        assertEquals(0, dao.updateChecksumIfUnchanged(1, "c".repeat(64), pending.size, pending.lastModified))
+        assertEquals(0, dao.updateChecksumIfUnchanged(original.uri, "c".repeat(64), pending.size, pending.lastModified))
         val file = dao.single(1)
         assertEquals(MediaFileStatus.PENDING, file.status)
         assertEquals(200L, file.size)
@@ -164,13 +164,13 @@ class MediaFileDaoConditionalTest {
         // Каждый статус, а FAILED — с разными причинами, исчерпанным счётчиком и прежними checksum/serverFileId.
         val others = MediaFileStatus.entries.filter { it != MediaFileStatus.FAILED }
         others.forEachIndexed { i, status ->
-            dao.insert(original.copy(mediaStoreId = i + 1L, status = status, serverFileId = 7, retryCount = 2, lastFailureAt = 5))
+            dao.insert(original.copy(mediaStoreId = i + 1L, uri = "${original.uri}/${i + 1}", status = status, serverFileId = 7, retryCount = 2, lastFailureAt = 5))
         }
         val failed = listOf(FailureReason.CHECKSUM_IO, FailureReason.FILE_NOT_FOUND, FailureReason.HTTP_409)
         failed.forEachIndexed { i, reason ->
             dao.insert(
                 original.copy(
-                    mediaStoreId = 100L + i, status = MediaFileStatus.FAILED, serverFileId = 9,
+                    mediaStoreId = 100L + i, uri = "${original.uri}/${100 + i}", status = MediaFileStatus.FAILED, serverFileId = 9,
                     failureReason = reason, retryCount = 3, lastFailureAt = 5
                 )
             )
@@ -200,10 +200,10 @@ class MediaFileDaoConditionalTest {
     fun countReadyForUploadCoversUploaderStatusesOnly() = runBlocking {
         val statuses = MediaFileStatus.entries
         statuses.forEachIndexed { i, status ->
-            dao.insert(original.copy(mediaStoreId = i + 1L, status = status))
+            dao.insert(original.copy(mediaStoreId = i + 1L, uri = "${original.uri}/${i + 1}", status = status))
         }
         // CHECKSUM_READY без checksum Загрузчику не передаётся.
-        dao.insert(original.copy(mediaStoreId = 100, status = MediaFileStatus.CHECKSUM_READY, checksum = null))
+        dao.insert(original.copy(mediaStoreId = 100, uri = "${original.uri}/100", status = MediaFileStatus.CHECKSUM_READY, checksum = null))
 
         assertEquals(3, dao.countReadyForUpload()) // CHECKSUM_READY, PENDING_UPLOAD, UPLOADING
     }

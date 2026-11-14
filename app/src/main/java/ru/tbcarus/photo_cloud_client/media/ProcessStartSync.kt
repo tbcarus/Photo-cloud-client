@@ -19,7 +19,7 @@ class ProcessStartSync @Inject constructor(
 ) {
     fun onProcessStart() {
         // Без полного доступа Поставщик ничего не обработает — не планируем.
-        if (!context.hasMediaReadPermission()) return
+        if (!context.hasAnyMediaReadPermission()) return
         // Постановка попадает в ту же последовательную очередь WorkManager, где при инициализации первым
         // стоит ForceStopRunnable, поэтому выполняется уже после его отмены и перепланирования job.
         // KEEP: ожидающий или выполняющийся Поставщик не дублируется.

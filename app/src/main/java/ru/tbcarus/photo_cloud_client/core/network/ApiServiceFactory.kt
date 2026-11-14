@@ -2,6 +2,7 @@ package ru.tbcarus.photo_cloud_client.core.network
 
 import android.net.Network
 import okhttp3.OkHttpClient
+import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.ConnectionPool
 import retrofit2.Retrofit
@@ -18,6 +19,8 @@ import javax.inject.Inject
 import javax.inject.Named
 import javax.inject.Singleton
 import java.net.InetAddress
+import java.util.Collections
+import java.util.WeakHashMap
 
 @Singleton
 class ApiServiceFactory @Inject constructor(
@@ -26,9 +29,14 @@ class ApiServiceFactory @Inject constructor(
     @Named("auth") private val authClient: OkHttpClient,
     @Named("register") private val registerClient: OkHttpClient
 ) {
-    private var uploadServiceKey: Pair<String, Network>? = null
-    private var uploadService: UploadSessionService? = null
-    private var uploadClient: OkHttpClient? = null
+    private var boundClientKey: Pair<String, Network>? = null
+    private var boundClient: OkHttpClient? = null
+    private val automaticClients = Collections.newSetFromMap(WeakHashMap<OkHttpClient, Boolean>())
+
+    @Synchronized
+    fun cancelAutomaticCalls() {
+        automaticClients.forEach { it.dispatcher.cancelAll() }
+    }
     private fun build(baseUrl: String, client: OkHttpClient): Retrofit =
         Retrofit.Builder()
             .baseUrl(baseUrl)
@@ -66,18 +74,44 @@ class ApiServiceFactory @Inject constructor(
         return build(baseUrl, plainClient).create(TestService::class.java)
     }
 
+    @Synchronized
+    fun plainTestService(baseUrl: String, network: Network): TestService {
+        require(baseUrl.isNotBlank()) { "Server URL is not configured" }
+        val client = bound(plainClient, network)
+        automaticClients.add(client)
+        return build(baseUrl, client).create(TestService::class.java)
+    }
+
     fun authFileService(): FileService {
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
         return build(baseUrl, authClient).create(FileService::class.java)
     }
 
-    @Synchronized
+    fun authFileService(network: Network): FileService {
+        val baseUrl = baseUrlProvider.baseUrl
+        check(baseUrl.isNotBlank()) { "Server URL is not configured" }
+        return build(baseUrl, networkClient(baseUrl, network)).create(FileService::class.java)
+    }
+
     fun authUploadSessionService(baseUrl: String, network: Network): UploadSessionService {
+        return build(baseUrl, networkClient(baseUrl, network)).create(UploadSessionService::class.java)
+    }
+
+    @Synchronized
+    private fun networkClient(baseUrl: String, network: Network): OkHttpClient {
         val key = baseUrl to network
-        if (uploadServiceKey == key) uploadService?.let { return it }
-        uploadClient?.connectionPool?.evictAll()
-        val client = authClient.newBuilder()
+        if (boundClientKey == key) boundClient?.let { return it }
+        boundClient?.connectionPool?.evictAll()
+        val client = bound(authClient, network)
+        boundClientKey = key
+        boundClient = client
+        automaticClients.add(client)
+        return client
+    }
+
+    private fun bound(base: OkHttpClient, network: Network): OkHttpClient = base.newBuilder()
+            .dispatcher(Dispatcher())
             .connectionPool(ConnectionPool())
             .socketFactory(network.socketFactory)
             .dns(object : Dns {
@@ -87,17 +121,17 @@ class ApiServiceFactory @Inject constructor(
                 chain.proceed(chain.request().newBuilder().tag(Network::class.java, network).build())
             }
             .build()
-        return build(baseUrl, client).create(UploadSessionService::class.java).also {
-            uploadServiceKey = key
-            uploadService = it
-            uploadClient = client
-        }
-    }
 
     fun authFolderService(): FolderService {
         val baseUrl = baseUrlProvider.baseUrl
         check(baseUrl.isNotBlank()) { "Server URL is not configured" }
         return build(baseUrl, authClient).create(FolderService::class.java)
+    }
+
+    fun authFolderService(network: Network): FolderService {
+        val baseUrl = baseUrlProvider.baseUrl
+        check(baseUrl.isNotBlank()) { "Server URL is not configured" }
+        return build(baseUrl, networkClient(baseUrl, network)).create(FolderService::class.java)
     }
 
     fun authShareService(): ShareService {

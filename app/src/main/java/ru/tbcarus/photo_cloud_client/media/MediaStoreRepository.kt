@@ -25,6 +25,7 @@ class MediaStoreRepository @Inject constructor(
          */
         // TODO A4.3: удалить Pictures/ после испытаний на эмуляторе
         val SCAN_DIRECTORIES = listOf("DCIM/", "Pictures/")
+        val VIDEO_DIRECTORY = "DCIM/Camera/"
     }
 
     /**
@@ -39,33 +40,44 @@ class MediaStoreRepository @Inject constructor(
      * // TODO: runtime-запрос разрешений будет добавлен на UI-этапе.
      * // Сейчас repository только сообщает, что доступа к MediaStore нет.
      */
-    suspend fun loadImages(): MediaStoreScanOutcome = withContext(Dispatchers.IO) {
+    suspend fun loadImages(): MediaStoreScanOutcome = load(MediaCollection.IMAGE)
 
-        if (!context.hasMediaReadPermission()) {
+    suspend fun loadVideos(): MediaStoreScanOutcome = load(MediaCollection.VIDEO)
+
+    private suspend fun load(collection: MediaCollection): MediaStoreScanOutcome = withContext(Dispatchers.IO) {
+
+        if (!context.hasMediaReadPermission(collection)) {
             return@withContext MediaStoreScanOutcome.PermissionDenied
         }
 
+        val baseUri = if (collection == MediaCollection.IMAGE) MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                      else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val directories = if (collection == MediaCollection.IMAGE) SCAN_DIRECTORIES else listOf(VIDEO_DIRECTORY)
+
         val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.RELATIVE_PATH,
-            MediaStore.Images.Media.MIME_TYPE,
-            MediaStore.Images.Media.SIZE,
-            MediaStore.Images.Media.DATE_TAKEN,
-            MediaStore.Images.Media.DATE_MODIFIED,
-            MediaStore.Images.Media.DATE_ADDED
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.DATE_TAKEN,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.DATE_ADDED
         )
 
         // Только каталоги [SCAN_DIRECTORIES]; Download, Movies и прочие пути не читаются.
         // Один запрос по всем каталогам даёт один общий снимок: каждая строка MediaStore (_ID) входит в него
         // один раз. Фильтр применяется в запросе MediaStore, а не пост-фильтром.
-        val selection = SCAN_DIRECTORIES.joinToString(" OR ") { "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?" }
-        val selectionArgs = SCAN_DIRECTORIES.map { "$it%" }.toTypedArray()
+        val selection = if (collection == MediaCollection.VIDEO) {
+            "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
+        } else directories.joinToString(" OR ") { "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?" }
+        val selectionArgs = if (collection == MediaCollection.VIDEO) arrayOf(VIDEO_DIRECTORY)
+            else directories.map { "$it%" }.toTypedArray()
 
         // Ошибка самого запроса — тоже Error, а не исключение: повторная проверка снимка обрабатывает её как сбой.
         val cursor = try {
             context.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                baseUri,
                 projection,
                 selection,
                 selectionArgs,
@@ -77,14 +89,14 @@ class MediaStoreRepository @Inject constructor(
 
         return@withContext try {
             cursor.use { c ->
-                val idCol           = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                val displayNameCol  = c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-                val relativePathCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
-                val mimeTypeCol     = c.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
-                val sizeCol         = c.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
-                val dateTakenCol    = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
-                val dateModifiedCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
-                val dateAddedCol    = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                val idCol           = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                val displayNameCol  = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                val relativePathCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH)
+                val mimeTypeCol     = c.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                val sizeCol         = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                val dateTakenCol    = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN)
+                val dateModifiedCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                val dateAddedCol    = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
 
                 val images = mutableListOf<MediaStoreImage>()
                 var skippedRows = 0
@@ -92,16 +104,19 @@ class MediaStoreRepository @Inject constructor(
                 while (c.moveToNext()) {
                     try {
                         val id = c.getLong(idCol)
-                        if (id <= 0L) continue
+                        if (id <= 0L) {
+                            skippedRows++
+                            continue
+                        }
 
                         val displayName = c.getString(displayNameCol)
                             ?.takeIf { it.isNotBlank() }
-                            ?: "image_$id"
+                            ?: "${collection.name.lowercase()}_$id"
                         val relativePath = c.getString(relativePathCol)
                             ?.takeIf { it.isNotBlank() }
                         val mimeType = c.getString(mimeTypeCol)
                             ?.takeIf { it.isNotBlank() }
-                            ?: "image/*"
+                            ?: "${collection.name.lowercase()}/*"
                         val size = if (c.isNull(sizeCol)) 0L else c.getLong(sizeCol)
 
                         val dateTaken    = if (c.isNull(dateTakenCol))    0L else c.getLong(dateTakenCol)
@@ -120,7 +135,7 @@ class MediaStoreRepository @Inject constructor(
                         val lastModified = dateModifiedMs ?: createdAt
 
                         val uri = ContentUris.withAppendedId(
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id
+                            baseUri, id
                         ).toString()
 
                         images.add(
@@ -132,7 +147,8 @@ class MediaStoreRepository @Inject constructor(
                                 mimeType     = mimeType,
                                 size         = size,
                                 createdAt    = createdAt,
-                                lastModified = lastModified
+                                lastModified = lastModified,
+                                collection = collection
                             )
                         )
                     } catch (e: Exception) {

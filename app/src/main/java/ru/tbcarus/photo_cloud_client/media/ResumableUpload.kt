@@ -46,9 +46,12 @@ class ResumableUpload @Inject constructor(
     private val source: CameraUploadSource,
     private val wifi: WifiUploadNetwork
 ) {
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
+
     private suspend fun service(account: BackupAccount): UploadSessionService {
         if (accounts.current() != account) throw IOException("Сессия или Server изменились")
-        val network = wifi.current() ?: throw IOException("Для большой Camera-загрузки требуется Wi-Fi")
+        val network = (if (::automaticBackupNetwork.isInitialized) automaticBackupNetwork.current() else wifi.current())
+            ?: throw IOException("Нет разрешённой сети для Camera backup")
         return api.authUploadSessionService(account.serverUrl, network)
     }
 
@@ -57,10 +60,10 @@ class ResumableUpload @Inject constructor(
         val account = accounts.current() ?: return false
         for (record in sessions.forAccount(account.serverUrl, account.accountId)) {
             if (budget.isExhausted()) return false
-            val mediaId = record.sourceId.toLongOrNull()
-            val file = mediaId?.let { mediaFiles.getById(it) }
+            val file = mediaFiles.getByUri(record.sourceId)
             val state = source.state(record)
             val stale = file == null || file.status == MediaFileStatus.SYNCED || file.uri != record.uri ||
+                file.collection != record.collection ||
                 file.displayName.ifBlank { "file_${file.mediaStoreId}" } != record.originalFilename ||
                 file.size != record.size || file.lastModified != record.lastModified ||
                 file.checksum?.lowercase() != record.checksum ||
@@ -76,8 +79,8 @@ class ResumableUpload @Inject constructor(
     suspend fun camera(file: MediaFile, folderId: Long, budget: WorkBudget, isPaused: suspend () -> Boolean): ResumableResult {
         val checksum = file.checksum?.lowercase() ?: return ResumableResult.SourceChanged
         val account = accounts.current() ?: return ResumableResult.Retry
-        val sourceId = file.mediaStoreId.toString()
-        val originalMode = source.originalMode()
+        val sourceId = file.uri
+        val originalMode = file.collection == MediaCollection.IMAGE && source.originalMode()
         val records = sessions.forSource(account.serverUrl, account.accountId, "CAMERA", sourceId)
         for (old in records) {
             if (old.cancelPending || old.uri != file.uri || old.folderId != folderId ||
@@ -99,7 +102,7 @@ class ResumableUpload @Inject constructor(
                 uri = file.uri, folderId = folderId,
                 originalFilename = file.displayName.ifBlank { "file_${file.mediaStoreId}" },
                 size = file.size, lastModified = file.lastModified,
-                originalMode = originalMode, checksum = checksum
+                originalMode = originalMode, checksum = checksum, collection = file.collection
             )
             when (source.state(record)) {
                 CameraSourceState.Current -> sessions.insert(record)
@@ -267,7 +270,7 @@ class ResumableUpload @Inject constructor(
 
     suspend fun forgetBySource(file: MediaFile) {
         val account = accounts.current() ?: return
-        sessions.forSource(account.serverUrl, account.accountId, "CAMERA", file.mediaStoreId.toString())
+        sessions.forSource(account.serverUrl, account.accountId, "CAMERA", file.uri)
             .filter { it.checksum == file.checksum?.lowercase() && it.size == file.size && it.lastModified == file.lastModified }
             .forEach { sessions.delete(it.clientRequestId) }
     }

@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,17 +17,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import ru.tbcarus.photo_cloud_client.core.server.BackupNetworkMode
 import ru.tbcarus.photo_cloud_client.media.MediaAccess
 import ru.tbcarus.photo_cloud_client.media.appSettingsIntent
 import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
@@ -34,12 +39,15 @@ import ru.tbcarus.photo_cloud_client.media.isPermissionRequestBlocked
 import ru.tbcarus.photo_cloud_client.media.mediaAccess
 import ru.tbcarus.photo_cloud_client.media.mediaPermissionRequest
 import ru.tbcarus.photo_cloud_client.media.mediaReadPermission
+import ru.tbcarus.photo_cloud_client.media.videoAccess
+import ru.tbcarus.photo_cloud_client.media.videoPermissionRequest
+import ru.tbcarus.photo_cloud_client.media.videoReadPermission
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 import ru.tbcarus.photo_cloud_client.ui.screens.settings.FolderBackupSection
 import ru.tbcarus.photo_cloud_client.ui.screens.settings.SettingsViewModel
 
 /**
- * Единственное место запроса разрешений: сначала доступ к фото, затем необязательные геоданные.
+ * Единственное место запроса разрешений на медиа и геоданные.
  * Состояние не хранится: оно читается у Android при открытии экрана, после ответа на запрос
  * и при каждом возврате в приложение. Запросы — только по нажатию; отзыв — только в настройках Android.
  */
@@ -47,22 +55,32 @@ import ru.tbcarus.photo_cloud_client.ui.screens.settings.SettingsViewModel
 fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
     val context = LocalContext.current
     var photoAccess by remember { mutableStateOf(context.mediaAccess()) }
+    var videoAccess by remember { mutableStateOf(context.videoAccess()) }
+    val networkMode by viewModel.backupNetworkMode.collectAsState()
     // ACCESS_MEDIA_LOCATION проверяется только при полном доступе к фото.
     var locationGranted by remember {
         mutableStateOf(photoAccess == MediaAccess.FULL && context.hasMediaLocationPermission())
     }
     val photoRequest = remember { RequestTracker(mediaReadPermission) }
+    val videoRequest = remember { RequestTracker(videoReadPermission) }
     val locationRequest = remember { RequestTracker(Manifest.permission.ACCESS_MEDIA_LOCATION) }
 
     fun refresh() {
         val previousAccess = photoAccess
+        val previousVideoAccess = videoAccess
         val previousLocation = locationGranted
         photoAccess = context.mediaAccess()
+        videoAccess = context.videoAccess()
         locationGranted = photoAccess == MediaAccess.FULL && context.hasMediaLocationPermission()
         // Смена разрешения (в том числе в настройках Android) начинает историю отказов заново.
         if (photoAccess != previousAccess) {
             photoRequest.reset()
-            if (photoAccess == MediaAccess.FULL) viewModel.onMediaPermissionGranted()
+        }
+        if (videoAccess != previousVideoAccess) videoRequest.reset()
+        if (photoAccess != previousAccess || videoAccess != previousVideoAccess) {
+            viewModel.onMediaPermissionChanged(
+                photoAccess == MediaAccess.FULL || videoAccess == MediaAccess.FULL
+            )
         }
         if (locationGranted != previousLocation) locationRequest.reset()
     }
@@ -79,6 +97,12 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         refresh()
         locationRequest.onResult(locationGranted, context.findActivity())
     }
+    val videoLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        refresh()
+        videoRequest.onResult(videoAccess == MediaAccess.FULL, context.findActivity())
+    }
 
     OnResumeEffect { refresh() }
 
@@ -89,6 +113,16 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             onRequest = {
                 photoRequest.beforeLaunch(context.findActivity())
                 photoLauncher.launch(mediaPermissionRequest)
+            },
+            onOpenSettings = { context.startActivity(context.appSettingsIntent()) }
+        )
+        Spacer(Modifier.height(24.dp))
+        VideoAccessSection(
+            access = videoAccess,
+            blocked = videoRequest.blocked,
+            onRequest = {
+                videoRequest.beforeLaunch(context.findActivity())
+                videoLauncher.launch(videoPermissionRequest)
             },
             onOpenSettings = { context.startActivity(context.appSettingsIntent()) }
         )
@@ -104,7 +138,52 @@ fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             onOpenSettings = { context.startActivity(context.appSettingsIntent()) }
         )
         Spacer(Modifier.height(24.dp))
+        NetworkModeSection(networkMode, viewModel::setBackupNetworkMode)
+        Spacer(Modifier.height(24.dp))
         FolderBackupSection()
+    }
+}
+
+@Composable
+private fun VideoAccessSection(
+    access: MediaAccess,
+    blocked: Boolean,
+    onRequest: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    SectionHeader(
+        title = "Доступ к видео",
+        description = "Для автоматического копирования видео из DCIM/Camera нужен доступ ко всем видео"
+    )
+    when (access) {
+        MediaAccess.FULL -> GrantedButton("Доступ к видео предоставлен")
+        MediaAccess.PARTIAL -> {
+            Text(
+                "Доступ только к выбранным видео. Для автоматической синхронизации нужен доступ ко всем.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+            Spacer(Modifier.height(8.dp))
+            RequestButton("Разрешить доступ ко всем видео", blocked, onRequest, onOpenSettings)
+        }
+        MediaAccess.NONE -> RequestButton("Разрешить доступ к видео", blocked, onRequest, onOpenSettings)
+    }
+}
+
+@Composable
+private fun NetworkModeSection(mode: BackupNetworkMode, onSelect: (BackupNetworkMode) -> Unit) {
+    SectionHeader(
+        title = "Сеть для автоматического резервирования",
+        description = "Относится к фото и видео камеры, а также к выбранным папкам. Ручная загрузка доступна в любой сети."
+    )
+    listOf(
+        BackupNetworkMode.WIFI_ONLY to "Только Wi-Fi",
+        BackupNetworkMode.WIFI_AND_MOBILE to "Wi-Fi и мобильная сеть"
+    ).forEach { (option, label) ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(selected = mode == option, onClick = { onSelect(option) })
+            Text(label)
+        }
     }
 }
 

@@ -10,11 +10,16 @@ import javax.inject.Inject
 /** Resumable Camera использует только сокеты активной Wi-Fi сети, включая повтор после refresh. */
 open class WifiUploadNetwork @Inject constructor(@ApplicationContext private val context: Context) {
     open fun current(): Network? {
+        return current(allowMobile = false)
+    }
+
+    open fun current(allowMobile: Boolean): Network? {
         val manager = context.getSystemService(ConnectivityManager::class.java) ?: return null
         val network = manager.activeNetwork ?: return null
         val capabilities = manager.getNetworkCapabilities(network) ?: return null
         return network.takeIf {
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                (allowMobile && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))) &&
                 capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         }
     }

@@ -37,12 +37,13 @@ class FakeMediaStore private constructor(
         val relativePath: String = "DCIM/Camera/",
         val mimeType: String = "image/jpeg",
         /** Байты оригинала; null — совпадают с [bytes]. Обычный поток отдаёт [bytes], как Android с затёртыми геоданными. */
-        @Volatile var originalBytes: ByteArray? = null
+        @Volatile var originalBytes: ByteArray? = null,
+        val collection: MediaCollection = MediaCollection.IMAGE
     ) {
         /** Ошибка обычного открытия потока (например, отозван доступ к фото). */
         @Volatile var openFailure: (() -> Exception)? = null
 
-        val uri: Uri get() = uriOf(id)
+        val uri: Uri get() = uriOf(id, collection)
         val size: Long get() = bytes.size.toLong()
         val lastModifiedMs: Long get() = dateModifiedSec * 1000L
     }
@@ -95,7 +96,11 @@ class FakeMediaStore private constructor(
     }
 
     fun remove(id: Long) {
-        provider.images.removeIf { it.id == id }
+        provider.images.removeIf { it.id == id && it.collection == MediaCollection.IMAGE }
+    }
+
+    fun removeVideo(id: Long) {
+        provider.images.removeIf { it.id == id && it.collection == MediaCollection.VIDEO }
     }
 
     /** Сколько раз открывался обычный поток файла (hash, проверка доступа перед upload, отправка). */
@@ -136,8 +141,13 @@ class FakeMediaStore private constructor(
                 // Фильтр запроса MediaStoreRepository: RELATIVE_PATH LIKE 'каталог/%' [OR ...].
                 // LIKE в SQLite не различает регистр ASCII; без аргументов отдаётся вся коллекция.
                 val prefixes = selectionArgs.orEmpty().map { it.removeSuffix("%") }
+                val exactPath = selection?.contains(" = ?") == true
+                val collection = if (uri.toString().contains("/video/")) MediaCollection.VIDEO else MediaCollection.IMAGE
                 images.filter { image ->
-                    prefixes.isEmpty() || prefixes.any { image.relativePath.startsWith(it, ignoreCase = true) }
+                    image.collection == collection &&
+                        (prefixes.isEmpty() || prefixes.any {
+                            if (exactPath) image.relativePath == it else image.relativePath.startsWith(it, ignoreCase = true)
+                        })
                 }.forEach { image ->
                     cursor.addRow(columns.map { column -> value(image, column) })
                 }
@@ -152,7 +162,7 @@ class FakeMediaStore private constructor(
 
         private fun value(image: Image, column: String): Any? = when (column) {
             MediaStore.Images.Media._ID -> image.id
-            MediaStore.Images.Media.DISPLAY_NAME -> "IMG_${image.id}.jpg"
+            MediaStore.Images.Media.DISPLAY_NAME -> if (image.collection == MediaCollection.VIDEO) "VID_${image.id}.mp4" else "IMG_${image.id}.jpg"
             MediaStore.Images.Media.RELATIVE_PATH -> image.relativePath
             MediaStore.Images.Media.MIME_TYPE -> image.mimeType
             MediaStore.Images.Media.SIZE -> image.size
@@ -191,7 +201,10 @@ class FakeMediaStore private constructor(
             return FakeMediaStore(context, Robolectric.setupContentProvider(Provider::class.java, MediaStore.AUTHORITY))
         }
 
-        fun uriOf(id: Long): Uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+        fun uriOf(id: Long, collection: MediaCollection = MediaCollection.IMAGE): Uri = ContentUris.withAppendedId(
+            if (collection == MediaCollection.IMAGE) MediaStore.Images.Media.EXTERNAL_CONTENT_URI else MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            id
+        )
 
         fun sha256(bytes: ByteArray): String = ChecksumUtil.sha256(ByteArrayInputStream(bytes))
 
@@ -205,14 +218,15 @@ class FakeMediaStore private constructor(
             mediaStoreId = image.id,
             serverFileId = serverFileId,
             uri = image.uri.toString(),
-            displayName = "IMG_${image.id}.jpg",
+            displayName = if (image.collection == MediaCollection.VIDEO) "VID_${image.id}.mp4" else "IMG_${image.id}.jpg",
             relativePath = image.relativePath,
             mimeType = image.mimeType,
             size = image.size,
             createdAt = image.lastModifiedMs,
             lastModified = image.lastModifiedMs,
             checksum = checksum,
-            status = status
+            status = status,
+            collection = image.collection
         )
     }
 }

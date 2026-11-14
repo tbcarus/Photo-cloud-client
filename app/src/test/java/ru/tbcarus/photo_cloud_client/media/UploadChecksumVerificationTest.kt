@@ -107,6 +107,26 @@ class UploadChecksumVerificationTest {
     }
 
     @Test
+    fun videoMultipartUsesSameChecksumVerification() = runBlocking {
+        val video = media.add(FakeMediaStore.Image(1, "video".toByteArray(), 1_700_000_001L,
+            mimeType = "video/mp4", collection = MediaCollection.VIDEO))
+        dao.insert(row(video, MediaFileStatus.PENDING_UPLOAD, sha256(video.bytes)))
+
+        val success = upload()
+
+        assertEquals(MediaFileStatus.SYNCED, dao.getByUri(video.uri.toString())?.status)
+        assertEquals(1, success.result?.succeeded)
+
+        dao.updateStatusIfUnchanged(video.uri.toString(), MediaFileStatus.SYNCED,
+            MediaFileStatus.PENDING_UPLOAD, sha256(video.bytes), video.size, video.lastModifiedMs)
+        video.bytes = "other".toByteArray()
+        val mismatch = upload()
+
+        assertEquals(MediaFileStatus.PENDING, dao.getByUri(video.uri.toString())?.status)
+        assertEquals(1, mismatch.result?.rehashQueued)
+    }
+
+    @Test
     fun uppercaseChecksumInResponseMatches() = runBlocking {
         val image = pendingUpload(1, "photo-1")
         responseChecksum = { uploadedChecksum(it).uppercase() }
@@ -212,7 +232,7 @@ class UploadChecksumVerificationTest {
     fun deletedRowIsNotRecreatedByLateMismatch() = runBlocking {
         val image = pendingUpload(1, "photo-A")
         image.bytes = "photo-B".toByteArray()
-        onUpload = { runBlocking { dao.deleteByMediaStoreIds(listOf(image.id)) } }
+        onUpload = { runBlocking { dao.deleteByUris(listOf(image.uri.toString())) } }
 
         upload()
 
@@ -341,7 +361,7 @@ class UploadChecksumVerificationTest {
         one.bytes = "photo-D".toByteArray()
         upload()
 
-        assertEquals(1, dao.resetFailedForManualRetryIfUnchanged(one.id, one.size, one.lastModifiedMs))
+        assertEquals(1, dao.resetFailedForManualRetryIfUnchanged(one.uri.toString(), one.size, one.lastModifiedMs))
         assertEquals(1, dao.resetAllFailedForManualRetry())
 
         listOf(all, one).forEach { image ->
@@ -415,7 +435,7 @@ class UploadChecksumVerificationTest {
     private fun respond(request: RecordedRequest): MockResponse {
         if (request.path != "/api/v1/files/upload") return MockResponse().setResponseCode(404)
         val body = request.body.readByteArray()
-        val id = Regex("IMG_(\\d+)\\.jpg").find(body.toString(Charsets.ISO_8859_1))!!.groupValues[1].toLong()
+        val id = Regex("(?:IMG|VID)_(\\d+)\\.(?:jpg|mp4)").find(body.toString(Charsets.ISO_8859_1))!!.groupValues[1].toLong()
         uploads += id
         onUpload(id)
         val serverId = idByChecksum.computeIfAbsent(uploadedChecksum(body)) { nextId.getAndIncrement() }

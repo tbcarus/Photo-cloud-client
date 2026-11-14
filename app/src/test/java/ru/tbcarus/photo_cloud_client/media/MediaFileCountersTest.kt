@@ -76,7 +76,7 @@ class MediaFileCountersTest {
         assertEquals(0, afterUpload.toUpload)
         assertEquals(1, afterUpload.synced)
 
-        dao.deleteByMediaStoreIds(listOf(1))
+        dao.deleteByUris(listOf(dao.single(1).uri))
         assertEquals(MediaFileCounters(), dao.observeCounters().first())
     }
 

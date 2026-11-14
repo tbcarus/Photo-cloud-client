@@ -1,14 +1,14 @@
 package ru.tbcarus.photo_cloud_client.media
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "media_files")
+@Entity(tableName = "media_files", indices = [Index(value = ["mediaStoreId", "uri"])])
 data class MediaFile(
-    @PrimaryKey
     val mediaStoreId: Long,
     val serverFileId: Long? = null, // ID файла на сервере, null до загрузки
-    val uri: String,
+    @PrimaryKey val uri: String,
     val displayName: String,        // DISPLAY_NAME из MediaStore
     val relativePath: String?,      // RELATIVE_PATH из MediaStore (DCIM/Camera/, Pictures/…)
     val mimeType: String,
@@ -22,5 +22,6 @@ data class MediaFile(
     val lastFailureAt: Long? = null, // время последнего FAILED (ms), для cooldown
     // Подтверждённые несовпадения checksum ответа upload с локальным (Q-02). Успешный hash его не обнуляет,
     // в отличие от retryCount: иначе лимит автоматических восстановлений не действовал бы.
-    val uploadMismatchCount: Int = 0
+    val uploadMismatchCount: Int = 0,
+    val collection: MediaCollection = MediaCollection.IMAGE
 )

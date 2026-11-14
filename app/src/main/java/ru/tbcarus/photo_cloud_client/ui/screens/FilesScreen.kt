@@ -38,7 +38,7 @@ import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.hasMediaLocationPermission
-import ru.tbcarus.photo_cloud_client.media.hasMediaReadPermission
+import ru.tbcarus.photo_cloud_client.media.hasAnyMediaReadPermission
 import ru.tbcarus.photo_cloud_client.ui.components.OnResumeEffect
 import ru.tbcarus.photo_cloud_client.ui.screens.files.CameraCheckActions
 import ru.tbcarus.photo_cloud_client.ui.screens.files.CameraCheckCard
@@ -58,14 +58,14 @@ fun FilesScreen(viewModel: FilesViewModel, onOpenSettings: () -> Unit) {
     // Перечитывается при каждом возврате на экран, в том числе из Settings и настроек Android.
     var hasMediaLocation by remember { mutableStateOf(context.hasMediaLocationPermission()) }
     OnResumeEffect {
-        viewModel.onMediaAccessChecked(context.hasMediaReadPermission())
+        viewModel.onMediaAccessChecked(context.hasAnyMediaReadPermission())
         hasMediaLocation = context.hasMediaLocationPermission()
     }
 
     // Bootstrap автосинка при входе на экран (не завязан на кнопку Scan): при полном доступе к фото
     // поднимаем observer + periodic задачи через reconcile(). Системных запросов разрешений здесь нет.
     LaunchedEffect(Unit) {
-        if (viewModel.isAutoSyncConfigured() && context.hasMediaReadPermission()) {
+        if (viewModel.isAutoSyncConfigured() && context.hasAnyMediaReadPermission()) {
             viewModel.ensureAutoSyncStarted()
         }
     }

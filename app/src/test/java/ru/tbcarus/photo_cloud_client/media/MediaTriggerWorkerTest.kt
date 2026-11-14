@@ -117,9 +117,10 @@ class MediaTriggerWorkerTest {
         assertEquals(first.id, pendingWatcher().id)
         assertEquals(1, watchers().size)
         val constraints = first.constraints
-        val trigger = constraints.contentUriTriggers.single()
-        assertEquals(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, trigger.uri)
-        assertTrue(trigger.isTriggeredForDescendants)
+        val triggers = constraints.contentUriTriggers
+        assertEquals(setOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Video.Media.EXTERNAL_CONTENT_URI),
+            triggers.map { it.uri }.toSet())
+        assertTrue(triggers.all { it.isTriggeredForDescendants })
         assertEquals(3_000L, constraints.contentTriggerUpdateDelayMillis)
         assertEquals(30_000L, constraints.contentTriggerMaxDelayMillis)
         // Ни сети, ни заряда, ни других условий: от Server и входа наблюдение не зависит.
@@ -139,9 +140,10 @@ class MediaTriggerWorkerTest {
         SystemJobScheduler(context, impl.workDatabase, impl.configuration).schedule(spec)
 
         val job = context.getSystemService(JobScheduler::class.java).allPendingJobs.single()
-        val uri = job.triggerContentUris!!.single()
-        assertEquals(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, uri.uri)
-        assertEquals(JobInfo.TriggerContentUri.FLAG_NOTIFY_FOR_DESCENDANTS, uri.flags)
+        val uris = job.triggerContentUris!!.toList()
+        assertEquals(setOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, MediaStore.Video.Media.EXTERNAL_CONTENT_URI),
+            uris.map { it.uri }.toSet())
+        assertTrue(uris.all { it.flags == JobInfo.TriggerContentUri.FLAG_NOTIFY_FOR_DESCENDANTS })
         assertEquals(3_000L, job.triggerContentUpdateDelay)
         assertEquals(30_000L, job.triggerContentMaxDelay)
         assertNull(job.requiredNetwork) // сеть не требуется

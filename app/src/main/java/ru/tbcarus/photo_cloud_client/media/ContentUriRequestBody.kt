@@ -16,7 +16,8 @@ class ContentUriRequestBody(
     private val streamOpener: MediaStreamOpener,
     private val uri: Uri,
     private val mimeType: String,
-    private val size: Long
+    private val size: Long,
+    private val collection: MediaCollection = MediaCollection.IMAGE
 ) : RequestBody() {
 
     override fun contentType(): MediaType? = mimeType.toMediaTypeOrNull()
@@ -27,7 +28,8 @@ class ContentUriRequestBody(
     override fun writeTo(sink: BufferedSink) {
         // Поток открываем внутри writeTo, потому OkHttp может повторно отправить тело
         // после refresh token, и writeTo будет вызван больше одного раза.
-        val inputStream = streamOpener.open(uri)
+        val inputStream = (if (collection == MediaCollection.IMAGE) streamOpener.open(uri)
+                           else streamOpener.open(uri, collection))
             ?: throw IOException("Не удалось открыть поток для uri: $uri")
         inputStream.use { stream ->
             sink.writeAll(stream.source())

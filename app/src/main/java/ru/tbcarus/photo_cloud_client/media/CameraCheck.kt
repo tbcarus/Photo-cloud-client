@@ -73,7 +73,8 @@ enum class CameraCheckError {
 /** Строка набора проверки: версия файла и checksum, по которым спрашивается Server. */
 @Entity(tableName = "camera_check_items")
 data class CameraCheckItem(
-    @PrimaryKey val mediaStoreId: Long,
+    @PrimaryKey val uri: String,
+    val mediaStoreId: Long,
     val size: Long,
     val lastModified: Long,
     /** null — checksum ещё не получен. */

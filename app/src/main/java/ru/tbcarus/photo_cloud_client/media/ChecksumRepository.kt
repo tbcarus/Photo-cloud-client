@@ -48,7 +48,7 @@ class ChecksumRepository @Inject constructor(
             limit = RETRY_RESTORE_BATCH_SIZE
         )
         for (file in batch) {
-            mediaFileDao.resetFailedForRetry(file.mediaStoreId)
+            mediaFileDao.resetFailedForRetry(file.uri)
         }
         batch.size
     }
@@ -64,7 +64,7 @@ class ChecksumRepository @Inject constructor(
         budget: WorkBudget = WorkBudget.UNLIMITED,
         onBatchReady: suspend () -> Unit = {}
     ): ChecksumOutcome {
-        if (!context.hasMediaReadPermission()) {
+        if (!context.hasAnyMediaReadPermission()) {
             return ChecksumOutcome.PermissionDenied
         }
 
@@ -98,7 +98,8 @@ class ChecksumRepository @Inject constructor(
 
         var budgetExhausted = false
         while (!budgetExhausted) {
-            val batch = mediaFileDao.getByStatusInIdOrder(MediaFileStatus.PENDING, SyncConfig.PROVIDER_BATCH_SIZE)
+            val batch = mediaFileDao.getReadableByStatusInIdOrder(MediaFileStatus.PENDING, SyncConfig.PROVIDER_BATCH_SIZE,
+                context.hasMediaReadPermission(), context.hasVideoReadPermission())
             if (batch.isEmpty()) break
 
             var progressed = false
@@ -117,13 +118,14 @@ class ChecksumRepository @Inject constructor(
 
                 // Результат применяется только к той же HASHING-версии; сброшенная scan строка снова станет PENDING.
                 val failure: FailureReason? = try {
-                    val stream = streamOpener.open(Uri.parse(file.uri))
+                    val stream = if (file.collection == MediaCollection.IMAGE) streamOpener.open(Uri.parse(file.uri))
+                                 else streamOpener.open(Uri.parse(file.uri), file.collection)
                     if (stream == null) {
                         Log.w(TAG, "Поток не открыт (null), mediaStoreId=${file.mediaStoreId}")
                         FailureReason.FILE_NOT_FOUND
                     } else {
                         val checksum = stream.use { ChecksumUtil.sha256(it) }
-                        if (mediaFileDao.updateChecksumIfUnchanged(file.mediaStoreId, checksum, file.size, file.lastModified) > 0) {
+                        if (mediaFileDao.updateChecksumIfUnchanged(file.uri, checksum, file.size, file.lastModified) > 0) {
                             succeeded++
                         }
                         null

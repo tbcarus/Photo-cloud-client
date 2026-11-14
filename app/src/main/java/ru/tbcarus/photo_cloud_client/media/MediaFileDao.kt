@@ -55,14 +55,14 @@ interface MediaFileDao {
         UPDATE media_files
         SET status = :newStatus,
             uploadMismatchCount = CASE WHEN :newStatus = 'SYNCED' THEN 0 ELSE uploadMismatchCount END
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = :expectedStatus
           AND checksum IS :checksum
           AND size = :size
           AND lastModified = :lastModified
     """)
     suspend fun updateStatusIfUnchanged(
-        mediaStoreId: Long,
+        uri: String,
         expectedStatus: MediaFileStatus,
         newStatus: MediaFileStatus,
         checksum: String?,
@@ -79,13 +79,13 @@ interface MediaFileDao {
             failureReason = NULL,
             retryCount = 0,
             lastFailureAt = NULL
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = 'HASHING'
           AND size = :size
           AND lastModified = :lastModified
     """)
     suspend fun updateChecksumIfUnchanged(
-        mediaStoreId: Long,
+        uri: String,
         checksum: String,
         size: Long,
         lastModified: Long
@@ -101,14 +101,14 @@ interface MediaFileDao {
             failureReason = :reason,
             retryCount = retryCount + 1,
             lastFailureAt = :failureAt
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = :expectedStatus
           AND checksum IS :checksum
           AND size = :size
           AND lastModified = :lastModified
     """)
     suspend fun markFailedIfUnchanged(
-        mediaStoreId: Long,
+        uri: String,
         expectedStatus: MediaFileStatus,
         checksum: String?,
         size: Long,
@@ -146,9 +146,9 @@ interface MediaFileDao {
         SET status = 'PENDING',
             failureReason = NULL,
             lastFailureAt = NULL
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
     """)
-    suspend fun resetFailedForRetry(mediaStoreId: Long)
+    suspend fun resetFailedForRetry(uri: String)
 
     /**
      * Ручной повтор по действию пользователя: все FAILED одним UPDATE возвращаются в начало обработки —
@@ -200,19 +200,17 @@ interface MediaFileDao {
             mimeType = :mimeType,
             size = :size,
             createdAt = :createdAt,
-            lastModified = :lastModified,
-            uri = :uri
-        WHERE mediaStoreId = :mediaStoreId
+            lastModified = :lastModified
+        WHERE uri = :uri
     """)
     suspend fun applyScannedMetadata(
-        mediaStoreId: Long,
+        uri: String,
         displayName: String,
         relativePath: String?,
         mimeType: String,
         size: Long,
         createdAt: Long,
-        lastModified: Long,
-        uri: String
+        lastModified: Long
     )
 
     /**
@@ -225,14 +223,13 @@ interface MediaFileDao {
         insertAll(files)
         files.forEach { file ->
             applyScannedMetadata(
-                mediaStoreId = file.mediaStoreId,
+                uri          = file.uri,
                 displayName  = file.displayName,
                 relativePath = file.relativePath,
                 mimeType     = file.mimeType,
                 size         = file.size,
                 createdAt    = file.createdAt,
-                lastModified = file.lastModified,
-                uri          = file.uri
+                lastModified = file.lastModified
             )
         }
     }
@@ -247,14 +244,14 @@ interface MediaFileDao {
             retryCount = 0,
             lastFailureAt = NULL,
             uploadMismatchCount = 0
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = 'UPLOADING'
           AND checksum IS :checksum
           AND size = :size
           AND lastModified = :lastModified
     """)
     suspend fun markUploadedIfUnchanged(
-        mediaStoreId: Long,
+        uri: String,
         serverFileId: Long,
         checksum: String?,
         size: Long,
@@ -277,7 +274,7 @@ interface MediaFileDao {
             retryCount = CASE WHEN uploadMismatchCount < :maxRecoveries THEN retryCount ELSE retryCount + 1 END,
             lastFailureAt = CASE WHEN uploadMismatchCount < :maxRecoveries THEN NULL ELSE :failureAt END,
             uploadMismatchCount = uploadMismatchCount + 1
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = 'UPLOADING'
           AND checksum IS :checksum
           AND size = :size
@@ -285,7 +282,7 @@ interface MediaFileDao {
           AND uploadMismatchCount = :uploadMismatchCount
     """)
     suspend fun applyUploadMismatchIfUnchanged(
-        mediaStoreId: Long,
+        uri: String,
         checksum: String?,
         size: Long,
         lastModified: Long,
@@ -296,10 +293,10 @@ interface MediaFileDao {
 
     @Query("""
         UPDATE media_files SET status = 'PENDING', checksum = NULL, serverFileId = NULL
-        WHERE mediaStoreId = :mediaStoreId AND status = 'UPLOADING'
+        WHERE uri = :uri AND status = 'UPLOADING'
           AND checksum IS :checksum AND size = :size AND lastModified = :lastModified
     """)
-    suspend fun resetChangedSource(mediaStoreId: Long, checksum: String?, size: Long, lastModified: Long): Int
+    suspend fun resetChangedSource(uri: String, checksum: String?, size: Long, lastModified: Long): Int
 
     /**
      * Есть ли записи для Загрузчика: CHECKSUM_READY с checksum (pre-check), PENDING_UPLOAD (upload)
@@ -312,8 +309,8 @@ interface MediaFileDao {
     """)
     suspend fun countReadyForUpload(): Int
 
-    @Query("SELECT * FROM media_files WHERE mediaStoreId = :mediaStoreId")
-    suspend fun getById(mediaStoreId: Long): MediaFile?
+    @Query("SELECT * FROM media_files WHERE uri = :uri")
+    suspend fun getByUri(uri: String): MediaFile?
 
     /**
      * Повтор одной FAILED-записи, отобранной пользователем после ручной сверки (Q-01), — как
@@ -328,29 +325,37 @@ interface MediaFileDao {
             retryCount = 0,
             lastFailureAt = NULL,
             uploadMismatchCount = 0
-        WHERE mediaStoreId = :mediaStoreId
+        WHERE uri = :uri
           AND status = 'FAILED'
           AND size = :size
           AND lastModified = :lastModified
     """)
-    suspend fun resetFailedForManualRetryIfUnchanged(mediaStoreId: Long, size: Long, lastModified: Long): Int
+    suspend fun resetFailedForManualRetryIfUnchanged(uri: String, size: Long, lastModified: Long): Int
 
-    @Query("SELECT COUNT(*) FROM media_files WHERE mediaStoreId = :mediaStoreId")
-    suspend fun exists(mediaStoreId: Long): Int
+    @Query("SELECT COUNT(*) FROM media_files WHERE uri = :uri")
+    suspend fun exists(uri: String): Int
 
-    @Query("SELECT mediaStoreId FROM media_files")
-    suspend fun getAllMediaStoreIds(): List<Long>
+    @Query("SELECT uri FROM media_files WHERE collection = :collection")
+    suspend fun getAllUris(collection: MediaCollection): List<String>
 
-    @Query("DELETE FROM media_files WHERE mediaStoreId IN (:ids)")
-    suspend fun deleteByMediaStoreIds(ids: List<Long>)
+    @Query("DELETE FROM media_files WHERE uri IN (:uris)")
+    suspend fun deleteByUris(uris: List<String>)
 
     /**
      * Партия строк с заданным статусом в порядке FIFO по первичному ключу (A8.1): очереди хеширования
      * и upload. Выборка идёт по ключу
      * и останавливается на [limit], без сортировки всей таблицы; порядок устойчив между прогонами.
      */
-    @Query("SELECT * FROM media_files WHERE status = :status ORDER BY mediaStoreId ASC LIMIT :limit")
+    @Query("SELECT * FROM media_files WHERE status = :status ORDER BY mediaStoreId ASC, uri ASC LIMIT :limit")
     suspend fun getByStatusInIdOrder(status: MediaFileStatus, limit: Int): List<MediaFile>
+
+    @Query("""
+        SELECT * FROM media_files WHERE status = :status
+          AND ((collection = 'IMAGE' AND :imagesAllowed) OR (collection = 'VIDEO' AND :videosAllowed))
+        ORDER BY mediaStoreId ASC, uri ASC LIMIT :limit
+    """)
+    suspend fun getReadableByStatusInIdOrder(status: MediaFileStatus, limit: Int,
+                                             imagesAllowed: Boolean, videosAllowed: Boolean): List<MediaFile>
 
     @Query("SELECT COUNT(*) FROM media_files WHERE status = :status")
     suspend fun countByStatus(status: MediaFileStatus): Int
@@ -373,12 +378,22 @@ interface MediaFileDao {
         SELECT * FROM media_files
         WHERE status = :status
           AND checksum IS NOT NULL
-        ORDER BY mediaStoreId ASC
+        ORDER BY mediaStoreId ASC, uri ASC
         LIMIT :limit
     """)
     suspend fun getByStatusWithChecksumOnce(
         status: MediaFileStatus,
         limit: Int
+    ): List<MediaFile>
+
+    @Query("""
+        SELECT * FROM media_files
+        WHERE status = :status AND checksum IS NOT NULL
+          AND ((collection = 'IMAGE' AND :imagesAllowed) OR (collection = 'VIDEO' AND :videosAllowed))
+        ORDER BY mediaStoreId ASC, uri ASC LIMIT :limit
+    """)
+    suspend fun getReadableByStatusWithChecksumOnce(
+        status: MediaFileStatus, limit: Int, imagesAllowed: Boolean, videosAllowed: Boolean
     ): List<MediaFile>
 }
 
@@ -388,7 +403,7 @@ suspend fun MediaFileDao.updateStatusIfUnchanged(
     expectedStatus: MediaFileStatus,
     newStatus: MediaFileStatus
 ): Int = updateStatusIfUnchanged(
-    file.mediaStoreId, expectedStatus, newStatus, file.checksum, file.size, file.lastModified
+    file.uri, expectedStatus, newStatus, file.checksum, file.size, file.lastModified
 )
 
 /** [MediaFileDao.markFailedIfUnchanged] для версии файла из прочитанного снимка [file]. */
@@ -397,6 +412,6 @@ suspend fun MediaFileDao.markFailedIfUnchanged(
     expectedStatus: MediaFileStatus,
     reason: FailureReason
 ): Int = markFailedIfUnchanged(
-    file.mediaStoreId, expectedStatus, file.checksum, file.size, file.lastModified,
+    file.uri, expectedStatus, file.checksum, file.size, file.lastModified,
     reason, System.currentTimeMillis()
 )

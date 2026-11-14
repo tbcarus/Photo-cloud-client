@@ -44,12 +44,32 @@ class MediaPermissionRequestTest {
             arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED),
             mediaPermissionRequest
         )
+        assertArrayEquals(
+            arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED),
+            videoPermissionRequest
+        )
+    }
+
+    @Test
+    fun imageAndVideoPermissionsAreIndependent() {
+        shadowOf(context).grantPermissions(Manifest.permission.READ_MEDIA_IMAGES)
+        assertEquals(MediaAccess.FULL, context.mediaAccess())
+        assertEquals(MediaAccess.NONE, context.videoAccess())
+        shadowOf(context).grantPermissions(Manifest.permission.READ_MEDIA_VIDEO)
+        shadowOf(context).denyPermissions(Manifest.permission.READ_MEDIA_IMAGES)
+        assertEquals(MediaAccess.NONE, context.mediaAccess())
+        assertEquals(MediaAccess.FULL, context.videoAccess())
+        shadowOf(context).denyPermissions(Manifest.permission.READ_MEDIA_VIDEO)
+        shadowOf(context).grantPermissions(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+        assertEquals(MediaAccess.PARTIAL, context.videoAccess())
+        assertFalse(context.hasVideoReadPermission())
     }
 
     @Test
     @Config(sdk = [33])
     fun android13UsesReadMediaImagesWithoutPartialAccess() {
         assertArrayEquals(arrayOf(Manifest.permission.READ_MEDIA_IMAGES), mediaPermissionRequest)
+        assertArrayEquals(arrayOf(Manifest.permission.READ_MEDIA_VIDEO), videoPermissionRequest)
         // До Android 14 частичного доступа нет: посторонний USER_SELECTED не считается выбранными фото.
         shadowOf(context).grantPermissions(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
         assertEquals(MediaAccess.NONE, context.mediaAccess())
@@ -62,6 +82,7 @@ class MediaPermissionRequestTest {
     @Config(sdk = [32])
     fun android12UsesReadExternalStorage() {
         assertArrayEquals(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), mediaPermissionRequest)
+        assertArrayEquals(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), videoPermissionRequest)
         assertEquals(MediaAccess.NONE, context.mediaAccess())
 
         shadowOf(context).grantPermissions(Manifest.permission.READ_EXTERNAL_STORAGE)

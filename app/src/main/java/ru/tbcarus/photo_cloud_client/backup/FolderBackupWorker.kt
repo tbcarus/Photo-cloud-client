@@ -9,6 +9,8 @@ import androidx.work.await
 import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import javax.inject.Inject
+import ru.tbcarus.photo_cloud_client.media.AutomaticBackupNetwork
 import ru.tbcarus.photo_cloud_client.media.SyncClock
 import ru.tbcarus.photo_cloud_client.media.WorkBudget
 import kotlin.coroutines.cancellation.CancellationException
@@ -25,6 +27,7 @@ class FolderBackupWorker @AssistedInject constructor(
     private val scheduler: FolderBackupScheduler,
     private val clock: SyncClock
 ) : CoroutineWorker(appContext, params) {
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
 
     companion object {
         private const val TAG = "FolderBackupWorker"
@@ -37,6 +40,9 @@ class FolderBackupWorker @AssistedInject constructor(
         // Бюджет отсчитывается от начала прогона, проверка Server и обход тоже его расходуют.
         val budget = WorkBudget(clock)
         return try {
+            if (::automaticBackupNetwork.isInitialized && automaticBackupNetwork.current() == null) {
+                return Result.success(workDataOf(KEY_RESULT to "network_paused"))
+            }
             val run = engine.run(budget, inputData.getBoolean(KEY_FULL_SCAN, true))
                 ?: return Result.success(workDataOf(KEY_RESULT to "busy"))
             when {

@@ -261,7 +261,7 @@ class ProviderUploadEndToEndTest {
     fun permissionGrantInSettingsStartsProviderWithoutWaitingForPeriodic() = runBlocking {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         val image = media.add(image(1, "photo-1"))
-        val viewModel = SettingsViewModel(coordinator, scheduler)
+        val viewModel = SettingsViewModel(coordinator, scheduler, org.mockito.Mockito.mock(ru.tbcarus.photo_cloud_client.core.server.ServerPreferences::class.java))
 
         viewModel.onMediaPermissionGranted()
 

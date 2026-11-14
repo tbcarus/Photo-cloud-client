@@ -17,6 +17,11 @@ val mediaReadPermission: String
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
 
+val videoReadPermission: String
+    get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_VIDEO
+    } else Manifest.permission.READ_EXTERNAL_STORAGE
+
 /**
  * Разрешения системного запроса доступа к фото (Settings). На Android 14+ вместе с READ_MEDIA_IMAGES запрашивается
  * READ_MEDIA_VISUAL_USER_SELECTED, как рекомендует платформа: при выборе «выбранные фото» выдаётся
@@ -29,6 +34,11 @@ val mediaPermissionRequest: Array<String>
         arrayOf(mediaReadPermission)
     }
 
+val videoPermissionRequest: Array<String>
+    get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        arrayOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+    } else arrayOf(videoReadPermission)
+
 /**
  * true только при полном доступе к изображениям.
  * Частичный доступ Android 14+ («выбранные фото») выдаётся отдельным READ_MEDIA_VISUAL_USER_SELECTED,
@@ -36,6 +46,16 @@ val mediaPermissionRequest: Array<String>
  */
 fun Context.hasMediaReadPermission(): Boolean =
     ContextCompat.checkSelfPermission(this, mediaReadPermission) == PackageManager.PERMISSION_GRANTED
+
+fun Context.hasVideoReadPermission(): Boolean =
+    ContextCompat.checkSelfPermission(this, videoReadPermission) == PackageManager.PERMISSION_GRANTED
+
+fun Context.hasAnyMediaReadPermission(): Boolean = hasMediaReadPermission() || hasVideoReadPermission()
+
+fun Context.hasMediaReadPermission(collection: MediaCollection): Boolean = when (collection) {
+    MediaCollection.IMAGE -> hasMediaReadPermission()
+    MediaCollection.VIDEO -> hasVideoReadPermission()
+}
 
 /**
  * Необязательный доступ к геоданным фото: с ним [MediaStreamOpener] читает оригинал вместе с EXIF/GPS.
@@ -57,6 +77,14 @@ enum class MediaAccess {
 /** Полный доступ определяется тем же [hasMediaReadPermission], что проверяют scan и фоновые задачи. */
 fun Context.mediaAccess(): MediaAccess = when {
     hasMediaReadPermission() -> MediaAccess.FULL
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
+        ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
+        PackageManager.PERMISSION_GRANTED -> MediaAccess.PARTIAL
+    else -> MediaAccess.NONE
+}
+
+fun Context.videoAccess(): MediaAccess = when {
+    hasVideoReadPermission() -> MediaAccess.FULL
     Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
         ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) ==
         PackageManager.PERMISSION_GRANTED -> MediaAccess.PARTIAL

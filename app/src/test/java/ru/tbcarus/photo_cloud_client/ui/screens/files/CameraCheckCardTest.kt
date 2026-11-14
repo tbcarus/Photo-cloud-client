@@ -125,7 +125,7 @@ class CameraCheckCardTest {
             CameraCheckCounts()
         )
         show()
-        compose.onNodeWithText("Нет фотографий для проверки.").assertIsDisplayed()
+        compose.onNodeWithText("Нет файлов для проверки.").assertIsDisplayed()
         compose.onNodeWithText("Все проверенные файлы есть на сервере.").assertDoesNotExist()
     }
 }

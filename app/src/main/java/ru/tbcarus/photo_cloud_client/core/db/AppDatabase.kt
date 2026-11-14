@@ -25,6 +25,7 @@ import ru.tbcarus.photo_cloud_client.media.CameraCheckStage
 import ru.tbcarus.photo_cloud_client.media.CameraCheckState
 import ru.tbcarus.photo_cloud_client.media.FailureReason
 import ru.tbcarus.photo_cloud_client.media.MediaFile
+import ru.tbcarus.photo_cloud_client.media.MediaCollection
 import ru.tbcarus.photo_cloud_client.media.MediaFileDao
 import ru.tbcarus.photo_cloud_client.media.MediaFileStatus
 import ru.tbcarus.photo_cloud_client.media.UploadSessionRecord
@@ -35,7 +36,7 @@ import ru.tbcarus.photo_cloud_client.media.UploadSessionDao
         MediaFile::class, BackupSource::class, BackupFolder::class, BackupFile::class,
         CameraCheck::class, CameraCheckItem::class, UploadSessionRecord::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 @TypeConverters(AppDatabase.Converters::class)
@@ -51,6 +52,12 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun cameraCheckDao(): CameraCheckDao
 
     class Converters {
+        @TypeConverter
+        fun fromMediaCollection(collection: MediaCollection): String = collection.name
+
+        @TypeConverter
+        fun toMediaCollection(value: String): MediaCollection = MediaCollection.valueOf(value)
+
         @TypeConverter
         fun fromStatus(status: MediaFileStatus): String = status.name
 
@@ -197,6 +204,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `media_files` RENAME TO `media_files_old`")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `media_files` (`mediaStoreId` INTEGER NOT NULL, `serverFileId` INTEGER, `uri` TEXT NOT NULL, `displayName` TEXT NOT NULL, `relativePath` TEXT, `mimeType` TEXT NOT NULL, `size` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `lastModified` INTEGER NOT NULL, `checksum` TEXT, `status` TEXT NOT NULL, `failureReason` TEXT, `retryCount` INTEGER NOT NULL, `lastFailureAt` INTEGER, `uploadMismatchCount` INTEGER NOT NULL, `collection` TEXT NOT NULL, PRIMARY KEY(`uri`))")
+                db.execSQL("INSERT INTO `media_files` SELECT `mediaStoreId`, `serverFileId`, `uri`, `displayName`, `relativePath`, `mimeType`, `size`, `createdAt`, `lastModified`, `checksum`, `status`, `failureReason`, `retryCount`, `lastFailureAt`, `uploadMismatchCount`, 'IMAGE' FROM `media_files_old`")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_media_files_mediaStoreId_uri` ON `media_files` (`mediaStoreId`, `uri`)")
+                db.execSQL("ALTER TABLE `camera_check_items` RENAME TO `camera_check_items_old`")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `camera_check_items` (`uri` TEXT NOT NULL, `mediaStoreId` INTEGER NOT NULL, `size` INTEGER NOT NULL, `lastModified` INTEGER NOT NULL, `checksum` TEXT, `result` TEXT, PRIMARY KEY(`uri`))")
+                db.execSQL("INSERT INTO `camera_check_items` SELECT m.`uri`, c.`mediaStoreId`, c.`size`, c.`lastModified`, c.`checksum`, c.`result` FROM `camera_check_items_old` c JOIN `media_files_old` m ON m.`mediaStoreId` = c.`mediaStoreId`")
+                db.execSQL("DROP TABLE `camera_check_items_old`")
+                db.execSQL("DROP TABLE `media_files_old`")
+                db.execSQL("ALTER TABLE `upload_sessions` RENAME TO `upload_sessions_old`")
+                db.execSQL("CREATE TABLE IF NOT EXISTS `upload_sessions` (`clientRequestId` TEXT NOT NULL, `serverUrl` TEXT NOT NULL, `accountId` TEXT NOT NULL, `sourceKind` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `uri` TEXT NOT NULL, `folderId` INTEGER NOT NULL, `originalFilename` TEXT NOT NULL, `size` INTEGER NOT NULL, `lastModified` INTEGER NOT NULL, `originalMode` INTEGER NOT NULL, `checksum` TEXT NOT NULL, `serverSessionId` TEXT, `confirmedOffset` INTEGER NOT NULL, `cancelPending` INTEGER NOT NULL, `collection` TEXT NOT NULL, PRIMARY KEY(`clientRequestId`))")
+                db.execSQL("INSERT INTO `upload_sessions` SELECT `clientRequestId`, `serverUrl`, `accountId`, `sourceKind`, CASE WHEN `sourceKind` = 'CAMERA' THEN `uri` ELSE `sourceId` END, `uri`, `folderId`, `originalFilename`, `size`, `lastModified`, `originalMode`, `checksum`, `serverSessionId`, `confirmedOffset`, `cancelPending`, 'IMAGE' FROM `upload_sessions_old`")
+                db.execSQL("DROP TABLE `upload_sessions_old`")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_upload_sessions_serverUrl_accountId_sourceKind_sourceId` ON `upload_sessions` (`serverUrl`, `accountId`, `sourceKind`, `sourceId`)")
+            }
+        }
+
         private val MIGRATION_5_6_TABLES = listOf(
             "CREATE TABLE IF NOT EXISTS `backup_folders` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `sourceId` INTEGER NOT NULL, `parentId` INTEGER, `name` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `documentId` TEXT NOT NULL, `serverFolderId` INTEGER, `problem` TEXT, `seenGeneration` INTEGER NOT NULL, `listedGeneration` INTEGER NOT NULL, FOREIGN KEY(`sourceId`) REFERENCES `backup_sources`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_backup_folders_sourceId_relativePath` ON `backup_folders` (`sourceId`, `relativePath`)",
@@ -219,7 +245,7 @@ abstract class AppDatabase : RoomDatabase() {
         internal fun build(context: Context, name: String): AppDatabase =
             Room.databaseBuilder(context.applicationContext, AppDatabase::class.java, name)
                 // Без пути миграции Room отказывает в открытии БД: очередь Camera и источники не удаляются молча.
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                 .build()
     }
 }

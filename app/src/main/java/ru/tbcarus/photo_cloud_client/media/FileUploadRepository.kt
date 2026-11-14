@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.media
 
+import android.content.Context
 import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,7 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
+import dagger.hilt.android.qualifiers.ApplicationContext
 
 /**
  * Upload-слой этапа 5D.
@@ -41,6 +43,8 @@ class FileUploadRepository @Inject constructor(
 ) {
 
     @Inject lateinit var resumableUpload: ResumableUpload
+    @ApplicationContext @Inject lateinit var appContext: Context
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
 
     private val mutex = Mutex()
 
@@ -98,7 +102,9 @@ class FileUploadRepository @Inject constructor(
 
         var stopped = false
         while (!stopped) {
-            val batch = mediaFileDao.getByStatusInIdOrder(MediaFileStatus.PENDING_UPLOAD, SyncConfig.UPLOAD_BATCH_SIZE)
+            val batch = mediaFileDao.getReadableByStatusInIdOrder(MediaFileStatus.PENDING_UPLOAD, SyncConfig.UPLOAD_BATCH_SIZE,
+                !::appContext.isInitialized || appContext.hasMediaReadPermission(),
+                !::appContext.isInitialized || appContext.hasVideoReadPermission())
             if (batch.isEmpty()) break
 
             var progressed = false
@@ -114,7 +120,7 @@ class FileUploadRepository @Inject constructor(
                     break
                 }
                 // Защитно: на 5D грузим только фото.
-                if (!file.mimeType.startsWith("image/")) {
+                if (!file.mimeType.startsWith("image/") && !file.mimeType.startsWith("video/")) {
                     if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, FailureReason.NOT_IMAGE) > 0) {
                         progressed = true
                         attempted++
@@ -140,7 +146,7 @@ class FileUploadRepository @Inject constructor(
 
                 // Проверяем доступ к локальному файлу заранее — так отличаем
                 // постоянную ошибку файла от сетевой ошибки во время upload.
-                val openFailure = if (sizeClass == UploadSizeClass.MULTIPART) openFailureReason(file.uri) else null
+                val openFailure = if (sizeClass == UploadSizeClass.MULTIPART) openFailureReason(file) else null
                 if (openFailure != null) {
                     if (mediaFileDao.markFailedIfUnchanged(file, MediaFileStatus.PENDING_UPLOAD, openFailure) > 0) {
                         progressed = true
@@ -171,10 +177,10 @@ class FileUploadRepository @Inject constructor(
                                 return UploadOutcome.Error("Некорректная квитанция resumable upload", UploadResult(attempted, succeeded, failed, 1, rehashQueued))
                             }
                             if (accepted == file.checksum?.lowercase()) {
-                                if (mediaFileDao.markUploadedIfUnchanged(file.mediaStoreId, id, file.checksum, file.size, file.lastModified) > 0) succeeded++
+                                if (mediaFileDao.markUploadedIfUnchanged(file.uri, id, file.checksum, file.size, file.lastModified) > 0) succeeded++
                                 resumableUpload.forgetBySource(file)
                             } else {
-                                if (mediaFileDao.applyUploadMismatchIfUnchanged(file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                                if (mediaFileDao.applyUploadMismatchIfUnchanged(file.uri, file.checksum, file.size, file.lastModified,
                                         file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()) > 0) {
                                     if (file.uploadMismatchCount < MAX_MISMATCH_RECOVERIES) rehashQueued++ else failed++
                                 }
@@ -182,13 +188,13 @@ class FileUploadRepository @Inject constructor(
                             }
                         }
                         ResumableResult.ChecksumMismatch -> {
-                            if (mediaFileDao.applyUploadMismatchIfUnchanged(file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                            if (mediaFileDao.applyUploadMismatchIfUnchanged(file.uri, file.checksum, file.size, file.lastModified,
                                     file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()) > 0) {
                                 if (file.uploadMismatchCount < MAX_MISMATCH_RECOVERIES) rehashQueued++ else failed++
                             }
                         }
                         ResumableResult.SourceChanged -> {
-                            if (mediaFileDao.resetChangedSource(file.mediaStoreId, file.checksum, file.size, file.lastModified) > 0) rehashQueued++
+                            if (mediaFileDao.resetChangedSource(file.uri, file.checksum, file.size, file.lastModified) > 0) rehashQueued++
                         }
                         ResumableResult.Progress -> {
                             mediaFileDao.updateStatusIfUnchanged(file, MediaFileStatus.UPLOADING, MediaFileStatus.PENDING_UPLOAD)
@@ -237,7 +243,7 @@ class FileUploadRepository @Inject constructor(
                         // Идемпотентный ответ сервера (существующий FileItem) — тоже success.
                         // Если фото изменилось во время отправки, строка остаётся за Поставщиком: новая версия пройдёт заново.
                         if (mediaFileDao.markUploadedIfUnchanged(
-                                file.mediaStoreId, id, file.checksum, file.size, file.lastModified
+                                file.uri, id, file.checksum, file.size, file.lastModified
                             ) > 0
                         ) {
                             succeeded++
@@ -246,7 +252,7 @@ class FileUploadRepository @Inject constructor(
                         // Server сохранил другое содержимое: повторный hash и pre-check найдут его без новой передачи.
                         Log.w(TAG, "checksum ответа upload не совпал с локальным, mediaStoreId=${file.mediaStoreId}")
                         if (mediaFileDao.applyUploadMismatchIfUnchanged(
-                                file.mediaStoreId, file.checksum, file.size, file.lastModified,
+                                file.uri, file.checksum, file.size, file.lastModified,
                                 file.uploadMismatchCount, MAX_MISMATCH_RECOVERIES, System.currentTimeMillis()
                             ) > 0
                         ) {
@@ -294,22 +300,29 @@ class FileUploadRepository @Inject constructor(
     ): Response<FileItemDto> {
         val filePart = createFilePart(file)
         try {
-            return apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
+            return fileService().uploadFile(filePart, folderIdPart).execute()
         } catch (e: IOException) {
             Log.w(TAG, "Сетевая ошибка upload, mediaStoreId=${file.mediaStoreId}: ${e.javaClass.name}: ${e.message}")
             currentCoroutineContext().ensureActive()
             if (budget.isExhausted()) throw e
         }
         // Retrofit Call одноразовый — для повтора нужен новый.
-        return apiServiceFactory.authFileService().uploadFile(filePart, folderIdPart).execute()
+        return fileService().uploadFile(filePart, folderIdPart).execute()
     }
+
+    private suspend fun fileService() = if (::automaticBackupNetwork.isInitialized) {
+        val network = automaticBackupNetwork.current() ?: throw IOException("Нет разрешённой сети для Camera backup")
+        apiServiceFactory.authFileService(network)
+    } else apiServiceFactory.authFileService()
 
     /**
      * null — поток к файлу открывается; иначе конкретная permanent-причина FAILED.
      * Различаем отсутствие файла и отзыв доступа для дальнейшего показа в UI.
      */
-    private fun openFailureReason(uriString: String): FailureReason? = try {
-        val opened = streamOpener.open(Uri.parse(uriString))?.use { true } ?: false
+    private fun openFailureReason(file: MediaFile): FailureReason? = try {
+        val uri = Uri.parse(file.uri)
+        val opened = (if (file.collection == MediaCollection.IMAGE) streamOpener.open(uri)
+                      else streamOpener.open(uri, file.collection))?.use { true } ?: false
         if (opened) null else FailureReason.FILE_NOT_FOUND
     } catch (e: FileNotFoundException) {
         FailureReason.FILE_NOT_FOUND
@@ -319,7 +332,7 @@ class FileUploadRepository @Inject constructor(
 
     private fun createFilePart(file: MediaFile): MultipartBody.Part {
         val uri = Uri.parse(file.uri)
-        val body = ContentUriRequestBody(streamOpener, uri, file.mimeType, file.size)
+        val body = ContentUriRequestBody(streamOpener, uri, file.mimeType, file.size, file.collection)
         val filename = file.displayName.ifBlank { "file_${file.mediaStoreId}" }
         return MultipartBody.Part.createFormData("file", filename, body)
     }

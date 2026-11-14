@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.core.server
 
+import android.net.Network
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
@@ -12,8 +13,9 @@ import javax.inject.Singleton
 class ServerRepository @Inject constructor(
     private val apiServiceFactory: ApiServiceFactory
 ) {
-    suspend fun testConnection(baseUrl: String): Result<String> {
-        val api = apiServiceFactory.plainTestService(baseUrl)
+    suspend fun testConnection(baseUrl: String, network: Network? = null): Result<String> {
+        val api = if (network == null) apiServiceFactory.plainTestService(baseUrl)
+                  else apiServiceFactory.plainTestService(baseUrl, network)
 
         return withContext(Dispatchers.IO) {
             try {

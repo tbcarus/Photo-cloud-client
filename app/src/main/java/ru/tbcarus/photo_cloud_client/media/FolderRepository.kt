@@ -1,5 +1,6 @@
 package ru.tbcarus.photo_cloud_client.media
 
+import android.net.Network
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import ru.tbcarus.photo_cloud_client.core.network.ApiErrorParser
@@ -22,9 +23,11 @@ class FolderRepository @Inject constructor(
      * Получает ID CAMERA; сервер создаёт папку, если её ещё нет. Запрос идемпотентен.
      * ID живёт только в пределах прогона: устаревший заменит запрос следующего прогона.
      */
-    suspend fun resolveCameraFolderId(): CameraFolderOutcome = withContext(Dispatchers.IO) {
+    suspend fun resolveCameraFolderId(network: Network? = null): CameraFolderOutcome = withContext(Dispatchers.IO) {
         try {
-            val response = apiServiceFactory.authFolderService().getOrCreateCamera().execute()
+            val service = if (network == null) apiServiceFactory.authFolderService()
+                          else apiServiceFactory.authFolderService(network)
+            val response = service.getOrCreateCamera().execute()
             if (!response.isSuccessful) {
                 return@withContext CameraFolderOutcome.Error(ApiErrorParser.parse(response))
             }

@@ -65,8 +65,8 @@ interface CameraCheckDao {
      * относится к текущей версии файла; PENDING и HASHING получат его от Поставщика.
      */
     @Query("""
-        INSERT INTO camera_check_items (mediaStoreId, size, lastModified, checksum, result)
-        SELECT mediaStoreId, size, lastModified,
+        INSERT INTO camera_check_items (uri, mediaStoreId, size, lastModified, checksum, result)
+        SELECT uri, mediaStoreId, size, lastModified,
                CASE WHEN status IN ('CHECKSUM_READY', 'PENDING_UPLOAD', 'UPLOADING', 'SYNCED', 'FAILED')
                     THEN checksum END,
                NULL
@@ -78,38 +78,39 @@ interface CameraCheckDao {
     /** Строки без checksum после [after] в порядке ключа: проход не возвращается к ожидающим Поставщика. */
     @Query("""
         SELECT * FROM camera_check_items
-        WHERE checksum IS NULL AND result IS NULL AND mediaStoreId > :after
-        ORDER BY mediaStoreId ASC LIMIT :limit
+        WHERE checksum IS NULL AND result IS NULL
+          AND (mediaStoreId > :afterId OR (mediaStoreId = :afterId AND uri > :afterUri))
+        ORDER BY mediaStoreId ASC, uri ASC LIMIT :limit
     """)
-    suspend fun itemsWithoutChecksum(after: Long, limit: Int): List<CameraCheckItem>
+    suspend fun itemsWithoutChecksum(afterId: Long, afterUri: String, limit: Int): List<CameraCheckItem>
 
     @Query("SELECT COUNT(*) FROM camera_check_items WHERE checksum IS NULL AND result IS NULL")
     suspend fun countWithoutChecksum(): Int
 
     @Query("""
         UPDATE camera_check_items SET checksum = :checksum, size = :size, lastModified = :lastModified
-        WHERE mediaStoreId = :mediaStoreId AND checksum IS NULL AND result IS NULL
+        WHERE uri = :uri AND checksum IS NULL AND result IS NULL
     """)
-    suspend fun setItemChecksum(mediaStoreId: Long, checksum: String, size: Long, lastModified: Long): Int
+    suspend fun setItemChecksum(uri: String, checksum: String, size: Long, lastModified: Long): Int
 
     /** Результат записывается один раз: повтор партии строку с результатом не меняет. */
-    @Query("UPDATE camera_check_items SET result = :result WHERE mediaStoreId = :mediaStoreId AND result IS NULL")
-    suspend fun setItemResult(mediaStoreId: Long, result: CameraCheckResult): Int
+    @Query("UPDATE camera_check_items SET result = :result WHERE uri = :uri AND result IS NULL")
+    suspend fun setItemResult(uri: String, result: CameraCheckResult): Int
 
-    @Query("DELETE FROM camera_check_items WHERE mediaStoreId = :mediaStoreId")
-    suspend fun deleteItem(mediaStoreId: Long)
+    @Query("DELETE FROM camera_check_items WHERE uri = :uri")
+    suspend fun deleteItem(uri: String)
 
     @Query("""
         SELECT * FROM camera_check_items
         WHERE checksum IS NOT NULL AND result IS NULL
-        ORDER BY mediaStoreId ASC LIMIT :limit
+        ORDER BY mediaStoreId ASC, uri ASC LIMIT :limit
     """)
     suspend fun itemsAwaitingServer(limit: Int): List<CameraCheckItem>
 
     @Query("SELECT COUNT(*) FROM camera_check_items WHERE checksum IS NOT NULL AND result IS NULL")
     suspend fun countAwaitingServer(): Int
 
-    @Query("SELECT * FROM camera_check_items WHERE result = 'MISSING' ORDER BY mediaStoreId ASC")
+    @Query("SELECT * FROM camera_check_items WHERE result = 'MISSING' ORDER BY mediaStoreId ASC, uri ASC")
     suspend fun missingItems(): List<CameraCheckItem>
 
     @Query(CAMERA_CHECK_COUNTS)

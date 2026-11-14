@@ -28,7 +28,7 @@ class MediaTriggerWorker @AssistedInject constructor(
     override fun doWork(): Result {
         // Без полного доступа наблюдение прекращается: следующее ожидание не ставится.
         // Его восстановят reconcile или periodic Поставщика после выдачи разрешения.
-        if (!applicationContext.hasMediaReadPermission()) {
+        if (!applicationContext.hasAnyMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — наблюдение MediaStore остановлено")
             return Result.success()
         }

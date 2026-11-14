@@ -10,6 +10,7 @@ import androidx.work.await
 import androidx.work.workDataOf
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
+import javax.inject.Inject
 import ru.tbcarus.photo_cloud_client.core.server.ServerRepository
 import ru.tbcarus.photo_cloud_client.core.storage.TokenStorage
 import ru.tbcarus.photo_cloud_client.di.BaseUrlProvider
@@ -40,6 +41,7 @@ class UploadWorker @AssistedInject constructor(
     private val clock: SyncClock,
     private val cameraCheck: CameraCheckRepository
 ) : CoroutineWorker(appContext, params) {
+    @Inject lateinit var automaticBackupNetwork: AutomaticBackupNetwork
 
     companion object {
         private const val TAG = "UploadWorker"
@@ -109,9 +111,13 @@ class UploadWorker @AssistedInject constructor(
             // Отсутствие адреса UI проверяет по сохранённым настройкам: это не недоступность Server, итог не пишется.
             return Result.retry()
         }
+        val allowedNetwork = if (::automaticBackupNetwork.isInitialized) automaticBackupNetwork.current() else null
+        if (::automaticBackupNetwork.isInitialized && allowedNetwork == null) {
+            return Result.success(workDataOf(STOP_REASON_KEY to "network_paused"))
+        }
         // Быстрая проверка доступности сервера через существующую тестовую ручку (GET /api/v1/test).
         // Если сервер недоступен — не гоняем pre-check и upload впустую в timeout, а сразу просим повтор.
-        if (serverRepository.testConnection(baseUrl).isFailure) {
+        if (serverRepository.testConnection(baseUrl, allowedNetwork).isFailure) {
             Log.w(TAG, "Сервер недоступен — откладываем загрузку")
             cameraCheck.markServerError(CameraCheckError.SERVER_UNAVAILABLE)
             return retryWith(SyncStatus.SERVER_UNAVAILABLE)
@@ -119,14 +125,14 @@ class UploadWorker @AssistedInject constructor(
 
         // Upload читает исходные файлы: без общего доступа каждая строка ушла бы в постоянный FAILED(PERMISSION).
         // Фоновый worker не может запросить разрешение — очередь не трогаем, без retry.
-        if (!applicationContext.hasMediaReadPermission()) {
+        if (!applicationContext.hasAnyMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — загрузка пропущена, очередь сохранена")
             cameraCheck.markServerError(CameraCheckError.NO_MEDIA_PERMISSION)
             return Result.success()
         }
 
         // ID Camera нужен до первого файла: без него очередь ждёт повтора, файлы не отправляются и не становятся FAILED.
-        val cameraFolderId = when (val folder = folderRepository.resolveCameraFolderId()) {
+        val cameraFolderId = when (val folder = folderRepository.resolveCameraFolderId(allowedNetwork)) {
             is CameraFolderOutcome.Success -> folder.folderId
             is CameraFolderOutcome.Error -> {
                 Log.w(TAG, "Не удалось получить папку Camera — откладываем загрузку: ${folder.message}")

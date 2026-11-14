@@ -76,7 +76,7 @@ class ProviderWorker @AssistedInject constructor(
 
     private suspend fun runProvider(budget: WorkBudget): Result {
         // Фоновый worker не может запросить runtime-разрешение — это не crash и не retry.
-        if (!applicationContext.hasMediaReadPermission()) {
+        if (!applicationContext.hasAnyMediaReadPermission()) {
             Log.w(TAG, "Нет полного доступа к фото — локальная обработка пропущена")
             cameraCheck.markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
             return Result.success()
@@ -92,7 +92,7 @@ class ProviderWorker @AssistedInject constructor(
 
         // Проверка, запущенная до этого scan, примет его как свой: снимок начат уже после запуска.
         val checkRunId = cameraCheck.runAwaitingScan()
-        val scan = when (val outcome = mediaFileRepository.scanImages()) {
+        val scan = when (val outcome = mediaFileRepository.scanCameraMedia()) {
             is ScanOutcome.Success -> outcome.result
             is ScanOutcome.PermissionDenied -> {
                 cameraCheck.markLocalError(CameraCheckError.NO_MEDIA_PERMISSION)
